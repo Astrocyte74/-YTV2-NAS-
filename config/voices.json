@@ -1,0 +1,78 @@
+{
+  "tts_providers": {
+    "google": {
+      "enabled": true,
+      "api_key_env": "GOOGLE_CLOUD_API_KEY",
+      "voices": {
+        "en-US-Standard-A": {
+          "name": "US English (Female)",
+          "gender": "female",
+          "language": "en-US",
+          "sample_rate": 22050
+        },
+        "en-US-Standard-B": {
+          "name": "US English (Male)", 
+          "gender": "male",
+          "language": "en-US",
+          "sample_rate": 22050
+        },
+        "en-US-Neural2-A": {
+          "name": "US English Neural (Female)",
+          "gender": "female", 
+          "language": "en-US",
+          "sample_rate": 24000,
+          "premium": true
+        },
+        "en-US-Neural2-B": {
+          "name": "US English Neural (Male)",
+          "gender": "male",
+          "language": "en-US", 
+          "sample_rate": 24000,
+          "premium": true
+        }
+      }
+    },
+    "openai": {
+      "enabled": true,
+      "api_key_env": "OPENAI_API_KEY",
+      "voices": {
+        "alloy": {
+          "name": "Alloy (Neutral)",
+          "description": "Balanced and natural"
+        },
+        "echo": {
+          "name": "Echo (Male)",
+          "description": "Deep and resonant"
+        },
+        "fable": {
+          "name": "Fable (British)",
+          "description": "Expressive British accent"
+        },
+        "onyx": {
+          "name": "Onyx (Deep Male)", 
+          "description": "Deep and authoritative"
+        },
+        "nova": {
+          "name": "Nova (Female)",
+          "description": "Warm and friendly"
+        },
+        "shimmer": {
+          "name": "Shimmer (Soft Female)",
+          "description": "Soft and gentle"
+        }
+      }
+    }
+  },
+  "default_settings": {
+    "provider": "openai",
+    "voice": "nova",
+    "speed": 1.0,
+    "pitch": 0,
+    "volume_gain_db": 0
+  },
+  "user_preferences": {
+    "auto_generate_audio": false,
+    "audio_format": "mp3",
+    "quality": "standard"
+  }
+}

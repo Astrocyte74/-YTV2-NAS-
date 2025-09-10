@@ -1,0 +1,212 @@
+#!/bin/sh
+#
+# MKPY CLI TOOL - YouTube Bot Management Script
+# 
+# To update this script after making changes:
+#   sudo cp /volume1/Docker/YTV2/mkpy /usr/local/bin/mkpy
+#   sudo chmod +x /usr/local/bin/mkpy
+#
+echo "🤖 MKPY CLI TOOL - YouTube Bot Management"
+echo ""
+echo "🔄 RESTART OPTIONS:"
+echo "  3) Quick Restart YouTube Bot (⚡ ~10s, for File Manager uploads)"
+echo "  4) Full Restart YouTube Bot (🔄 ~3min, for SMB/direct edits)"
+echo ""
+echo "📊 MONITORING:"
+echo "  2) Check Status (container + ngrok)"
+echo "  5) Show Live Logs"
+echo ""
+echo "🌐 NGROK:"
+echo "  1) Restart NGROK"
+echo "  6) Show NGROK Config"
+echo ""
+echo "⚙️  SYSTEM:"
+echo "  7) Update MKPY Script"
+echo "  8) Container Health Check"
+echo "  0) Exit"
+
+printf "Choice: "
+read choice
+echo "You chose: $choice"
+case $choice in
+  1) echo "Restarting NGROK..."; pkill ngrok 2>/dev/null || true; sleep 1; ngrok http --domain=chief-inspired-lab.ngrok-free.app 6452 > /dev/null 2>&1 & echo "Done!" ;;
+  2) echo "📊 System Status Check..."
+     echo ""
+     echo "🤖 YouTube Bot Container:"
+     if sudo docker ps | grep youtube-summarizer-bot > /dev/null; then
+         echo "  ✅ RUNNING"
+         sudo docker ps --filter name=youtube-summarizer-bot --format "     Port: {{.Ports}} | Status: {{.Status}}"
+     else
+         echo "  ❌ NOT RUNNING"
+         echo "     Use option 3 or 4 to restart"
+     fi
+     echo ""
+     echo "🌐 NGROK Tunnel:"
+     if ps aux | grep -v grep | grep ngrok > /dev/null; then
+         echo "  ✅ RUNNING"
+         curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | cut -d'"' -f4 | sed 's/^/     URL: /' || echo "     URL: https://chief-inspired-lab.ngrok-free.app"
+     else
+         echo "  ❌ NOT RUNNING"
+         echo "     Use option 1 to restart"
+     fi
+     echo ""
+     echo "🔗 Quick Access:"
+     echo "     Local:  http://192.168.4.54:6452/"
+     echo "     Remote: https://chief-inspired-lab.ngrok-free.app/" ;;
+  3) echo "Quick Restart YouTube Bot (simple stop/start)..."
+     echo "💡 Best for: Code changes uploaded via ASUSTOR File Manager"
+     echo "⚡ Fast restart (~10 seconds)"
+     echo ""
+     sudo fuser -k 6452/tcp 2>/dev/null || true
+     sudo docker stop youtube-summarizer-bot
+     sudo docker wait youtube-summarizer-bot 2>/dev/null || true
+     
+     echo "Waiting for container cleanup..."
+     sleep 3
+     
+     echo "Waiting for port 6452 to be released..."
+     sleep 1
+     
+     echo "Starting container..."
+     sudo docker start youtube-summarizer-bot
+     
+     echo "✅ YouTube Bot restarted! Monitoring logs continuously..."
+     echo "Press Ctrl+C to exit log monitoring"
+     echo "----------------------------------------"
+     sudo docker logs -f youtube-summarizer-bot --since=10s ;;
+
+  4) echo "Full Restart YouTube Bot (rebuild container)..."
+     echo "💡 Best for: SMB/direct file edits, dependency changes, troubleshooting"
+     echo "🔄 Complete rebuild (~3 minutes)"
+     echo ""
+     echo "Step 1: Killing processes on port 6452..."
+     sudo fuser -k 6452/tcp 2>/dev/null || true
+     
+     echo "Step 2: Stopping container gracefully..."
+     sudo docker stop youtube-summarizer-bot --time=10
+     
+     echo "Step 3: Waiting for complete shutdown..."
+     sudo docker wait youtube-summarizer-bot 2>/dev/null || true
+     
+     echo "Step 4: Removing container to force fresh start..."
+     sudo docker rm youtube-summarizer-bot 2>/dev/null || true
+     
+     echo "Step 5: Clearing Python cache in project directory..."
+     find /volume1/Docker/YTV2 -name "*.pyc" -delete 2>/dev/null || true
+     find /volume1/Docker/YTV2 -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+     
+     echo "Step 6: Waiting for port release..."
+     sleep 5
+     
+     echo "Step 7: Starting fresh container..."
+     cd /volume1/Docker/YTV2
+     sudo docker run -d --name youtube-summarizer-bot \
+       --restart unless-stopped \
+       --env-file .env.nas \
+       -v /volume1/Docker/YTV2:/app \
+       -v youtube-bot-downloads:/app/downloads \
+       -v youtube-bot-cache:/app/cache \
+       -v youtube-bot-logs:/app/logs \
+       -p 6452:6452 \
+       python:3.11-slim /bin/bash -c "cd /app && pip install -r requirements.txt && python telegram_bot.py"
+     
+     echo "Step 8: Monitoring startup..."
+     sleep 3
+     echo "Container status:"
+     sudo docker ps | grep youtube-summarizer-bot || echo "Container not found!"
+     
+     echo "✅ YouTube Bot rebuilt! Monitoring logs continuously..."
+     echo "Press Ctrl+C to exit log monitoring"  
+     echo "----------------------------------------"
+     sudo docker logs -f youtube-summarizer-bot --since=30s ;;
+
+  5) echo "Showing Portainer logs (last 50 lines, live)..."
+     echo "Press Ctrl+C to exit"
+     sudo docker logs -f --tail=50 youtube-summarizer-bot ;;
+
+  6) echo "NGROK Configuration:"
+     echo "  Auto-start script: /usr/local/etc/init.d/S99ngrok"
+     if [ -f "/usr/local/etc/init.d/S99ngrok" ]; then
+         echo "  Auto-start status: ✅ INSTALLED"
+     else
+         echo "  Auto-start status: ❌ NOT FOUND"
+     fi
+     echo "  Static domain: https://chief-inspired-lab.ngrok-free.app"
+     echo "  Current status:"
+     if ps aux | grep -v grep | grep ngrok > /dev/null; then
+         echo "    🟢 ngrok is RUNNING"
+         curl -s http://localhost:4040/api/tunnels 2>/dev/null | grep -o '"public_url":"[^"]*"' | cut -d'"' -f4 | sed 's/^/    URL: /'
+     else
+         echo "    🔴 ngrok is NOT RUNNING"
+         echo "    Run option 1 to start"
+     fi ;;
+
+  7) echo "⚙️  Update MKPY Script Options..."
+     echo ""
+     echo "Choose update method:"
+     echo "  a) Auto-update from /volume1/Docker/YTV2/mkpy (recommended)"
+     echo "  b) Manual commands only (show copy/paste commands)"
+     echo "  c) Cancel"
+     echo ""
+     printf "Update choice (a/b/c): "
+     read update_choice
+     
+     case $update_choice in
+       a|A) echo ""
+            echo "🔄 Auto-updating MKPY script..."
+            if [ -f "/volume1/Docker/YTV2/mkpy" ]; then
+                sudo cp /volume1/Docker/YTV2/mkpy /usr/local/bin/mkpy
+                if [ $? -eq 0 ]; then
+                    sudo chmod +x /usr/local/bin/mkpy
+                    echo "✅ MKPY script updated successfully!"
+                    echo "   Source: /volume1/Docker/YTV2/mkpy"
+                    echo "   Target: /usr/local/bin/mkpy"
+                    echo "   Changes are now active system-wide"
+                else
+                    echo "❌ Failed to copy MKPY script"
+                fi
+            else
+                echo "❌ Source file not found: /volume1/Docker/YTV2/mkpy"
+                echo "   Make sure you're editing the correct location"
+            fi ;;
+            
+       b|B) echo ""
+            echo "📋 Manual Update Commands:"
+            echo ""
+            echo "# Copy the updated script to system location:"
+            echo "sudo cp /volume1/Docker/YTV2/mkpy /usr/local/bin/mkpy"
+            echo ""
+            echo "# Make it executable:"
+            echo "sudo chmod +x /usr/local/bin/mkpy"
+            echo ""
+            echo "# Verify update worked:"
+            echo "mkpy"
+            echo ""
+            echo "💡 Copy and paste these commands one by one" ;;
+            
+       c|C) echo "Update cancelled." ;;
+       *) echo "Invalid choice. Update cancelled." ;;
+     esac ;;
+
+  8) echo "🏥 Container Health Check..."
+     echo ""
+     echo "📊 Container Status:"
+     sudo docker ps -a --filter name=youtube-summarizer-bot --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.RunningFor}}"
+     echo ""
+     echo "💾 Resource Usage:"
+     sudo docker stats youtube-summarizer-bot --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}"
+     echo ""
+     echo "🌐 Network Test:"
+     curl -s -o /dev/null -w "Local Web Server: %{http_code} (response time: %{time_total}s)\n" http://localhost:6452/health || echo "❌ Local web server not responding"
+     echo ""
+     echo "📁 File System:"
+     echo "Project directory: $(ls -la /volume1/Docker/YTV2/telegram_bot.py | awk '{print $6, $7, $8, $9}')"
+     echo "Log files: $(find /volume1/Docker/YTV2 -name "*.log" -type f | wc -l) files"
+     echo "Export files: $(find /volume1/Docker/YTV2/exports -name "*.html" -type f 2>/dev/null | wc -l) HTML reports"
+     echo ""
+     echo "🔍 Recent Errors (last 10 lines):"
+     sudo docker logs youtube-summarizer-bot --tail=10 2>/dev/null | grep -i "error\|exception\|failed\|traceback" || echo "  ✅ No recent errors found" ;;
+
+  0) echo "Goodbye!"; exit 0 ;;
+  *) echo "Invalid choice" ;;
+esac

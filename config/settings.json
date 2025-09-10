@@ -1,0 +1,28 @@
+{
+  "telegram": {
+    "allowed_users": [],
+    "max_message_length": 4096,
+    "enable_model_switching": true
+  },
+  "reports": {
+    "retention_hours": 168,
+    "export_format": "json",
+    "generate_html": false,
+    "legacy_html_support": true
+  },
+  "models": {
+    "default_provider": "openai", 
+    "default_model": "gpt-4",
+    "fallback_model": "gpt-3.5-turbo"
+  },
+  "web_server": {
+    "port": 6452,
+    "enable_dashboard": true,
+    "auto_open_browser": false
+  },
+  "audio": {
+    "enable_tts": true,
+    "default_voice": "en-US-Standard-A",
+    "audio_format": "mp3"
+  }
+}

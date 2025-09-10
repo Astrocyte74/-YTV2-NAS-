@@ -1,0 +1,102 @@
+{
+  "metadata": {
+    "schema_version": "1.0.0",
+    "generated_at": "2025-09-06T06:37:09.436586",
+    "report_id": "WHqxBlFuIXA_4c8a2e"
+  },
+  "video": {
+    "url": "https://www.youtube.com/watch?v=WHqxBlFuIXA",
+    "video_id": "WHqxBlFuIXA",
+    "title": "How a Traded-In Apple iPhone Gets Refurbished | WSJ",
+    "channel": "The Wall Street Journal",
+    "channel_id": "",
+    "duration": 333,
+    "duration_string": "5:33",
+    "view_count": 4092578,
+    "like_count": 0,
+    "upload_date": "20230315",
+    "description": "So you just traded in your used Apple iPhone 11 at your wireless carrier to get a deal on a brand new iPhone 14. Where does that old phone go? How do companies make money on it?\n\nWSJ’s Joanna Stern heads to a U.S. Mobile Phones facility in New Jersey following an iPhone 11 through the refurbished process to explain how the second-hand phone market is a booming business.\n\n0:00 Used and refurbished phones in North America\n 0:44 Second-hand facilities \n1:32 Data erasure and triage \n2:23 Cleaning and grading \n2:52 Kitting and selling\n\nTech Things With Joanna Stern\nEverything is now a tech thing. In creative and humorous videos, WSJ senior personal tech columnist Joanna Stern explains and reviews the products, services and trends that are changing our world.\n\n#Apple #Refurbished #WSJ",
+    "tags": [
+      "apple",
+      "applie iphone",
+      "used iphone",
+      "used iphone market",
+      "refurbished iphone",
+      "refurbished market",
+      "refurbished iphone market",
+      "how a traded-in apple iphone gets refurbished",
+      "trade in iphone",
+      "kitting",
+      "cleaning",
+      "triage",
+      "iphone 14",
+      "used phone market",
+      "trade in refurbished",
+      "refurbished iphone process",
+      "apple refurbished iphone",
+      "wsj",
+      "joanna stern",
+      "tech things with joanna stern",
+      "tech things",
+      "wireless carrier",
+      "u.s. mobile phones facility",
+      "apple iphone 11",
+      "grading",
+      "selling",
+      "erasure",
+      "iphone",
+      "techy"
+    ],
+    "categories": [],
+    "thumbnail": "https://i.ytimg.com/vi_webp/WHqxBlFuIXA/maxresdefault.webp",
+    "language": "",
+    "subtitles_available": false
+  },
+  "summary": {
+    "content": {
+      "summary": "Trade-in phones now power a $64.5 billion secondhand market, with 73.5 million used and refurbished devices shipped in North America in 2022. The key takeaway is simple: carriers, refurbishers, and buyers largely win, and even phone makers can benefit indirectly, while brand-new device sales face some pressure.\n\nFirst, let’s follow where a traded-in iPhone actually goes. Carriers send tens of thousands of devices a week to refurbishers like US Mobile Phones in New Jersey, mostly iPhones. Some units get exported to wholesalers abroad. Others are cleaned up and resold directly to consumers through marketplaces like Amazon and Back Market.\n\nThe process starts with data erasure. Specialized software wipes personal information, then the phone is put through a battery of functional tests. Screens are checked for color accuracy, touch response, and shadows. Buttons, cameras, flash, speakers, microphones, and cellular calls are verified. Only working phones move forward.\n\nNext comes cosmetic rehab. Technicians use toothbrushes, microfiber cloths, sponges, and sanitizer to clean every crevice. Each device is then graded on appearance—front glass, housing, and back glass—so pricing matches condition. An “A” grade means light wear and strong resale value.\n\nFrom there, the phone is “kitted.” It’s boxed with a charging cable and substantial padding designed to survive drops in transit. A sister brand, Back in the Box, handles consumer sales on marketplaces, where presentation and safe delivery matter for ratings and returns.\n\nWhen it comes to pricing, the economics are revealing. A 128-gigabyte iPhone 11 can still be found new at some retailers for around $500. Refurbishers generally target a 20 to 30 percent discount versus new, and aim for 10 to 15 percent margins. In one example, Apple’s trade-in value on an iPhone 11 is $200. The refurbisher bought that same model from a carrier for about $250, listed it for $350 on Back Market, and paid a 10 percent marketplace fee. That leaves roughly $315 back to the seller and about $65 in gross spread before labor, accessories, shipping materials, and the losses from units with defects like weak batteries. The profits from clean, “A” grade phones have to cover the duds.\n\nSo who gains? Carriers win by moving customers into new devices via trade-ins. Refurbishers earn a margin by restoring and reselling. Consumers get a tested phone for less money, and the environment benefits when devices stay in circulation. The potential loser is demand for brand-new models. Even so, Apple can still benefit as more refurbished iPhones expand the user base, services revenue, and ecosystem lock-in, especially in developing markets.\n\nSo what’s the bottom line? If you’re trading in, expect convenience but a lower payout—around $200 for an iPhone 11 in good shape in this example. If you’re buying, a properly graded, refurbished iPhone 11 at about $350 undercuts the roughly $500 new price by 20 to 30 percent, which is solid value if you’re comfortable with light wear and marketplace support. For the best cost-benefit, buy from reputable sellers, verify the grade and return policy, and look for clear testing standards and included accessories.",
+      "headline": "Inside New Jersey iPhone refurb facility processing tens of thousands weekly in a $64.5B market",
+      "summary_type": "audio",
+      "generated_at": "2025-09-06T06:37:01.431088"
+    },
+    "type": "comprehensive",
+    "analysis": {
+      "category": [
+        "Technology",
+        "Business"
+      ],
+      "sentiment": "Neutral",
+      "target_audience": "Consumers considering phone trade-ins or refurbished purchases, tech enthusiasts, and people interested in the smartphone resale/refurbishment market",
+      "complexity_level": "Intermediate",
+      "key_topics": [
+        "refurbishment process",
+        "secondhand phone market",
+        "trade-in programs",
+        "device testing and grading",
+        "pricing and margins"
+      ],
+      "content_type": "Documentary",
+      "educational_value": "High",
+      "entertainment_value": "Medium"
+    },
+    "key_points": [],
+    "topics": [],
+    "sentiment": {},
+    "quality_score": 0,
+    "word_count": 520
+  },
+  "processing": {
+    "llm_provider": "openai",
+    "model": "gpt-5"
+  },
+  "stats": {
+    "video_length_seconds": 333,
+    "video_length_minutes": 5.5,
+    "summary_word_count": 520,
+    "summary_character_count": 3419,
+    "compression_ratio": 4.333,
+    "has_analysis": true,
+    "has_key_points": false,
+    "topic_count": 0
+  }
+}

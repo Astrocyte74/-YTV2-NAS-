@@ -1,0 +1,76 @@
+{
+  "metadata": {
+    "schema_version": "1.0.0",
+    "generated_at": "2025-09-06T02:14:40.760069",
+    "report_id": "rVhw7C82Lhg_fba971"
+  },
+  "video": {
+    "url": "https://www.youtube.com/watch?v=rVhw7C82Lhg",
+    "video_id": "rVhw7C82Lhg",
+    "title": "New Google Stitch Update Is INSANE (FREE!) 🤯",
+    "channel": "Julian Goldie SEO",
+    "channel_id": "",
+    "duration": 624,
+    "duration_string": "10:24",
+    "view_count": 22087,
+    "like_count": 0,
+    "upload_date": "20250905",
+    "description": "Want to get more customers, make more profit & save 100s of hours with AI? https://go.juliangoldie.com/ai-profit-boardroom\n\nGet a FREE AI Course + Community +1,000 AI Agents 👉 https://www.skool.com/ai-seo-with-julian-goldie-1553/about\n\n🤖 Need AI Automation Services? Book a FREE AI Discovery Session Here: https://juliangoldieaiautomation.com/\n\n🚀 Get a FREE SEO strategy Session + Discount Now: https://go.juliangoldie.com/strategy-session\n\n🤯  Want more money, traffic and sales from SEO? Join the SEO Elite Circle👇\nhttps://go.juliangoldie.com/register\n\nClick below for FREE access to  ✅ 50 FREE AI SEO TOOLS 🔥 200+ AI SEO Prompts! 📈 FREE AI SEO COMMUNITY with 2,000 SEOs ! 🚀 Free AI SEO Course 🏆 Plus TODAY's Video NOTES...\nhttps://go.juliangoldie.com/chat-gpt-prompts\n\n- Want a Custom GPT built? Order here: https://kwnyzkju.manus.space/\n- Join our FREE AI SEO Accelerator here: https://www.facebook.com/groups/aiseomastermind\n- Need consulting? Book a call with us here: https://link.juliangoldie.com/widget/bookings/seo-gameplanesov12",
+    "tags": [
+      "seo",
+      "chatgpt",
+      "seotips"
+    ],
+    "categories": [],
+    "thumbnail": "https://i.ytimg.com/vi/rVhw7C82Lhg/maxresdefault.jpg",
+    "language": "",
+    "subtitles_available": false
+  },
+  "summary": {
+    "content": {
+      "summary": "• **Main topic:** Google Stitch's new free AI app builder using Gemini 2.5 Pro and Canvas.\n• **Key points:**\n  - Build app/website UIs from text prompts; exports HTML/CSS and Figma.\n  - Gemini 2.5 Pro experimental default; users prefer results; more creative, easier editing.\n  - New Canvas shows user flows; upload images to recreate designs; free; some limitations.\n• **Takeaway:** Use Stitch to rapidly prototype and deliver client-ready UI designs without coding, for free.\n• **Best for:** Designers, freelancers, and agencies needing fast prototypes and app UIs.",
+      "headline": "Google Stitch now uses Gemini 2.5 Pro to build no-code apps in minutes, free",
+      "summary_type": "bullet-points",
+      "generated_at": "2025-09-06T02:14:28.964835"
+    },
+    "type": "comprehensive",
+    "analysis": {
+      "category": [
+        "Technology",
+        "Business"
+      ],
+      "sentiment": "Positive",
+      "target_audience": "No-code creators, entrepreneurs, marketers, and developers interested in using AI to rapidly prototype or build apps and monetize them",
+      "complexity_level": "Beginner",
+      "key_topics": [
+        "Google Stitch",
+        "No-code app development",
+        "Gemini 2.5 Pro",
+        "AI-driven app design",
+        "Monetization strategies"
+      ],
+      "content_type": "Tutorial",
+      "educational_value": "Medium",
+      "entertainment_value": "High"
+    },
+    "key_points": [],
+    "topics": [],
+    "sentiment": {},
+    "quality_score": 0,
+    "word_count": 103
+  },
+  "processing": {
+    "llm_provider": "openai",
+    "model": "gpt-5"
+  },
+  "stats": {
+    "video_length_seconds": 624,
+    "video_length_minutes": 10.4,
+    "summary_word_count": 103,
+    "summary_character_count": 759,
+    "compression_ratio": 0.731,
+    "has_analysis": true,
+    "has_key_points": false,
+    "topic_count": 0
+  }
+}

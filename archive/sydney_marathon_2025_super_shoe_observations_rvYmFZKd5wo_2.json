@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "schema_version": "1.0.0",
+    "generated_at": "2025-09-06T01:45:34.535007",
+    "report_id": "rvYmFZKd5wo_0eaa54"
+  },
+  "video": {
+    "url": "https://www.youtube.com/watch?v=rvYmFZKd5wo",
+    "video_id": "rvYmFZKd5wo",
+    "title": "Sydney Marathon 2025 Super Shoe Observations",
+    "channel": "Sagasu Running",
+    "channel_id": "",
+    "duration": 713,
+    "duration_string": "11:53",
+    "view_count": 18065,
+    "like_count": 0,
+    "upload_date": "20250831",
+    "description": "A few interesting super shoe items that happened in the 2025 edition of the Sydney Marathon.\n\n0:00 Intro\n1:09 The course\n3:10 Asics\n5:42 Nike\n8:48 Adidas\n10:15 Xtep\n11:36 Outro\n\nPodium Results/Shoes\n\nSydney Marathon 2025: Men's results\n1. Hailemaryam Kiros (ETH) 2:06:06 CR - Asics Metaspeed Sky Tokyo\n2. Addisu Gobena (ETH) 2:06:16 - Nike Vaporfly 4\n3. Tebello Ramakongoana (LSO) 2:06:47  - Xtep 160X 5.0 Pro\n\nSydney Marathon 2025: Women's results\n1. Sifan Hassan (NLD) 2:18:22 CR - Nike Alphafly 3 (Dev 16E)\n2. Brigid Kosgei (KEN) 2:18:56 - Nike Alphafly 3\n3. Workenesh Edesa (ETH) 2:22:15- Adidas Adios Pro Evo 1 (v2)\n\n---\n\n📩 Want to work with me? Suggestions? Comments? Get in touch here: chris@sagasurunning.com\n\nMerch and more\nhttp://www.sagasurunning.com/ \n\nJoin to support what I do here\nhttps://www.youtube.com/channel/UC7LH0G7csGe-d0e3coywpQg/join\n\nNon-running content channel\nhttps://www.youtube.com/@UCi2Lh9JltW10LCjY-lIJReQ\n\nSocials\nInstagram: https://www.instagram.com/sagasurunning/\nStrava: https://www.strava.com/athletes/14151706\n\nSubscriber count at time of upload: 23,319\n\n🤙🏻",
+    "tags": [
+      "running shoe review",
+      "best running shoes",
+      "running shoe reviews",
+      "nike running shoes",
+      "adidas running shoes",
+      "asics running shoes",
+      "sydney marathon 2025",
+      "sydney marathon",
+      "xtep running shoes",
+      "Asics Metaspeed Sky Tokyo",
+      "Nike Vaporfly 4",
+      "Xtep 160X 5.0 Pro",
+      "Nike Alphafly 3",
+      "Adidas Adios Pro Evo 1",
+      "world major marathons",
+      "world major marathon racing",
+      "sagssu running",
+      "asics running",
+      "nike running",
+      "adidas running",
+      "xtep running"
+    ],
+    "categories": [],
+    "thumbnail": "https://i.ytimg.com/vi/rvYmFZKd5wo/maxresdefault.jpg",
+    "language": "",
+    "subtitles_available": false
+  },
+  "summary": {
+    "content": {
+      "summary": "• **Main topic:** Sydney Marathon 2025 super-shoe observations and course analysis\n• **Key points:**\n  - Sydney Marathon course is scenic, twisty, hilly, and likely not fast; similar to Tokyo.\n  - Asics MetaSpeed Sky Tokyo won men; big Asics presence; MetaSpeed Ray legal from Sep 11, 2025.\n  - Alphafly 3 dominated; Hassan wore Dev16E; Alphafly 4 imminent; Vaporfly 4 reached podium.\n• **Takeaway:** Sydney highlighted course challenges and super-shoe trends: Asics thriving, Nike transitioning to Alphafly 4, Ray pending.\n• **Best for:** Marathon fans and shoe geeks tracking elite footwear and upcoming super-shoe releases.",
+      "headline": "Generated Summary",
+      "summary_type": "bullet-points",
+      "generated_at": "2025-09-06T01:45:21.975655"
+    },
+    "type": "comprehensive",
+    "analysis": {
+      "category": [
+        "Lifestyle",
+        "Health"
+      ],
+      "sentiment": "Mixed",
+      "target_audience": "Distance runners, marathon enthusiasts, and running shoe gear nerds interested in World Marathon Majors and super shoes",
+      "complexity_level": "Intermediate",
+      "key_topics": [
+        "Sydney Marathon 2025 course analysis",
+        "World Marathon Majors expansion (7th star)",
+        "Use of pacers in majors",
+        "ASICS MetaSpeed Sky Tokyo super shoe",
+        "Comparison to Tokyo Marathon course"
+      ],
+      "content_type": "Analysis/Discussion",
+      "educational_value": "Medium",
+      "entertainment_value": "Medium"
+    },
+    "key_points": [],
+    "topics": [],
+    "sentiment": {},
+    "quality_score": 0,
+    "word_count": 98
+  },
+  "processing": {
+    "llm_provider": "openai",
+    "model": "gpt-5"
+  },
+  "stats": {
+    "video_length_seconds": 713,
+    "video_length_minutes": 11.9,
+    "summary_word_count": 98,
+    "summary_character_count": 759,
+    "compression_ratio": 0.694,
+    "has_analysis": true,
+    "has_key_points": false,
+    "topic_count": 0
+  }
+}

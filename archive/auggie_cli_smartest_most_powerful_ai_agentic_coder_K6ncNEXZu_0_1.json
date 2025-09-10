@@ -1,0 +1,99 @@
+{
+  "metadata": {
+    "schema_version": "1.0.0",
+    "generated_at": "2025-09-06T01:52:22.935166",
+    "report_id": "K6ncNEXZu_0_10c88d"
+  },
+  "video": {
+    "url": "https://www.youtube.com/watch?v=K6ncNEXZu_0",
+    "video_id": "K6ncNEXZu_0",
+    "title": "Auggie CLI: Smartest + Most Powerful AI Agentic Coder! RIP Claude Code & Gemini CLI!",
+    "channel": "WorldofAI",
+    "channel_id": "",
+    "duration": 605,
+    "duration_string": "10:05",
+    "view_count": 9695,
+    "like_count": 0,
+    "upload_date": "20250829",
+    "description": "A while back, we explored Augment Code — the revolutionary agentic AI IDE with one of the best context engines ever built. And now, they’ve taken things further with the launch of Auggie CLI!\n\n[🔗 My Links]:\nSponsor a Video or Do a Demo of Your Product, Contact me: intheworldzofai@gmail.com\n🔥 Become a Patron (Private Discord): https://patreon.com/WorldofAi\n☕ To help and Support me, Buy a Coffee or Donate to Support the Channel: https://ko-fi.com/worldofai - It would mean a lot if you did! Thank you so much, guys! Love yall\n🧠 Follow me on Twitter: https://twitter.com/intheworldofai \n🚨 Subscribe To The SECOND Channel: https://www.youtube.com/@UCYwLV1gDwzGbg7jXQ52bVnQ \n👩🏻‍🏫 Learn to code with Scrimba – from fullstack to AI https://scrimba.com/?via=worldofai (20% OFF)\n🚨 Subscribe To The FREE AI Newsletter For Regular AI Updates: https://intheworldofai.com/\n👾 Join the World of AI Discord! : https://discord.gg/NPf8FCn4cD\nReady to dive into the world of decentralized trading? Sign up with Hyperliquid using our exclusive referral link and start trading smarter today!: https://app.hyperliquid.xyz/join/WORLDOFAI\n\n[Must Watch]:\nBase44: NEW Agent Mode Can Build ANYTHING! Create HIGH QUALITY Full-Stack Apps With No CODE!: https://youtu.be/fgRRdefBc4c\nGrok Code Fast 1: NEW SUPER FAST Coding Model is Pretty Decent! (FULLY FREE): https://youtu.be/AAJkyNWM4HU\nSeer: NEW AI Software Engineer CAN AUTOMATE Your CODE! New AI Coder! (FULLY FREE): https://youtu.be/ZQTgcvh-P40\n\n📌 LINKS & RESOURCES\nWebsite: https://www.augmentcode.com/product/CLI\nAugment Code: https://www.augmentcode.com/\nNodejs Download: https://nodejs.org/en/download/current/\nBlog Post: https://www.augmentcode.com/changelog/auggie-cli-is-available-for-everyone\nDocs: https://docs.augmentcode.com/cli/automation\nAMA: https://www.reddit.com/r/webdev/comments/1mzxiyq/ama_the_future_of_ai_agents_in_coding_with_guy/\n\nAuggie CLI brings Augment’s powerful AI agents and deep codebase intelligence straight into your terminal, making it easier than ever to automate workflows, manage large codebases, and ship production-ready software.\n\n💻 Unlike other CLI tools like Claude Code or Google’s Gemini CLI, Auggie CLI sets itself apart with advanced context understanding, custom commands, GitHub Actions integration, and seamless Unix-like utility support.\n\n🔥 Whether you’re running tests, reviewing PRs, fixing bugs, or automating repetitive tasks, Auggie CLI transforms your terminal into a next-level AI coding environment.\n\n✨ Key Features:\nAutomate workflows with custom commands (code reviews, docs updates, etc.)\nIDE-grade features in the terminal: tasklists, prompt enhancer, model picker\nTool permissions for CI/CD & automated systems\nReady-to-go GitHub Actions for AI-powered code reviews and PRs\nWorks everywhere with Unix-like pipe support (Node.js 22+, GitHub Actions, AWS Lambda)\n\n📌 In short: Don’t just code—ship software faster and smarter with Auggie CLI.\n\nTags (comma-separated):\nAuggie CLI, Augment Code, AI IDE, AI coding agent, agentic AI, AI developers, AI coding tools, AI software development, coding automation, GitHub Actions AI, Claude Code alternative, Gemini CLI alternative, AI dev tools 2025, terminal AI agent, CI/CD automation AI, AI coding assistant, AI code review, large codebase AI\n\nHashtags:\n#AI #devtools  #AuggieCLI #AugmentCode #agenticai  #codingwithai  #softwaredevelopment  #automation  #githubactions  #terminal",
+    "tags": [
+      "Auggie CLI",
+      "claude code",
+      "gemini cli",
+      "ai coding assistant",
+      "context awareness",
+      "ai coding tools",
+      "CURSOR",
+      "cursor ai",
+      "cursor cli",
+      "GPT-5",
+      "ai coding",
+      "ai agents",
+      "Cursor CLI vs Claude Code",
+      "new ai coder",
+      "opencode",
+      "qwen cli",
+      "qwen coder model",
+      "claude sonnet alternative",
+      "agentic coding",
+      "qwen 3",
+      "opensource coder",
+      "coding assistant",
+      "augment code",
+      "new cli",
+      "Augment Code",
+      "AI IDE",
+      "AI coding agent",
+      "agentic AI",
+      "AI developers",
+      "AI coding tools",
+      "AI software development",
+      "coding automation"
+    ],
+    "categories": [],
+    "thumbnail": "https://i.ytimg.com/vi/K6ncNEXZu_0/maxresdefault.jpg",
+    "language": "",
+    "subtitles_available": false
+  },
+  "summary": {
+    "content": {
+      "error": "Failed to generate summary after all retries",
+      "summary": "Summary generation failed",
+      "headline": "Error generating headline"
+    },
+    "type": "comprehensive",
+    "analysis": {
+      "category": [
+        "General"
+      ],
+      "sentiment": "Neutral",
+      "target_audience": "General audience",
+      "complexity_level": "Intermediate",
+      "key_topics": [
+        "General content"
+      ],
+      "content_type": "Discussion",
+      "educational_value": "Medium",
+      "entertainment_value": "Medium"
+    },
+    "key_points": [],
+    "topics": [],
+    "sentiment": {},
+    "quality_score": 0,
+    "word_count": 16
+  },
+  "processing": {
+    "llm_provider": "openai",
+    "model": "gpt-5"
+  },
+  "stats": {
+    "video_length_seconds": 605,
+    "video_length_minutes": 10.1,
+    "summary_word_count": 16,
+    "summary_character_count": 138,
+    "compression_ratio": 0.04,
+    "has_analysis": true,
+    "has_key_points": false,
+    "topic_count": 0
+  }
+}

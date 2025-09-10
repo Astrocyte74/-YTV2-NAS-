@@ -1,0 +1,43 @@
+{
+  "summary_types": {
+    "comprehensive": {
+      "name": "Comprehensive Summary",
+      "prompt": "Create a comprehensive summary of this YouTube video transcript. Include:\n\n1. **Main Topic**: What is the video primarily about?\n2. **Key Points**: List the most important points discussed\n3. **Key Insights**: What are the main takeaways or conclusions?\n4. **Supporting Details**: Include relevant examples, statistics, or explanations\n\nFormat the response with clear headings and bullet points for readability.",
+      "max_length": 2000
+    },
+    "bullet_points": {
+      "name": "Bullet Point Summary", 
+      "prompt": "Summarize this YouTube video transcript as clear, concise bullet points:\n\n• Focus on the main ideas and key information\n• Use bullet points for easy scanning\n• Keep each point concise but informative\n• Organize logically by topic or chronologically\n• Include specific details, numbers, or examples when relevant",
+      "max_length": 1500
+    },
+    "key_insights": {
+      "name": "Key Insights",
+      "prompt": "Extract the key insights and takeaways from this YouTube video:\n\n1. **Main Message**: What is the core message or theme?\n2. **Important Insights**: What are the most valuable insights shared?\n3. **Actionable Points**: What can viewers apply or act upon?\n4. **Notable Quotes**: Include any memorable or significant statements\n5. **Context**: Why are these insights important or relevant?\n\nFocus on value and practical application.",
+      "max_length": 1800
+    },
+    "executive_summary": {
+      "name": "Executive Summary",
+      "prompt": "Create an executive summary of this YouTube video for busy professionals:\n\n**PURPOSE**: What problem does this video address?\n**KEY FINDINGS**: What are the main discoveries or conclusions?\n**RECOMMENDATIONS**: What actions or decisions does this suggest?\n**BUSINESS IMPACT**: How might this be relevant to business or professional contexts?\n**TIME INVESTMENT**: Is this worth watching? For whom?\n\nKeep it professional, concise, and decision-focused.",
+      "max_length": 1200
+    }
+  },
+  "custom_instructions": {
+    "tone": "professional and engaging",
+    "style": "clear and well-organized", 
+    "additional": "Always maintain accuracy and avoid speculation beyond what's presented in the video."
+  },
+  "model_specific": {
+    "gpt-4": {
+      "temperature": 0.3,
+      "max_tokens": 2500
+    },
+    "gpt-3.5-turbo": {
+      "temperature": 0.2, 
+      "max_tokens": 2000
+    },
+    "claude-3-sonnet": {
+      "temperature": 0.3,
+      "max_tokens": 3000
+    }
+  }
+}

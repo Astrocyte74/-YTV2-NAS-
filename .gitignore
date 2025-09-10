@@ -1,0 +1,46 @@
+# Python + build
+__pycache__/
+*.pyc
+.env
+.env.*
+*.env
+*.log
+.cache/
+.cache*/
+.cache-*/
+.cache-*
+.vscode/
+.idea/
+
+# Project data / generated
+data/reports/
+exports/
+downloads/
+logs/
+cache/
+*.mp3
+*.wav
+
+# Archives / old docs (had secrets)
+archive_nas/
+
+# Any token/secrets files by name
+*secret*
+*token*
+*apikey*
+*.key
+*.pem
+
+# Mac OS system files
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# Temporary files
+*.tmp*
+*~
+
+# Data files that shouldn't be in repo
+data/reports/
+data/backups/
