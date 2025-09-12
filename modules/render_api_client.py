@@ -199,12 +199,13 @@ class RenderAPIClient:
                 if 'Content-Type' in headers:
                     del headers['Content-Type']
                 
-                response = self._make_request(
-                    'POST', 
-                    '/api/upload-audio', 
-                    files=files, 
+                # Use requests directly for multipart uploads to ensure proper headers
+                response = self.session.post(
+                    f"{self.base_url}/api/upload-audio",
+                    files=files,
                     data=data,
-                    headers=headers
+                    headers={'Authorization': f'Bearer {self.auth_token}'},
+                    timeout=30
                 )
             
             if response.status_code == 200:
