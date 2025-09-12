@@ -8,6 +8,7 @@ Replaces database file syncing with direct API calls.
 import requests
 import json
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 import time
