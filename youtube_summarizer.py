@@ -1013,15 +1013,73 @@ class YouTubeSummarizer:
         """Validate and sanitize analysis results according to universal schema"""
         
         # Define allowed values for controlled fields
-        allowed_categories = ["Education", "Entertainment", "Technology", "Business", "Health", 
-                             "DIY", "News", "Gaming", "Lifestyle", "Science", "History", "General"]
+        allowed_categories = [
+            "Education", "Entertainment", "Technology", "AI Software Development", "Computer Hardware", "Home Theater",
+            "Business", "Health & Wellness", "How-To & DIY",
+            "News & Politics", "Gaming", "Lifestyle", "Science & Nature", "Astronomy", "History & Culture",
+            "History – World War I (WWI)", "History – World War II (WWII)", "History – Cold War",
+            "Arts & Creativity", "Religion & Philosophy", "Sports", "Hobbies & Special Interests",
+            "Vlogs & Personal", "Reviews & Products", "General"
+        ]
         allowed_complexity = ["Beginner", "Intermediate", "Advanced"]
         allowed_content_types = ["Tutorial", "Review", "Discussion", "News", "Documentary", 
                                 "Interview", "Presentation", "Guide"]
+        allowed_subcategories = {
+            "History – World War I (WWI)": [
+                "Causes & Prelude", "Major Battles & Campaigns", "Home Front & Society",
+                "Technology & Weapons", "Diplomacy & Treaties (Versailles)",
+                "Biographies & Leaders", "Aftermath & Interwar"
+            ],
+            "History – World War II (WWII)": [
+                "Causes & Prelude", "European Theatre", "Pacific Theatre",
+                "Home Front & Society", "Technology & Weapons", "Intelligence & Codebreaking",
+                "Holocaust & War Crimes", "Diplomacy & Conferences (Yalta, Potsdam)",
+                "Biographies & Commanders", "Aftermath & Reconstruction"
+            ],
+            "History – Cold War": [
+                "Origins & Ideologies", "Proxy Wars (Korea, Vietnam, Afghanistan)",
+                "Nuclear Strategy & Arms Race", "Espionage & Intelligence",
+                "Space Race & Technology", "Domestic Life & Culture",
+                "Diplomacy & Crises (Berlin, Cuba)", "Détente & End of Cold War",
+                "Leaders & Biographies"
+            ],
+            "Technology": [
+                "Programming & Software Development", "Web Development", "Mobile Development",
+                "DevOps & Infrastructure", "Databases & Data Science", "Cybersecurity",
+                "Tech Reviews & Comparisons", "Software Tutorials", "Tech News & Trends"
+            ],
+            "AI Software Development": [
+                "Model Selection & Evaluation", "Prompt Engineering & RAG",
+                "Training & Fine-Tuning", "Deployment & Serving",
+                "Agents & MCP/Orchestration", "APIs & SDKs",
+                "Data Engineering & ETL", "Testing & Observability",
+                "Security & Safety", "Cost Optimisation"
+            ],
+            "Computer Hardware": [
+                "CPUs & GPUs", "Motherboards & Chipsets",
+                "Memory & Storage (SSD/NVMe)", "Cooling & Thermals",
+                "Power Supplies", "PC Cases & Builds",
+                "Networking & NAS", "Monitors & Peripherals",
+                "Benchmarks & Tuning", "Troubleshooting & Repairs"
+            ],
+            "Home Theater": [
+                "AV Receivers & Amplifiers", "Speakers & Subwoofers",
+                "Room Correction & Calibration (Dirac, Audyssey)", "Acoustic Treatment",
+                "Projectors & Screens", "Media Players & Sources",
+                "Cables & Connectivity", "Setups & Tours", "Troubleshooting & Tips"
+            ],
+            "Astronomy": [
+                "Solar System & Planets", "Stars & Stellar Evolution",
+                "Galaxies & Cosmology", "Telescopes & Observing",
+                "Space Missions & Exploration", "Astrophotography",
+                "Amateur Astronomy", "Space News & Discoveries"
+            ]
+        }
         
         # Validate and clean the analysis
         validated = {
             "category": [],
+            "subcategory": None,
             "content_type": "Discussion",
             "complexity_level": "Intermediate", 
             "language": "en",  # Default to English, will be detected separately
@@ -1045,6 +1103,13 @@ class YouTubeSummarizer:
         # Validate complexity
         if analysis.get("complexity_level") in allowed_complexity:
             validated["complexity_level"] = analysis["complexity_level"]
+
+        # Validate optional subcategory (only for WWI/WWII/Cold War categories)
+        if isinstance(analysis.get("subcategory"), str) and validated["category"]:
+            primary_cat = validated["category"][0]
+            if primary_cat in allowed_subcategories:
+                if analysis["subcategory"] in allowed_subcategories[primary_cat]:
+                    validated["subcategory"] = analysis["subcategory"]
         
         # Process key topics - convert to slugs
         if "key_topics" in analysis and isinstance(analysis["key_topics"], list):
@@ -1076,10 +1141,11 @@ class YouTubeSummarizer:
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON: {str(e)}")
     
-    async def analyze_content(self, transcript: str, metadata: Dict) -> Dict[str, Union[str, List[str]]]:
+    async def analyze_content(self, summary: str, metadata: Dict) -> Dict[str, Union[str, List[str]]]:
         """Perform secure content analysis with universal schema support
         
         Enhanced with:
+        - Uses summary instead of transcript for token efficiency
         - Input sanitization and validation
         - Safe JSON parsing
         - Universal schema compliance
@@ -1087,37 +1153,51 @@ class YouTubeSummarizer:
         """
         
         # Input validation and sanitization
-        if not transcript or not isinstance(transcript, str):
-            transcript = ""
+        if not summary or not isinstance(summary, str):
+            summary = ""
         if not metadata or not isinstance(metadata, dict):
             metadata = {}
         
         title = str(metadata.get('title', 'Unknown'))[:200]  # Limit title length
-        safe_transcript = self._sanitize_content(transcript, max_length=6000)
+        safe_summary = self._sanitize_content(summary, max_length=6000)
         
         # Enhanced analysis prompt for universal schema
         analysis_prompt = f"""Analyze this content and extract structured metadata.
 
 Title: {title}
-Transcript: {safe_transcript}
+Summary: {safe_summary}
 
 IMPORTANT: Choose the most specific category that best matches the content:
 - Education: Learning, tutorials, educational content, courses, academic topics
 - Entertainment: Comedy, music, movies, celebrities, pop culture, fun content  
-- Technology: Programming, AI, software, hardware, tech reviews, digital tools
+- Technology: Subcategories: Programming & Software Development; Web Development; Mobile Development; DevOps & Infrastructure; Databases & Data Science; Cybersecurity; Tech Reviews & Comparisons; Software Tutorials; Tech News & Trends
+- AI Software Development: Subcategories: Model Selection & Evaluation; Prompt Engineering & RAG; Training & Fine-Tuning; Deployment & Serving; Agents & MCP/Orchestration; APIs & SDKs; Data Engineering & ETL; Testing & Observability; Security & Safety; Cost Optimisation
+- Computer Hardware: Subcategories: CPUs & GPUs; Motherboards & Chipsets; Memory & Storage (SSD/NVMe); Cooling & Thermals; Power Supplies; PC Cases & Builds; Networking & NAS; Monitors & Peripherals; Benchmarks & Tuning; Troubleshooting & Repairs
+- Home Theater: Subcategories: AV Receivers & Amplifiers; Speakers & Subwoofers; Room Correction & Calibration (Dirac, Audyssey); Acoustic Treatment; Projectors & Screens; Media Players & Sources; Cables & Connectivity; Setups & Tours; Troubleshooting & Tips
 - Business: Entrepreneurship, marketing, finance, investing, career advice
-- Health: Fitness, nutrition, medical topics, wellness, mental health
-- DIY: How-to guides, crafts, home improvement, building, making things
-- News: Current events, journalism, breaking news, political coverage
-- Gaming: Video games, esports, game reviews, gaming culture
+- Health & Wellness: Fitness, nutrition, medical topics, mental health, wellbeing
+- How-To & DIY: How‑to guides, crafts, home improvement, building, making things
+- News & Politics: Current events, journalism, breaking news, political coverage, analysis
+- Gaming: Video games, esports, game reviews, gaming culture, mods/dev
 - Lifestyle: Fashion, travel, food, relationships, personal development
-- Science: Research, experiments, scientific discoveries, nature, physics
-- History: Historical events, documentaries, past civilizations, biographies
-- General: Only use if content doesn't clearly fit other categories
+- Science & Nature: Research, experiments, discoveries, biology, physics, environment
+- Astronomy: Subcategories: Solar System & Planets; Stars & Stellar Evolution; Galaxies & Cosmology; Telescopes & Observing; Space Missions & Exploration; Astrophotography; Amateur Astronomy; Space News & Discoveries
+- History & Culture: General history, culture, heritage beyond the specific eras below
+- History – World War I (WWI): Subcategories: Causes & Prelude; Major Battles & Campaigns; Home Front & Society; Technology & Weapons; Diplomacy & Treaties (Versailles); Biographies & Leaders; Aftermath & Interwar
+- History – World War II (WWII): Subcategories: Causes & Prelude; European Theatre; Pacific Theatre; Home Front & Society; Technology & Weapons; Intelligence & Codebreaking; Holocaust & War Crimes; Diplomacy & Conferences (Yalta, Potsdam); Biographies & Commanders; Aftermath & Reconstruction
+- History – Cold War: Subcategories: Origins & Ideologies; Proxy Wars (Korea, Vietnam, Afghanistan); Nuclear Strategy & Arms Race; Espionage & Intelligence; Space Race & Technology; Domestic Life & Culture; Diplomacy & Crises (Berlin, Cuba); Détente & End of Cold War; Leaders & Biographies
+- Arts & Creativity: Drawing, music production, dance, photography, videography, literature
+- Religion & Philosophy: Religious teachings, spirituality, doctrine, ethics, philosophy
+- Sports: Matches, analysis, training, highlights, athlete profiles
+- Hobbies & Special Interests: Cars, pets, collecting, outdoors, niche communities
+- Vlogs & Personal: Daily life, storytimes, opinions, Q&amp;A, behind‑the‑scenes
+- Reviews & Products: Product reviews, unboxings, comparisons, services, subscriptions
+- General: Only use if content doesn’t clearly fit other categories
 
 Provide analysis in this exact JSON format:
 {{
     "category": ["Most Specific Category"],
+    "subcategory": "Most Specific Subcategory or null",
     "content_type": "Tutorial|Review|Discussion|News|Documentary|Interview|Presentation|Guide",
     "complexity_level": "Beginner|Intermediate|Advanced", 
     "key_topics": ["topic-one", "topic-two", "topic-three"],
@@ -1264,9 +1344,10 @@ Identify 1-3 named entities (people, places, organizations)."""
         print("Generating summary...")
         summary_data = await self.generate_summary(transcript, metadata, summary_type, proficiency_level)
         
-        # Step 3: Analyze content
+        # Step 3: Analyze content (using summary for token efficiency)
         print("Analyzing content...")
-        analysis_data = await self.analyze_content(transcript, metadata)
+        summary_text = summary_data.get('summary', '') if isinstance(summary_data, dict) else str(summary_data)
+        analysis_data = await self.analyze_content(summary_text, metadata)
         
         # Enhanced universal schema compliance
         from urllib.parse import urlparse
