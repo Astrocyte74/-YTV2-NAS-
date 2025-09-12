@@ -974,9 +974,13 @@ class YouTubeSummarizer:
             "Headline generation"
         )
         
+        # Enhanced logging to show generated headline
+        final_headline = headline_text or "Generated Summary"
+        print(f"📝 Generated Headline: {final_headline}")
+        
         return {
             'summary': summary_text,
-            'headline': headline_text or "Generated Summary",  # Fallback if headline fails
+            'headline': final_headline,
             'summary_type': summary_type,
             'generated_at': datetime.now().isoformat()
         }
@@ -1140,6 +1144,15 @@ Identify 1-3 named entities (people, places, organizations)."""
             try:
                 raw_analysis = self._parse_safe_json(analysis_content)
                 validated_analysis = self._validate_analysis_result(raw_analysis)
+                
+                # Enhanced logging to show AI decisions
+                category = validated_analysis.get('category', ['Unknown'])
+                content_type = validated_analysis.get('content_type', 'Unknown')
+                complexity = validated_analysis.get('complexity_level', 'Unknown')
+                print(f"🎯 AI Analysis Results:")
+                print(f"   Category: {category}")
+                print(f"   Content Type: {content_type}")  
+                print(f"   Complexity: {complexity}")
                 
                 # Add processing metadata
                 processing_end = datetime.now()
