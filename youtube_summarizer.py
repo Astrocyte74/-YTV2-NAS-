@@ -960,13 +960,13 @@ class YouTubeSummarizer:
                 'headline': "Error generating headline"
             }
         
-        # Also generate a quick title/headline
+        # Also generate a quick title/headline (using summary for token efficiency)
         title_prompt = f"""
         Write a single, specific headline (12–16 words, no emojis) that states subject and concrete value.
-        **IMPORTANT: Respond in the same language as the transcript.**
+        **IMPORTANT: Respond in the same language as the content.**
         Source title: {metadata.get('title', '')}
-        Transcript excerpt:
-        {transcript[:1200]}
+        Summary:
+        {summary_text[:1200]}
         """
         
         headline_text = await self._robust_llm_call(
