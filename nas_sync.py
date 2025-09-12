@@ -24,6 +24,96 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def sync_sqlite_database():
+    """Sync SQLite database and recent MP3 files to Dashboard"""
+    # Try multiple possible database locations
+    db_paths = [
+        Path("ytv2_content.db"),              # Root level (NAS location)
+        Path("data/ytv2_content.db"),         # data subdirectory
+        Path("./ytv2_content.db"),            # Current directory explicit
+    ]
+    
+    db_path = None
+    for path in db_paths:
+        if path.exists():
+            db_path = path
+            break
+    
+    if not db_path:
+        logger.warning(f"SQLite database not found in: {[str(p) for p in db_paths]}")
+        return False
+
+    render_url = os.getenv('RENDER_DASHBOARD_URL')
+    sync_secret = os.getenv('SYNC_SECRET')
+    
+    if not render_url or not sync_secret:
+        logger.error("RENDER_DASHBOARD_URL or SYNC_SECRET not set")
+        return False
+    
+    logger.info(f"🗄️  Syncing SQLite database and MP3 files to {render_url}")
+    
+    try:
+        headers = {'Authorization': f'Bearer {sync_secret}'}
+        
+        # First, sync the database
+        with open(db_path, 'rb') as db_file:
+            files = {
+                'database': ('ytv2_content.db', db_file, 'application/x-sqlite3')
+            }
+            
+            response = requests.post(
+                f"{render_url}/api/upload-database",
+                headers=headers,
+                files=files,
+                timeout=60
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"❌ Database sync failed: {response.status_code}")
+                return False
+        
+        logger.info("✅ SQLite database synced successfully")
+        
+        # Second, sync recent MP3 files (last 10 files)
+        exports_dir = Path("exports")
+        if exports_dir.exists():
+            mp3_files = sorted(exports_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+            
+            if mp3_files:
+                logger.info(f"🎵 Syncing {len(mp3_files)} recent MP3 files...")
+                
+                for mp3_file in mp3_files:
+                    try:
+                        with open(mp3_file, 'rb') as audio_file:
+                            files = {
+                                'audio': (mp3_file.name, audio_file, 'audio/mpeg')
+                            }
+                            
+                            response = requests.post(
+                                f"{render_url}/api/upload-report",
+                                headers=headers,
+                                files=files,
+                                timeout=30
+                            )
+                            
+                            if response.status_code == 200:
+                                logger.info(f"✅ Synced MP3: {mp3_file.name}")
+                            else:
+                                logger.warning(f"⚠️  MP3 sync failed: {mp3_file.name} ({response.status_code})")
+                                
+                    except Exception as e:
+                        logger.warning(f"⚠️  Error syncing {mp3_file.name}: {e}")
+            else:
+                logger.info("📂 No MP3 files found in exports directory")
+        else:
+            logger.warning("📂 Exports directory not found - skipping MP3 sync")
+            
+        return True
+                
+    except Exception as e:
+        logger.error(f"❌ Database sync error: {e}")
+        return False
+
 def upload_to_render(report_path, audio_path=None, max_retries=6):
     """
     Upload report and audio to Render with robust retry logic for cold starts

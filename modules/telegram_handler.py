@@ -696,15 +696,9 @@ class YouTubeTelegramBot:
             video_id = video_info.get('video_id', 'unknown')
             audio_filename = f"audio_{video_id}_{timestamp}.mp3"
             
-            # Find the JSON report file to pass to TTS generation for metadata updates
-            reports_dir = Path('./data/reports')
-            json_files = list(reports_dir.glob(f'*{video_id}.json'))
-            json_filepath = None
-            if json_files:
-                json_filepath = str(max(json_files, key=lambda p: p.stat().st_mtime))
-                logging.info(f"📝 Found JSON report for metadata update: {Path(json_filepath).name}")
-            else:
-                logging.warning(f"⚠️ No JSON report found for video_id {video_id} - MP3 metadata will not be updated")
+            # Generate placeholder path for SQLite-only workflow (no JSON files needed)
+            json_filepath = f"yt_{video_id}_placeholder.json"  # Used for video ID extraction in SQLite updates
+            logging.info(f"📊 Using SQLite-only workflow for video_id: {video_id}")
 
             # Generate the audio file (run in executor to avoid blocking event loop)
             logging.info(f"🎙️ Generating TTS audio for: {title}")
@@ -753,39 +747,34 @@ class YouTubeTelegramBot:
                         )
                     logging.info(f"✅ Successfully sent audio summary for: {title}")
                     
-                    # Sync audio file to Render dashboard (deferred sync for audio summaries)
+                    # Sync SQLite database to Render (SQLite-only workflow)
                     try:
                         video_id = video_info.get('video_id', '')
                         if video_id and audio_filepath and Path(audio_filepath).exists():
-                            # Use the JSON filepath we already found earlier
-                            if json_filepath and Path(json_filepath).exists():
-                                report_path = Path(json_filepath)
-                                stem = report_path.stem
-                                logging.info(f"🎵 SYNC: Uploading JSON + audio to Render...")
-                                
-                                # Sync both JSON (now with MP3 metadata) and audio file
-                                loop = asyncio.get_running_loop()
-                                success = await loop.run_in_executor(
-                                    None, upload_to_render, str(report_path), str(audio_filepath)
-                                )
-                                
-                                if success:
-                                    logging.info(f"✅ AUDIO SYNCED: 📊+🎵 → {stem}")
-                                    
-                                    # Update ledger with audio path and mark as synced
-                                    entry = ledger.get(video_id, summary_type)
-                                    if entry:
-                                        entry["mp3"] = str(audio_filepath)
-                                        entry["synced"] = True
-                                        entry["last_synced"] = datetime.now().isoformat()
-                                        ledger.upsert(video_id, summary_type, entry)
-                                        logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
-                                    else:
-                                        logging.warning(f"⚠️ Could not find ledger entry for {video_id}:{summary_type}")
+                            logging.info(f"🗄️ SYNC: Syncing SQLite database (contains new record + audio metadata)...")
+                            
+                            # Update ledger with audio path 
+                            entry = ledger.get(video_id, summary_type)
+                            if entry:
+                                entry["mp3"] = str(audio_filepath)
+                                entry["synced"] = True
+                                entry["last_synced"] = datetime.now().isoformat()
+                                ledger.upsert(video_id, summary_type, entry)
+                                logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
+                            
+                            # Sync SQLite database to Render (includes all data: record, summary, audio metadata)
+                            try:
+                                from nas_sync import sync_sqlite_database
+                                logging.info("🗄️ Syncing SQLite database to Render...")
+                                db_sync_success = sync_sqlite_database()
+                                if db_sync_success:
+                                    logging.info("✅ FULL SYNC COMPLETE: 📊+🎵 → SQLite database synced to Render")
                                 else:
-                                    logging.warning(f"⚠️ Audio sync failed for {stem}")
-                            else:
-                                logging.error(f"❌ Could not find JSON report path for sync")
+                                    logging.warning("⚠️ SQLite database sync failed")
+                            except Exception as db_sync_error:
+                                logging.error(f"❌ Database sync error: {db_sync_error}")
+                        else:
+                            logging.warning("⚠️ Missing video_id or audio file for sync")
                     except Exception as sync_e:
                         logging.error(f"❌ Audio sync error: {sync_e}")
                     

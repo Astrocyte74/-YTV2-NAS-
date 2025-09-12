@@ -1249,7 +1249,7 @@ Identify 1-3 named entities (people, places, organizations)."""
         
         # Create universal schema structure
         result = {
-            'id': f"yt:{video_id.lower()}" if video_id else f"yt:unknown-{int(datetime.now().timestamp())}",
+            'id': f"yt:{video_id}" if video_id else f"yt:unknown-{int(datetime.now().timestamp())}",
             'content_source': 'youtube',
             'title': metadata.get('title', '')[:300],  # Limit title length
             'canonical_url': youtube_url,

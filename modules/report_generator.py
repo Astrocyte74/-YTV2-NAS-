@@ -13,6 +13,13 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Union
+
+# SQLite backend support
+try:
+    from .sqlite_content_index import SQLiteContentIndex
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
 import hashlib
 import glob
 
@@ -128,6 +135,32 @@ class JSONReportGenerator:
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         
+        # Initialize SQLite backend if available
+        self.sqlite_db = None
+        if SQLITE_AVAILABLE:
+            try:
+                # Try multiple possible database locations
+                db_paths = [
+                    Path("ytv2_content.db"),              # Root level (NAS location)
+                    Path("data/ytv2_content.db"),         # data subdirectory
+                    Path("./ytv2_content.db"),            # Current directory explicit
+                ]
+                
+                db_path = None
+                for path in db_paths:
+                    if path.exists():
+                        db_path = path
+                        break
+                
+                if db_path:
+                    self.sqlite_db = SQLiteContentIndex(str(db_path))
+                    print(f"✅ SQLite backend initialized: {db_path}")
+                else:
+                    print(f"⚠️  SQLite database not found in: {[str(p) for p in db_paths]}")
+            except Exception as e:
+                print(f"❌ SQLite initialization failed: {e}")
+                self.sqlite_db = None
+        
         # Report schema version for future compatibility
         self.schema_version = "1.0.0"
     
@@ -192,11 +225,170 @@ class JSONReportGenerator:
         if filepath.exists() and not overwrite:
             filepath = self._resolve_filename_conflict(filepath)
         
-        # Save the report
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+        # Save to SQLite database as primary storage (JSON generation removed)
+        if self.sqlite_db:
+            try:
+                self._save_to_sqlite(report)
+                print(f"✅ Saved to SQLite database (JSON generation disabled)")
+            except Exception as e:
+                print(f"❌ SQLite save failed: {e}")
+                print(f"📊 SQLite database available ({self.sqlite_db.get_report_count()} existing records)")
+                # Fallback: create JSON only if SQLite fails
+                print(f"📄 Creating JSON as fallback...")
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(report, f, indent=2, ensure_ascii=False)
+                print(f"⚠️  Fallback JSON created: {filepath}")
+        else:
+            print(f"❌ SQLite database not available - creating JSON fallback")
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+            print(f"📄 JSON fallback created: {filepath}")
         
         return str(filepath.absolute())
+    
+    def _save_to_sqlite(self, report: Dict[str, Any]):
+        """Convert JSON report format to SQLite and save to database."""
+        if not self.sqlite_db:
+            return
+        
+        try:
+            # Extract data for SQLite using same structure as our manual script
+            video_id = report.get('id', '')
+            if not video_id:
+                print("❌ No video ID in report for SQLite")
+                return
+                
+            # Extract video ID without prefix
+            short_video_id = video_id.replace('yt:', '') if video_id.startswith('yt:') else video_id
+            
+            # Extract metadata
+            metadata = report.get('metadata', {})
+            analysis = report.get('analysis', {})
+            
+            # Handle summary format
+            summary_data = report.get('summary', {})
+            if isinstance(summary_data, dict):
+                summary_text = summary_data.get('text', '') or summary_data.get('summary', '') or str(summary_data)
+            else:
+                summary_text = str(summary_data)
+            
+            # Build record data
+            from datetime import datetime
+            now = datetime.now().isoformat()
+            
+            record_data = {
+                'id': video_id,
+                'title': report.get('title', 'Untitled'),
+                'canonical_url': report.get('canonical_url', ''),
+                'thumbnail_url': report.get('thumbnail_url', ''),
+                'published_at': report.get('published_at', ''),
+                'indexed_at': report.get('processed_at', now),
+                'duration_seconds': report.get('duration_seconds', 0),
+                'word_count': report.get('word_count', 0),
+                'has_audio': bool(report.get('media_metadata', {}).get('mp3_file')),
+                'audio_duration_seconds': report.get('media_metadata', {}).get('duration_seconds'),
+                'has_transcript': bool(report.get('transcript')),
+                'transcript_chars': len(report.get('transcript', '')),
+                'video_id': short_video_id,
+                'channel_name': (metadata.get('uploader') or metadata.get('channel') or 'Unknown'),
+                'channel_id': metadata.get('channel_id', ''),
+                'view_count': metadata.get('view_count'),
+                'like_count': metadata.get('like_count'),
+                'comment_count': metadata.get('comment_count'),
+                'category': ', '.join(analysis.get('category', [])) if analysis.get('category') else None,
+                'content_type': analysis.get('content_type'),
+                'complexity_level': analysis.get('complexity_level'),
+                'language': analysis.get('language'),
+                'key_topics': ', '.join(analysis.get('key_topics', [])) if analysis.get('key_topics') else None,
+                'named_entities': ', '.join(analysis.get('named_entities', [])) if analysis.get('named_entities') else None,
+                'format_source': 'direct_processing',
+                'processing_status': 'completed',
+                'created_at': now,
+                'updated_at': now
+            }
+            
+            # Insert into database
+            conn = self.sqlite_db._get_connection()
+            cursor = conn.cursor()
+            
+            insert_sql = '''
+            INSERT OR REPLACE INTO content 
+            (id, title, canonical_url, thumbnail_url, published_at, indexed_at, duration_seconds,
+             word_count, has_audio, audio_duration_seconds, has_transcript, transcript_chars,
+             video_id, channel_name, channel_id, view_count, like_count, comment_count,
+             category, content_type, complexity_level, language, key_topics, named_entities,
+             format_source, processing_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            '''
+            
+            cursor.execute(insert_sql, (
+                record_data['id'], record_data['title'], record_data['canonical_url'], record_data['thumbnail_url'],
+                record_data['published_at'], record_data['indexed_at'], record_data['duration_seconds'],
+                record_data['word_count'], record_data['has_audio'], record_data['audio_duration_seconds'],
+                record_data['has_transcript'], record_data['transcript_chars'], record_data['video_id'],
+                record_data['channel_name'], record_data['channel_id'], record_data['view_count'],
+                record_data['like_count'], record_data['comment_count'], record_data['category'],
+                record_data['content_type'], record_data['complexity_level'], record_data['language'],
+                record_data['key_topics'], record_data['named_entities'], record_data['format_source'],
+                record_data['processing_status'], record_data['created_at'], record_data['updated_at']
+            ))
+            
+            # Also insert summary into content_summaries table (required for dashboard)
+            summary_data = report.get('summary', {})
+            if isinstance(summary_data, dict):
+                summary_text = summary_data.get('text', '') or summary_data.get('summary', '') or str(summary_data)
+            else:
+                summary_text = str(summary_data)
+            
+            if summary_text:
+                summary_insert_sql = '''
+                INSERT OR REPLACE INTO content_summaries (content_id, summary_text, summary_type)
+                VALUES (?, ?, ?)
+                '''
+                cursor.execute(summary_insert_sql, (record_data['id'], summary_text, 'audio'))
+                print(f"📊 Summary saved to content_summaries table")
+            
+            conn.commit()
+            print(f"📊 Successfully saved to SQLite: {record_data['title']}")
+            
+        except Exception as e:
+            print(f"❌ SQLite save error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _update_sqlite_mp3_metadata(self, report_id: str, mp3_duration_seconds: int, voice: str):
+        """Update SQLite record with MP3 metadata after audio generation."""
+        if not self.sqlite_db:
+            return
+            
+        try:
+            conn = self.sqlite_db._get_connection()
+            cursor = conn.cursor()
+            
+            # Update the MP3 metadata fields
+            update_sql = '''
+            UPDATE content 
+            SET has_audio = ?, 
+                audio_duration_seconds = ?,
+                updated_at = ?
+            WHERE id = ?
+            '''
+            
+            from datetime import datetime
+            now = datetime.now().isoformat()
+            
+            cursor.execute(update_sql, (True, mp3_duration_seconds, now, report_id))
+            
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"📊 SQLite MP3 metadata updated for: {report_id}")
+            else:
+                print(f"⚠️  No SQLite record found to update for: {report_id}")
+                
+        except Exception as e:
+            print(f"❌ SQLite MP3 metadata update error: {e}")
+            import traceback
+            traceback.print_exc()
     
     def generate_and_save(self,
                          video_data: Dict[str, Any],
@@ -474,10 +666,10 @@ def create_report_from_youtube_summarizer(summarizer_result: Dict[str, Any],
 
 def update_json_with_mp3_metadata(json_filepath: str, mp3_filepath: str, voice: str = "fable") -> bool:
     """
-    Update an existing JSON report with MP3 metadata after TTS generation.
+    Update SQLite database with MP3 metadata after TTS generation.
     
     Args:
-        json_filepath: Path to the existing JSON report file
+        json_filepath: Path to identify the video (used to extract video ID)
         mp3_filepath: Path to the generated MP3 file
         voice: TTS voice used (default: "fable")
     
@@ -498,32 +690,70 @@ def update_json_with_mp3_metadata(json_filepath: str, mp3_filepath: str, voice: 
         print(f"🔍 File exists: {mp3_path.exists()}")
         mp3_duration_seconds = get_mp3_duration_seconds(str(mp3_path))
         
-        # Read existing JSON
+        # Extract video ID from file path to identify the record
         json_path = Path(json_filepath)
-        if not json_path.exists():
-            print(f"Error: JSON file not found: {json_filepath}")
+        video_id_match = None
+        
+        # Try to extract video ID from filename patterns
+        filename = json_path.stem
+        # Look for YouTube video ID patterns (11 characters)
+        import re
+        video_id_patterns = [
+            r'yt_([A-Za-z0-9_-]{11})',  # yt_VIDEO_ID format
+            r'([A-Za-z0-9_-]{11})',     # Direct video ID
+        ]
+        
+        for pattern in video_id_patterns:
+            match = re.search(pattern, filename)
+            if match:
+                video_id_match = f"yt:{match.group(1)}"
+                break
+        
+        if not video_id_match:
+            print(f"❌ Could not extract video ID from filename: {filename}")
             return False
             
-        with open(json_path, 'r', encoding='utf-8') as f:
-            report = json.load(f)
+        print(f"📊 Extracted video ID for SQLite update: {video_id_match}")
         
-        # Update media metadata with MP3 info
-        if "media_metadata" not in report:
-            print("Warning: media_metadata section not found in JSON, creating it")
-            report["media_metadata"] = {}
+        # Initialize SQLite database connection
+        try:
+            from modules.sqlite_content_index import SQLiteContentIndex
+            sqlite_db = SQLiteContentIndex()
+            print(f"📊 SQLite database initialized")
+        except Exception as e:
+            print(f"❌ Failed to initialize SQLite database: {e}")
+            return False
         
-        report["media_metadata"].update({
-            "mp3_duration_seconds": mp3_duration_seconds,
-            "mp3_voice": voice,
-            "mp3_created_at": datetime.now().isoformat(),
-            "has_audio": True
-        })
+        # Update SQLite database directly (JSON-free workflow)
+        try:
+            # Use the same method logic but adapted for direct calls
+            conn = sqlite_db._get_connection()
+            cursor = conn.cursor()
+            
+            # Update the MP3 metadata fields
+            update_sql = '''
+            UPDATE content 
+            SET has_audio = ?, 
+                audio_duration_seconds = ?,
+                updated_at = ?
+            WHERE id = ?
+            '''
+            
+            now = datetime.now().isoformat()
+            cursor.execute(update_sql, (True, mp3_duration_seconds, now, video_id_match))
+            
+            if cursor.rowcount > 0:
+                conn.commit()
+                print(f"✅ SQLite MP3 metadata updated for: {video_id_match} ({mp3_duration_seconds}s)")
+            else:
+                print(f"⚠️  No SQLite record found to update for: {video_id_match}")
+                
+        except Exception as e:
+            print(f"❌ SQLite MP3 metadata update error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
         
-        # Save updated JSON
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        
-        print(f"✅ Updated JSON with MP3 metadata: {mp3_duration_seconds}s duration")
         return True
         
     except Exception as e:
