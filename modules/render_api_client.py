@@ -268,7 +268,7 @@ class RenderAPIClient:
         try:
             # Get all content with summaries
             cursor = conn.execute("""
-                SELECT c.*, s.summary_text, s.summary_type, s.created_at as summary_created_at
+                SELECT c.*, s.summary_text, s.summary_type
                 FROM content c
                 LEFT JOIN content_summaries s ON c.id = s.content_id
                 ORDER BY c.indexed_at DESC
