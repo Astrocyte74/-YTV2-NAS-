@@ -698,5 +698,21 @@
     "synced": true,
     "created_at": "2025-09-12T00:52:03.249505",
     "last_synced": "2025-09-12T00:52:30.948174"
+  },
+  "zrvI5Bps1hc:audio": {
+    "stem": "is_trump_okay_the_daily_show_comedy_central_africa_zrvI5Bps1hc",
+    "json": "/app/data/reports/is_trump_okay_the_daily_show_comedy_central_africa_zrvI5Bps1hc.json",
+    "mp3": "exports/audio_zrvI5Bps1hc_20250912_045750.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T04:57:50.292209",
+    "last_synced": "2025-09-12T04:58:21.013778"
+  },
+  "lTOo4v5KGkk:audio": {
+    "stem": "claude_code_gets_a_native_ui_inside_gitbutler_lTOo4v5KGkk",
+    "json": "/app/data/reports/claude_code_gets_a_native_ui_inside_gitbutler_lTOo4v5KGkk.json",
+    "mp3": "exports/audio_lTOo4v5KGkk_20250912_052104.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T05:21:03.511527",
+    "last_synced": "2025-09-12T05:21:23.573262"
   }
 }

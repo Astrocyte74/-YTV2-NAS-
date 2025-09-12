@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
 NAS-to-Render Sync Module
-Robust upload functionality with exponential backoff for cold starts
+Robust API-based synchronization replacing database file uploads
 
 Required environment variables:
-- RENDER_DASHBOARD_URL: Full URL to Render deployment (e.g., https://ytv2-render.onrender.com)
+- RENDER_API_URL: Full URL to Render deployment (e.g., https://ytv2-render.onrender.com)
 - SYNC_SECRET: Shared secret for authentication (must match Render's SYNC_SECRET)
 
 The sync module automatically handles:
-- Render cold starts with exponential backoff retry (6 attempts: 1s, 2s, 4s, 8s, 16s, 32s)
+- Direct API calls to create/update content using UPSERT logic
+- Render cold starts with exponential backoff retry
 - Network errors and connection timeouts
-- Proper multipart file upload formatting
-- Audio file detection and pairing with reports
+- Audio file upload with content pairing
 """
 
 import os
@@ -21,50 +21,39 @@ import json
 import requests
 from pathlib import Path
 import logging
+from modules.render_api_client import RenderAPIClient, create_client_from_env
 
 logger = logging.getLogger(__name__)
 
-def sync_sqlite_database():
-    """Sync SQLite database and recent MP3 files to Dashboard"""
-    # Use single consolidated database location
-    db_path = Path("data/ytv2_content.db")
-    
-    if not db_path.exists():
-        logger.error(f"SQLite database not found: {db_path}")
-        return False
-
-    render_url = os.getenv('RENDER_DASHBOARD_URL')
-    sync_secret = os.getenv('SYNC_SECRET')
-    
-    if not render_url or not sync_secret:
-        logger.error("RENDER_DASHBOARD_URL or SYNC_SECRET not set")
-        return False
-    
-    logger.info(f"🗄️  Syncing SQLite database and MP3 files to {render_url}")
-    
+def sync_content_via_api():
+    """Sync all content to Render using API calls instead of database file upload."""
     try:
-        headers = {'Authorization': f'Bearer {sync_secret}'}
-        
-        # First, sync the database
-        with open(db_path, 'rb') as db_file:
-            files = {
-                'database': ('ytv2_content.db', db_file, 'application/x-sqlite3')
-            }
+        # Use environment variable compatible with new client
+        render_url = os.getenv('RENDER_DASHBOARD_URL') or os.getenv('RENDER_API_URL')
+        if render_url and 'RENDER_API_URL' not in os.environ:
+            os.environ['RENDER_API_URL'] = render_url
             
-            response = requests.post(
-                f"{render_url}/api/upload-database",
-                headers=headers,
-                files=files,
-                timeout=60
-            )
+        client = create_client_from_env()
+        
+        # Test connection first
+        if not client.test_connection():
+            logger.error("❌ Failed to connect to Render API")
+            return False
             
-            if response.status_code != 200:
-                logger.error(f"❌ Database sync failed: {response.status_code}")
-                return False
+        logger.info("🔗 Connected to Render API successfully")
         
-        logger.info("✅ SQLite database synced successfully")
+        # Sync all content from database via API
+        db_path = Path("data/ytv2_content.db")
+        if not db_path.exists():
+            logger.error(f"SQLite database not found: {db_path}")
+            return False
+            
+        logger.info(f"🗄️  Syncing content from {db_path} via API...")
+        stats = client.sync_content_from_database(db_path)
         
-        # Second, sync most recent MP3 file
+        logger.info(f"✅ Content sync completed: {stats['created']} created, {stats['updated']} updated, {stats['errors']} errors")
+        
+        # Sync most recent MP3 file
         exports_dir = Path("exports")
         if exports_dir.exists():
             mp3_files = sorted(exports_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
@@ -74,29 +63,14 @@ def sync_sqlite_database():
                 
                 for mp3_file in mp3_files:
                     try:
-                        # Check if MP3 already exists on Render to avoid re-uploading
-                        check_response = requests.head(f"{render_url}/exports/{mp3_file.name}", timeout=10)
-                        if check_response.status_code == 200:
-                            logger.info(f"⏭️  Skipped MP3 (already exists): {mp3_file.name}")
-                            continue
-                            
-                        with open(mp3_file, 'rb') as audio_file:
-                            files = {
-                                'audio': (mp3_file.name, audio_file, 'audio/mpeg')
-                            }
-                            
-                            response = requests.post(
-                                f"{render_url}/api/upload-audio",
-                                headers=headers,
-                                files=files,
-                                timeout=30
-                            )
-                            
-                            if response.status_code == 200:
-                                logger.info(f"✅ Synced MP3: {mp3_file.name}")
-                            else:
-                                logger.warning(f"⚠️  MP3 sync failed: {mp3_file.name} ({response.status_code})")
-                                
+                        # Extract content ID from filename (assuming format: video_id_timestamp.mp3)
+                        stem = mp3_file.stem
+                        # Try to find matching content by stem/video_id
+                        content_id = stem  # Will be resolved by API
+                        
+                        result = client.upload_audio_file(mp3_file, content_id)
+                        logger.info(f"✅ Synced MP3: {mp3_file.name}")
+                        
                     except Exception as e:
                         logger.warning(f"⚠️  Error syncing {mp3_file.name}: {e}")
             else:
@@ -105,14 +79,20 @@ def sync_sqlite_database():
             logger.warning("📂 Exports directory not found - skipping MP3 sync")
             
         return True
-                
+        
     except Exception as e:
-        logger.error(f"❌ Database sync error: {e}")
+        logger.error(f"❌ API sync error: {e}")
         return False
+
+# Legacy function name for backward compatibility
+def sync_sqlite_database():
+    """Legacy function - redirects to new API-based sync."""
+    logger.warning("sync_sqlite_database() is deprecated, use sync_content_via_api()")
+    return sync_content_via_api()
 
 def upload_to_render(report_path, audio_path=None, max_retries=6):
     """
-    Upload report and audio to Render with robust retry logic for cold starts
+    Upload report and audio to Render using new API client
     
     Args:
         report_path (str/Path): Path to JSON report file
@@ -123,17 +103,13 @@ def upload_to_render(report_path, audio_path=None, max_retries=6):
         bool: True if upload succeeded, False otherwise
     """
     try:
-        # Get configuration from environment
-        render_url = os.environ.get('RENDER_DASHBOARD_URL', '').rstrip('/')
-        sync_secret = os.environ.get('SYNC_SECRET', '')
+        # Set up environment for API client
+        render_url = os.environ.get('RENDER_DASHBOARD_URL') or os.environ.get('RENDER_API_URL', '')
+        if render_url and 'RENDER_API_URL' not in os.environ:
+            os.environ['RENDER_API_URL'] = render_url.rstrip('/')
+            
+        client = create_client_from_env()
         
-        if not render_url or not sync_secret:
-            logger.error("RENDER_DASHBOARD_URL and SYNC_SECRET must be set")
-            return False
-        
-        url = f"{render_url}/api/upload-report"
-        
-        # Derive stem from report filename for consistent naming
         report_path = Path(report_path)
         if not report_path.exists():
             logger.error(f"Report file not found: {report_path}")
@@ -141,25 +117,23 @@ def upload_to_render(report_path, audio_path=None, max_retries=6):
             
         stem = report_path.stem
         
-        # Validate JSON contains media_metadata if audio is being uploaded
-        if audio_path and Path(audio_path).exists():
-            try:
-                with open(report_path, 'r', encoding='utf-8') as f:
-                    report_data = json.load(f)
+        # Load and validate JSON report
+        try:
+            with open(report_path, 'r', encoding='utf-8') as f:
+                report_data = json.load(f)
+            
+            # Convert JSON report to universal schema format expected by API
+            if 'content_source' not in report_data:
+                # Legacy format - needs conversion
+                logger.info(f"Converting legacy report format for {stem}")
+                content_data = convert_legacy_report_to_api_format(report_data)
+            else:
+                # Already in universal schema format
+                content_data = report_data
                 
-                media_metadata = report_data.get('media_metadata', {})
-                has_audio = media_metadata.get('has_audio', False)
-                mp3_duration = media_metadata.get('mp3_duration_seconds')
-                word_count = media_metadata.get('summary_word_count', 0)
-                reading_time = media_metadata.get('estimated_reading_time_minutes', 0)
-                
-                if not has_audio or mp3_duration is None:
-                    logger.warning(f"JSON missing MP3 metadata for {stem} - will sync anyway")
-                else:
-                    logger.info(f"✅ Validated JSON has MP3 metadata: {mp3_duration}s duration, {word_count} words, {reading_time}m read time")
-                    
-            except Exception as e:
-                logger.warning(f"Could not validate JSON metadata for {stem}: {e} - will sync anyway")
+        except Exception as e:
+            logger.error(f"Failed to load/parse report {stem}: {e}")
+            return False
         
         # Auto-pair audio if not provided using stem-based matching
         if audio_path is None:
@@ -168,80 +142,96 @@ def upload_to_render(report_path, audio_path=None, max_retries=6):
                 audio_path = candidate
                 logger.info(f"Auto-detected audio file: {audio_path}")
         
-        # Warm-up ping to wake Render from cold start
+        # Upload content via API
         try:
-            logger.info("🔄 Warming up Render service...")
-            requests.get(f"{render_url}/health", timeout=5)
-        except Exception:
-            pass  # Ignore warm-up failures
-        
-        headers = {
-            'X-Sync-Secret': sync_secret,
-            'X-Report-Stem': stem  # For idempotency
-        }
-        
-        # Retry with exponential backoff
-        backoff = 1.0
-        for attempt in range(max_retries):
-            try:
-                logger.info(f"Upload attempt {attempt + 1}/{max_retries} for {stem}")
+            logger.info(f"📡 Uploading content via API: {stem}")
+            result = client.create_or_update_content(content_data)
+            
+            content_id = result.get('id') or stem
+            action = result.get('action', 'unknown')
+            
+            status_msg = "♻️  Already exists" if action == 'updated' else "✅ Successfully created"
+            logger.info(f"{status_msg}: {content_id}")
+            
+            # Upload audio if available
+            if audio_path and Path(audio_path).exists():
+                logger.info(f"🎵 Uploading audio file: {Path(audio_path).name}")
+                audio_result = client.upload_audio_file(Path(audio_path), content_id)
+                logger.info(f"✅ Audio uploaded successfully")
                 
-                # Use context managers to properly close files
-                with open(report_path, 'rb') as rf:
-                    files = {'report': (f'{stem}.json', rf, 'application/json')}
-                    
-                    if audio_path and Path(audio_path).exists():
-                        with open(audio_path, 'rb') as af:
-                            audio_filename = Path(audio_path).name  # Use actual filename
-                            files['audio'] = (audio_filename, af, 'audio/mpeg')
-                            logger.info(f"🎵 Uploading audio file: {audio_filename}")
-                            logger.info(f"🌐 POST to: {url}")
-                            response = requests.post(url, files=files, headers=headers, timeout=30)
-                            logger.info(f"📡 Response: {response.status_code} - {response.text[:200]}")
-                    else:
-                        response = requests.post(url, files=files, headers=headers, timeout=30)
-                
-                if response.status_code in (200, 201):
-                    result = response.json()
-                    idempotent = result.get('idempotent', False)
-                    status_msg = "♻️  Already synced" if idempotent else "✅ Successfully uploaded"
-                    logger.info(f"{status_msg}: {stem}")
-                    return True
-                
-                # Fatal errors - don't retry
-                if response.status_code in (401, 403, 400):
-                    logger.error(f"Fatal upload error ({response.status_code}): {response.text[:200]}")
-                    return False
-                
-                # 409 means already exists but different content
-                if response.status_code == 409:
-                    logger.warning(f"Conflict - report exists with different content: {stem}")
-                    return False
-                
-                # Retryable errors (502, 503, 504 for cold starts)
-                logger.warning(f"Upload attempt {attempt + 1} failed: {response.status_code} - {response.text[:100]}")
-                
-            except requests.exceptions.RequestException as e:
-                # Network errors are retryable (Render cold start, connection issues)
-                logger.warning(f"Upload attempt {attempt + 1} network error: {str(e)[:100]}")
-                
-            except Exception as e:
-                logger.error(f"Unexpected error on attempt {attempt + 1}: {e}")
-                
-            # Don't sleep on the last attempt
-            if attempt < max_retries - 1:
-                jitter = random.uniform(0.0, 0.4)  # Fixed range
-                sleep_time = backoff + jitter
-                logger.info(f"Retrying in {sleep_time:.1f}s...")
-                time.sleep(sleep_time)
-                backoff *= 2  # Exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s
-        
-        logger.error(f"❌ Upload failed after {max_retries} attempts: {stem}")
-        return False
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ API upload failed for {stem}: {e}")
+            return False
         
     except Exception as e:
         logger.error(f"Upload function error: {e}")
         return False
+
+
+def convert_legacy_report_to_api_format(legacy_report: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert legacy JSON report format to universal schema API format."""
+    
+    def parse_json_field(value):
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except:
+                return []
+        return []
+    
+    # Extract video metadata from legacy format
+    video_info = legacy_report.get('video', {})
+    
+    # Convert to universal schema format
+    content_data = {
+        'content_source': 'youtube',
+        'source_metadata': {
+            'youtube': {
+                'video_id': video_info.get('video_id', ''),
+                'title': video_info.get('title', 'Untitled'),
+                'channel_name': video_info.get('channel', ''),
+                'published_at': video_info.get('upload_date', ''),
+                'duration_seconds': video_info.get('duration', 0),
+                'thumbnail_url': video_info.get('thumbnail', ''),
+                'canonical_url': video_info.get('url', '')
+            }
+        },
+        'content_analysis': {
+            'language': legacy_report.get('processing', {}).get('language', 'en'),
+            'category': parse_json_field(legacy_report.get('summary', {}).get('analysis', {}).get('categories', [])),
+            'content_type': legacy_report.get('summary', {}).get('analysis', {}).get('content_type', ''),
+            'complexity_level': legacy_report.get('summary', {}).get('analysis', {}).get('complexity', ''),
+            'key_topics': parse_json_field(legacy_report.get('summary', {}).get('analysis', {}).get('topics', [])),
+            'named_entities': []  # Not available in legacy format
+        },
+        'media_info': {
+            'has_audio': bool(legacy_report.get('media_metadata', {}).get('has_audio', False)),
+            'audio_duration_seconds': legacy_report.get('media_metadata', {}).get('mp3_duration_seconds', 0),
+            'has_transcript': True,  # Assume true for legacy reports
+            'transcript_chars': len(str(legacy_report.get('summary', {}).get('content', ''))),
+            'word_count': legacy_report.get('stats', {}).get('summary_word_count', 0)
+        },
+        'processing_metadata': {
+            'indexed_at': legacy_report.get('metadata', {}).get('generated_at', ''),
+            'content_id': legacy_report.get('metadata', {}).get('report_id', '')
+        }
+    }
+    
+    # Add summary if available
+    summary_content = legacy_report.get('summary', {}).get('content', '')
+    if summary_content:
+        content_data['summary'] = {
+            'content': {
+                'summary': summary_content,
+                'summary_type': legacy_report.get('summary', {}).get('type', 'comprehensive')
+            }
+        }
+    
+    return content_data
 
 def sync_report_to_render(video_id, timestamp, reports_dir='./data/reports', exports_dir='./exports'):
     """

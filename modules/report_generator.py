@@ -20,6 +20,14 @@ try:
     SQLITE_AVAILABLE = True
 except ImportError:
     SQLITE_AVAILABLE = False
+
+# API client support for direct Render sync
+try:
+    from .render_api_client import RenderAPIClient, create_client_from_env
+    API_CLIENT_AVAILABLE = True
+except ImportError:
+    API_CLIENT_AVAILABLE = False
+
 import hashlib
 import glob
 
@@ -150,6 +158,16 @@ class JSONReportGenerator:
             except Exception as e:
                 print(f"❌ SQLite initialization failed: {e}")
                 self.sqlite_db = None
+        
+        # Initialize API client for direct Render sync
+        self.api_client = None
+        if API_CLIENT_AVAILABLE and os.getenv('RENDER_API_URL') and os.getenv('SYNC_SECRET'):
+            try:
+                self.api_client = create_client_from_env()
+                print(f"✅ Render API client initialized")
+            except Exception as e:
+                print(f"❌ API client initialization failed: {e}")
+                self.api_client = None
         
         # Report schema version for future compatibility
         self.schema_version = "1.0.0"
@@ -379,6 +397,96 @@ class JSONReportGenerator:
             print(f"❌ SQLite MP3 metadata update error: {e}")
             import traceback
             traceback.print_exc()
+    
+    def sync_report_to_api(self, report: Dict[str, Any], audio_path: Optional[Path] = None) -> bool:
+        """Sync report directly to Render API."""
+        if not self.api_client:
+            print("ℹ️  API client not available - skipping API sync")
+            return False
+            
+        try:
+            # Convert report to universal schema format
+            content_data = self._convert_to_universal_schema(report)
+            
+            print(f"📡 Syncing report to Render API...")
+            result = self.api_client.create_or_update_content(content_data)
+            
+            content_id = result.get('id')
+            action = result.get('action', 'unknown')
+            
+            print(f"✅ API sync successful - {action}: {content_id}")
+            
+            # Upload audio if available
+            if audio_path and audio_path.exists():
+                print(f"🎵 Uploading audio file...")
+                audio_result = self.api_client.upload_audio_file(audio_path, content_id)
+                print(f"✅ Audio uploaded successfully")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ API sync failed: {e}")
+            return False
+    
+    def _convert_to_universal_schema(self, report: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert report to universal schema format for API."""
+        
+        # Extract data from report structure
+        video_info = report.get('video', {})
+        summary_info = report.get('summary', {})
+        analysis_info = summary_info.get('analysis', {}) if isinstance(summary_info, dict) else {}
+        
+        # Build universal schema format
+        content_data = {
+            'content_source': 'youtube',
+            'source_metadata': {
+                'youtube': {
+                    'video_id': video_info.get('video_id', ''),
+                    'title': video_info.get('title', 'Untitled'),
+                    'channel_name': video_info.get('channel', ''),
+                    'published_at': video_info.get('upload_date', ''),
+                    'duration_seconds': video_info.get('duration', 0),
+                    'thumbnail_url': video_info.get('thumbnail', ''),
+                    'canonical_url': video_info.get('url', '')
+                }
+            },
+            'content_analysis': {
+                'language': analysis_info.get('language', 'en'),
+                'category': analysis_info.get('category', []) if isinstance(analysis_info.get('category'), list) else [],
+                'content_type': analysis_info.get('content_type', ''),
+                'complexity_level': analysis_info.get('complexity_level', ''),
+                'key_topics': analysis_info.get('key_topics', []) if isinstance(analysis_info.get('key_topics'), list) else [],
+                'named_entities': analysis_info.get('named_entities', []) if isinstance(analysis_info.get('named_entities'), list) else []
+            },
+            'media_info': {
+                'has_audio': bool(report.get('media_metadata', {}).get('has_audio', False)),
+                'audio_duration_seconds': report.get('media_metadata', {}).get('mp3_duration_seconds', 0),
+                'has_transcript': True,  # Assume true for processed reports
+                'transcript_chars': len(str(summary_info.get('content', '') if isinstance(summary_info, dict) else str(summary_info))),
+                'word_count': report.get('stats', {}).get('summary_word_count', 0)
+            },
+            'processing_metadata': {
+                'indexed_at': report.get('metadata', {}).get('generated_at', ''),
+                'content_id': report.get('metadata', {}).get('report_id', '')
+            }
+        }
+        
+        # Add summary content
+        summary_content = ''
+        if isinstance(summary_info, dict):
+            summary_content = summary_info.get('content', '') or summary_info.get('summary', '')
+        elif isinstance(summary_info, str):
+            summary_content = summary_info
+        
+        if summary_content:
+            content_data['summary'] = {
+                'content': {
+                    'summary': summary_content,
+                    'summary_type': summary_info.get('type', 'comprehensive') if isinstance(summary_info, dict) else 'comprehensive'
+                }
+            }
+        
+        return content_data
     
     def generate_and_save(self,
                          video_data: Dict[str, Any],
