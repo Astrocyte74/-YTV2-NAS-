@@ -304,6 +304,7 @@ class JSONReportGenerator:
                 'like_count': metadata.get('like_count'),
                 'comment_count': metadata.get('comment_count'),
                 'category': ', '.join(analysis.get('category', [])) if analysis.get('category') else None,
+                'subcategory': analysis.get('subcategory'),
                 'content_type': analysis.get('content_type'),
                 'complexity_level': analysis.get('complexity_level'),
                 'language': analysis.get('language'),
@@ -324,9 +325,9 @@ class JSONReportGenerator:
             (id, title, canonical_url, thumbnail_url, published_at, indexed_at, duration_seconds,
              word_count, has_audio, audio_duration_seconds, has_transcript, transcript_chars,
              video_id, channel_name, channel_id, view_count, like_count, comment_count,
-             category, content_type, complexity_level, language, key_topics, named_entities,
+             category, subcategory, content_type, complexity_level, language, key_topics, named_entities,
              format_source, processing_status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
             
             cursor.execute(insert_sql, (
@@ -336,7 +337,7 @@ class JSONReportGenerator:
                 record_data['has_transcript'], record_data['transcript_chars'], record_data['video_id'],
                 record_data['channel_name'], record_data['channel_id'], record_data['view_count'],
                 record_data['like_count'], record_data['comment_count'], record_data['category'],
-                record_data['content_type'], record_data['complexity_level'], record_data['language'],
+                record_data.get('subcategory'), record_data['content_type'], record_data['complexity_level'], record_data['language'],
                 record_data['key_topics'], record_data['named_entities'], record_data['format_source'],
                 record_data['processing_status'], record_data['created_at'], record_data['updated_at']
             ))

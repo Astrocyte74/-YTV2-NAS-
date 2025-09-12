@@ -355,11 +355,16 @@ class RenderAPIClient:
         def parse_json_field(value: str) -> List[str]:
             if not value:
                 return []
+            # Handle plain string categories (like "Education", "Technology")
+            if not value.startswith('['):
+                return [value.strip()]
+            # Handle JSON array format (like ["General"] or [])
             try:
                 result = json.loads(value)
                 return result if isinstance(result, list) else []
             except:
-                return []
+                # If JSON parsing fails, treat as plain string
+                return [value.strip()]
         
         # Build content data in flat format expected by Dashboard API
         content_data = {
@@ -382,6 +387,7 @@ class RenderAPIClient:
             'like_count': row['like_count'] or 0,
             'comment_count': row['comment_count'] or 0,
             'category': parse_json_field(row['category']),
+            'subcategory': row.get('subcategory'),
             'content_type': row['content_type'] or '',
             'complexity_level': row['complexity_level'] or '',
             'language': row['language'] or 'en',
