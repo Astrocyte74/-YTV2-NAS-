@@ -1016,8 +1016,8 @@ class YouTubeSummarizer:
         allowed_categories = [
             "Education", "Entertainment", "Technology", "AI Software Development", "Computer Hardware", "Home Theater",
             "Business", "Health & Wellness", "How-To & DIY",
-            "News & Politics", "Gaming", "Lifestyle", "Science & Nature", "Astronomy", "History & Culture",
-            "History – World War I (WWI)", "History – World War II (WWII)", "History – Cold War",
+            "News & Politics", "Gaming", "Lifestyle", "Science & Nature", "Astronomy", "History",
+            "World War I (WWI)", "World War II (WWII)", "Cold War",
             "Arts & Creativity", "Religion & Philosophy", "Sports", "Hobbies & Special Interests",
             "Vlogs & Personal", "Reviews & Products", "General"
         ]
@@ -1025,18 +1025,18 @@ class YouTubeSummarizer:
         allowed_content_types = ["Tutorial", "Review", "Discussion", "News", "Documentary", 
                                 "Interview", "Presentation", "Guide"]
         allowed_subcategories = {
-            "History – World War I (WWI)": [
+            "World War I (WWI)": [
                 "Causes & Prelude", "Major Battles & Campaigns", "Home Front & Society",
                 "Technology & Weapons", "Diplomacy & Treaties (Versailles)",
                 "Biographies & Leaders", "Aftermath & Interwar"
             ],
-            "History – World War II (WWII)": [
+            "World War II (WWII)": [
                 "Causes & Prelude", "European Theatre", "Pacific Theatre",
                 "Home Front & Society", "Technology & Weapons", "Intelligence & Codebreaking",
                 "Holocaust & War Crimes", "Diplomacy & Conferences (Yalta, Potsdam)",
                 "Biographies & Commanders", "Aftermath & Reconstruction"
             ],
-            "History – Cold War": [
+            "Cold War": [
                 "Origins & Ideologies", "Proxy Wars (Korea, Vietnam, Afghanistan)",
                 "Nuclear Strategy & Arms Race", "Espionage & Intelligence",
                 "Space Race & Technology", "Domestic Life & Culture",
@@ -1182,10 +1182,10 @@ IMPORTANT: Choose the most specific category that best matches the content:
 - Lifestyle: Fashion, travel, food, relationships, personal development
 - Science & Nature: Research, experiments, discoveries, biology, physics, environment
 - Astronomy: Subcategories: Solar System & Planets; Stars & Stellar Evolution; Galaxies & Cosmology; Telescopes & Observing; Space Missions & Exploration; Astrophotography; Amateur Astronomy; Space News & Discoveries
-- History & Culture: General history, culture, heritage beyond the specific eras below
-- History – World War I (WWI): Subcategories: Causes & Prelude; Major Battles & Campaigns; Home Front & Society; Technology & Weapons; Diplomacy & Treaties (Versailles); Biographies & Leaders; Aftermath & Interwar
-- History – World War II (WWII): Subcategories: Causes & Prelude; European Theatre; Pacific Theatre; Home Front & Society; Technology & Weapons; Intelligence & Codebreaking; Holocaust & War Crimes; Diplomacy & Conferences (Yalta, Potsdam); Biographies & Commanders; Aftermath & Reconstruction
-- History – Cold War: Subcategories: Origins & Ideologies; Proxy Wars (Korea, Vietnam, Afghanistan); Nuclear Strategy & Arms Race; Espionage & Intelligence; Space Race & Technology; Domestic Life & Culture; Diplomacy & Crises (Berlin, Cuba); Détente & End of Cold War; Leaders & Biographies
+- History: General history, culture, heritage, ancient civilizations, other historical eras
+- World War I (WWI): Subcategories: Causes & Prelude; Major Battles & Campaigns; Home Front & Society; Technology & Weapons; Diplomacy & Treaties (Versailles); Biographies & Leaders; Aftermath & Interwar
+- World War II (WWII): Subcategories: Causes & Prelude; European Theatre; Pacific Theatre; Home Front & Society; Technology & Weapons; Intelligence & Codebreaking; Holocaust & War Crimes; Diplomacy & Conferences (Yalta, Potsdam); Biographies & Commanders; Aftermath & Reconstruction
+- Cold War: Subcategories: Origins & Ideologies; Proxy Wars (Korea, Vietnam, Afghanistan); Nuclear Strategy & Arms Race; Espionage & Intelligence; Space Race & Technology; Domestic Life & Culture; Diplomacy & Crises (Berlin, Cuba); Détente & End of Cold War; Leaders & Biographies
 - Arts & Creativity: Drawing, music production, dance, photography, videography, literature
 - Religion & Philosophy: Religious teachings, spirituality, doctrine, ethics, philosophy
 - Sports: Matches, analysis, training, highlights, athlete profiles
