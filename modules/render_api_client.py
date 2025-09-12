@@ -116,7 +116,11 @@ class RenderAPIClient:
             
             if response.status_code == 200:
                 result = response.json()
-                action = result.get('action', 'unknown')
+                # Dashboard returns 'upserted' instead of 'action'
+                if result.get('upserted'):
+                    action = "created/updated" 
+                else:
+                    action = result.get('action', 'unknown')
                 content_id = result.get('id', 'unknown')
                 logger.info(f"Content {action}: {content_id}")
                 return result
