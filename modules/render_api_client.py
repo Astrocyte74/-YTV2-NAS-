@@ -109,6 +109,9 @@ class RenderAPIClient:
             requests.RequestException: If API call fails
         """
         try:
+            # Debug logging for troubleshooting
+            logger.debug(f"📤 Uploading content: {json.dumps(content_data, indent=2)}")
+            
             response = self._make_request('POST', '/api/content', json=content_data)
             
             if response.status_code == 200:
@@ -316,49 +319,42 @@ class RenderAPIClient:
             except:
                 return []
         
-        # Build content data in universal schema format
+        # Build content data in flat format expected by Dashboard API
         content_data = {
-            'content_source': 'youtube',
-            'source_metadata': {
-                'youtube': {
-                    'video_id': row['video_id'] or '',
-                    'title': row['title'] or 'Untitled',
-                    'channel_name': row['channel_name'] or '',
-                    'published_at': row['published_at'] or '',
-                    'duration_seconds': row['duration_seconds'] or 0,
-                    'thumbnail_url': row['thumbnail_url'] or '',
-                    'canonical_url': row['canonical_url'] or ''
-                }
-            },
-            'content_analysis': {
-                'language': row['language'] or 'en',
-                'category': parse_json_field(row['category']),
-                'content_type': row['content_type'] or '',
-                'complexity_level': row['complexity_level'] or '',
-                'key_topics': parse_json_field(row['key_topics']),
-                'named_entities': parse_json_field(row['named_entities'])
-            },
-            'media_info': {
-                'has_audio': bool(row['has_audio']),
-                'audio_duration_seconds': row['audio_duration_seconds'] or 0,
-                'has_transcript': bool(row['has_transcript']),
-                'transcript_chars': row['transcript_chars'] or 0,
-                'word_count': row['word_count'] or 0
-            },
-            'processing_metadata': {
-                'indexed_at': row['indexed_at'] or '',
-                'content_id': row['id'] or ''
-            }
+            'id': row['id'] or '',
+            'title': row['title'] or 'Untitled',
+            'canonical_url': row['canonical_url'] or '',
+            'thumbnail_url': row['thumbnail_url'] or '',
+            'published_at': row['published_at'] or '',
+            'indexed_at': row['indexed_at'] or '',
+            'duration_seconds': row['duration_seconds'] or 0,
+            'word_count': row['word_count'] or 0,
+            'has_audio': bool(row['has_audio']),
+            'audio_duration_seconds': row['audio_duration_seconds'] or 0,
+            'has_transcript': bool(row['has_transcript']),
+            'transcript_chars': row['transcript_chars'] or 0,
+            'video_id': row['video_id'] or '',
+            'channel_name': row['channel_name'] or '',
+            'channel_id': row['channel_id'] or '',
+            'view_count': row['view_count'] or 0,
+            'like_count': row['like_count'] or 0,
+            'comment_count': row['comment_count'] or 0,
+            'category': parse_json_field(row['category']),
+            'content_type': row['content_type'] or '',
+            'complexity_level': row['complexity_level'] or '',
+            'language': row['language'] or 'en',
+            'key_topics': parse_json_field(row['key_topics']),
+            'named_entities': parse_json_field(row['named_entities']),
+            'format_source': 'api',
+            'processing_status': 'complete',
+            'created_at': row['created_at'] or '',
+            'updated_at': row['updated_at'] or ''
         }
         
-        # Add summary if available
+        # Add summary if available - store as flat field for Dashboard compatibility
         if row['summary_text']:
-            content_data['summary'] = {
-                'content': {
-                    'summary': row['summary_text'],
-                    'summary_type': row['summary_type'] or 'comprehensive'
-                }
-            }
+            content_data['summary_text'] = row['summary_text']
+            content_data['summary_type'] = row['summary_type'] or 'comprehensive'
         
         return content_data
 
