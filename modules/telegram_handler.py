@@ -443,15 +443,9 @@ class YouTubeTelegramBot:
                     logging.info(f"♻️ SKIPPED: {video_id} already on dashboard")
                     return
                 else:
-                    # Re-sync if missing from Render
-                    logging.info(f"🔄 Re-syncing {entry['stem']} to Render")
-                    if upload_to_render(entry["json"], entry.get("mp3")):
-                        await query.edit_message_text("♻️ Re-synced existing summary to dashboard!")
-                        logging.info(f"✅ RE-SYNCED: {video_id} restored to dashboard")
-                    else:
-                        await query.edit_message_text("❌ Failed to re-sync existing summary")
-                        logging.error(f"❌ RE-SYNC FAILED: {video_id}")
-                    return
+                    # Content exists in DB but not Dashboard - proceed with fresh processing
+                    logging.info(f"🔄 Content exists in database but missing from Dashboard - processing fresh")
+                    # Continue to fresh processing below instead of trying to re-sync files
             
             # Process the video (new processing)
             logging.info(f"🎬 PROCESSING: {video_id} | {summary_type} | user: {user_name} | URL: {self.last_video_url}")
@@ -523,11 +517,18 @@ class YouTubeTelegramBot:
                         json_path_obj = Path(json_path)
                         stem = json_path_obj.stem
                         
-                        # Sync to Render (no audio for non-audio summaries)
-                        logging.info(f"🚀 SYNC START: Uploading to Render dashboard...")
-                        sync_success = upload_to_render(str(json_path_obj), None)
+                        # Efficiently sync to Render (no audio for non-audio summaries)
+                        logging.info(f"📡 SYNC START: Uploading to Render dashboard...")
+                        from nas_sync import sync_single_content_to_render
+                        
+                        # Extract video ID for targeted sync
+                        video_metadata = result.get('metadata', {})
+                        video_id = video_metadata.get('video_id', '')
+                        content_id = f"yt:{video_id}" if video_id else stem
+                        
+                        sync_success = sync_single_content_to_render(content_id, None)  # No audio
                         if sync_success:
-                            logging.info(f"✅ SYNC SUCCESS: 📊 → {stem}")
+                            logging.info(f"✅ SYNC SUCCESS: 📊 → {content_id}")
                             
                             # Update ledger and mark as synced
                             entry = ledger.get(video_id, summary_type)
@@ -762,15 +763,16 @@ class YouTubeTelegramBot:
                                 ledger.upsert(video_id, summary_type, entry)
                                 logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
                             
-                            # Sync SQLite database to Render (includes all data: record, summary, audio metadata)
+                            # Efficiently sync just this content to Render
                             try:
-                                from nas_sync import sync_sqlite_database
-                                logging.info("🗄️ Syncing SQLite database to Render...")
-                                db_sync_success = sync_sqlite_database()
+                                from nas_sync import sync_single_content_to_render
+                                content_id = f"yt:{video_id}"
+                                logging.info(f"📡 Syncing new content to Render: {content_id}")
+                                db_sync_success = sync_single_content_to_render(content_id, audio_filepath)
                                 if db_sync_success:
-                                    logging.info("✅ FULL SYNC COMPLETE: 📊+🎵 → SQLite database synced to Render")
+                                    logging.info(f"✅ CONTENT SYNCED: 📊+🎵 → {content_id} synced to Render")
                                 else:
-                                    logging.warning("⚠️ SQLite database sync failed")
+                                    logging.warning(f"⚠️ Content sync failed for {content_id}")
                             except Exception as db_sync_error:
                                 logging.error(f"❌ Database sync error: {db_sync_error}")
                         else:
@@ -971,6 +973,8 @@ class YouTubeTelegramBot:
                 
         except Exception as e:
             logging.error(f"Error sending long message: {e}")
+            import traceback
+            logging.error(f"Full traceback: {traceback.format_exc()}")
             # Fallback to truncated message with buttons
             truncated_summary = summary_text[:1000] + "..." if len(summary_text) > 1000 else summary_text
             fallback_message = f"{header_text}\n{truncated_summary}\n\n⚠️ *Summary was truncated due to length. View full summary on dashboard.*"

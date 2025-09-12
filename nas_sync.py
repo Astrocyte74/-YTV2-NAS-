@@ -234,6 +234,53 @@ def convert_legacy_report_to_api_format(legacy_report: Dict[str, Any]) -> Dict[s
     
     return content_data
 
+def sync_single_content_to_render(content_id: str, audio_path: str = None) -> bool:
+    """
+    Efficiently sync a single content record to Render (replaces full database sync)
+    
+    Args:
+        content_id (str): Content ID like 'yt:n2Fluyr3lbc'
+        audio_path (str): Optional path to MP3 file to upload
+    
+    Returns:
+        bool: True if sync succeeded
+    """
+    try:
+        # Set up environment for API client
+        render_url = os.environ.get('RENDER_DASHBOARD_URL') or os.environ.get('RENDER_API_URL', '')
+        if render_url and 'RENDER_API_URL' not in os.environ:
+            os.environ['RENDER_API_URL'] = render_url.rstrip('/')
+            
+        client = create_client_from_env()
+        
+        # Test connection
+        if not client.test_connection():
+            logger.error("❌ Failed to connect to Render API")
+            return False
+        
+        # Sync the specific content
+        db_path = Path("data/ytv2_content.db")
+        if not db_path.exists():
+            logger.error(f"SQLite database not found: {db_path}")
+            return False
+            
+        logger.info(f"📡 Syncing single content: {content_id}")
+        result = client.sync_single_content(content_id, db_path)
+        
+        # Upload audio if provided
+        if audio_path and Path(audio_path).exists():
+            logger.info(f"🎵 Uploading audio: {Path(audio_path).name}")
+            audio_result = client.upload_audio_file(Path(audio_path), content_id)
+            logger.info(f"✅ Audio uploaded successfully")
+        
+        logger.info(f"✅ Single content sync completed: {result.get('action')} {content_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Single content sync failed: {e}")
+        return False
+
+
 def sync_report_to_render(video_id, timestamp, reports_dir='./data/reports', exports_dir='./exports'):
     """
     Convenience function to sync a specific report and its audio to Render

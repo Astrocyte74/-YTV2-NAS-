@@ -221,6 +221,49 @@ class RenderAPIClient:
             logger.error(f"Audio upload failed: {e}")
             raise
     
+    def sync_single_content(self, content_id: str, db_path: Path) -> Dict[str, Any]:
+        """Sync a single content record by ID to Render API.
+        
+        Args:
+            content_id: Content ID to sync (e.g., 'yt:n2Fluyr3lbc')
+            db_path: Path to SQLite database
+            
+        Returns:
+            Sync result
+        """
+        import sqlite3
+        
+        if not db_path.exists():
+            raise FileNotFoundError(f"Database not found: {db_path}")
+        
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        
+        try:
+            # Get specific content with summary data
+            cursor = conn.execute("""
+                SELECT c.*, s.summary_text, s.summary_type
+                FROM content c
+                LEFT JOIN content_summaries s ON c.id = s.content_id
+                WHERE c.id = ?
+            """, (content_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"Content not found in database: {content_id}")
+            
+            # Convert to API format
+            content_data = self._convert_db_row_to_api_format(row)
+            
+            # Send to API
+            result = self.create_or_update_content(content_data)
+            
+            logger.info(f"Single content sync - {result.get('action', 'unknown')}: {content_id}")
+            return result
+            
+        finally:
+            conn.close()
+    
     def test_connection(self) -> bool:
         """Test connection to the API.
         
