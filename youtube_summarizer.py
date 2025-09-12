@@ -1097,16 +1097,29 @@ class YouTubeSummarizer:
 Title: {title}
 Transcript: {safe_transcript}
 
+IMPORTANT: Choose the most specific category that best matches the content:
+- Education: Learning, tutorials, educational content, courses, academic topics
+- Entertainment: Comedy, music, movies, celebrities, pop culture, fun content  
+- Technology: Programming, AI, software, hardware, tech reviews, digital tools
+- Business: Entrepreneurship, marketing, finance, investing, career advice
+- Health: Fitness, nutrition, medical topics, wellness, mental health
+- DIY: How-to guides, crafts, home improvement, building, making things
+- News: Current events, journalism, breaking news, political coverage
+- Gaming: Video games, esports, game reviews, gaming culture
+- Lifestyle: Fashion, travel, food, relationships, personal development
+- Science: Research, experiments, scientific discoveries, nature, physics
+- History: Historical events, documentaries, past civilizations, biographies
+- General: Only use if content doesn't clearly fit other categories
+
 Provide analysis in this exact JSON format:
 {{
-    "category": ["Primary Category"],
+    "category": ["Most Specific Category"],
     "content_type": "Tutorial|Review|Discussion|News|Documentary|Interview|Presentation|Guide",
     "complexity_level": "Beginner|Intermediate|Advanced", 
     "key_topics": ["topic-one", "topic-two", "topic-three"],
     "named_entities": ["Person Name", "Organization", "Location"]
 }}
 
-Categories: Education, Entertainment, Technology, Business, Health, DIY, News, Gaming, Lifestyle, Science, History
 Generate 3-5 key topics as lowercase hyphenated phrases.
 Identify 1-3 named entities (people, places, organizations)."""
         
