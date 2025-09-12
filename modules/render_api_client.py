@@ -116,13 +116,11 @@ class RenderAPIClient:
             
             if response.status_code == 200:
                 result = response.json()
-                # Dashboard returns 'upserted' instead of 'action'
-                if result.get('upserted'):
-                    action = "created/updated" 
-                else:
-                    action = result.get('action', 'unknown')
+                # Dashboard now returns proper action field
+                action = result.get('action', 'unknown')
                 content_id = result.get('id', 'unknown')
-                logger.info(f"Content {action}: {content_id}")
+                synced_at = result.get('synced_at', '')
+                logger.info(f"Content {action}: {content_id} (synced: {synced_at})")
                 return result
             else:
                 error_msg = f"Failed to create/update content: {response.status_code}"
@@ -185,7 +183,7 @@ class RenderAPIClient:
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
             
         try:
-            # Prepare multipart form data
+            # Prepare multipart form data - use requests directly (not session wrapper)
             with open(audio_path, 'rb') as audio_file:
                 files = {
                     'audio': (audio_path.name, audio_file, 'audio/mpeg')
@@ -194,13 +192,9 @@ class RenderAPIClient:
                     'content_id': content_id
                 }
                 
-                # Remove Content-Type header for multipart uploads
-                headers = dict(self.session.headers)
-                if 'Content-Type' in headers:
-                    del headers['Content-Type']
-                
-                # Use requests directly for multipart uploads to ensure proper headers
-                response = self.session.post(
+                # Use requests directly to ensure proper multipart headers
+                import requests
+                response = requests.post(
                     f"{self.base_url}/api/upload-audio",
                     files=files,
                     data=data,

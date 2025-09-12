@@ -714,5 +714,45 @@
     "synced": true,
     "created_at": "2025-09-12T05:21:03.511527",
     "last_synced": "2025-09-12T05:21:23.573262"
+  },
+  "WymkCKM3J2k:audio": {
+    "stem": "amazon_ec2_mac_instances_amazon_web_services_WymkCKM3J2k",
+    "json": "/app/data/reports/amazon_ec2_mac_instances_amazon_web_services_WymkCKM3J2k.json",
+    "mp3": "exports/audio_WymkCKM3J2k_20250912_061012.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T06:10:11.990343",
+    "last_synced": "2025-09-12T06:10:35.693748"
+  },
+  "n2Fluyr3lbc:audio": {
+    "stem": "postgresql_in_100_seconds_n2Fluyr3lbc",
+    "json": "/app/data/reports/postgresql_in_100_seconds_n2Fluyr3lbc.json",
+    "mp3": "exports/audio_n2Fluyr3lbc_20250912_061551.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T06:15:50.795933",
+    "last_synced": "2025-09-12T06:16:16.722995"
+  },
+  "hwP7WQkmECE:audio": {
+    "stem": "git_explained_in_100_seconds_hwP7WQkmECE",
+    "json": "/app/data/reports/git_explained_in_100_seconds_hwP7WQkmECE.json",
+    "mp3": "exports/audio_hwP7WQkmECE_20250912_062640.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T06:26:39.950946",
+    "last_synced": "2025-09-12T06:27:09.124559"
+  },
+  "fcfQkxwz4Oo:audio": {
+    "stem": "brian_cox_explains_quantum_mechanics_in_60_seconds_fcfQkxwz4Oo",
+    "json": "/app/data/reports/brian_cox_explains_quantum_mechanics_in_60_seconds_fcfQkxwz4Oo.json",
+    "mp3": "exports/audio_fcfQkxwz4Oo_20250912_063443.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T06:34:42.740959",
+    "last_synced": "2025-09-12T06:34:56.839837"
+  },
+  "TuEpUrQCOkk:audio": {
+    "stem": "fortnite_explained_in_60_seconds_TuEpUrQCOkk",
+    "json": "/app/data/reports/fortnite_explained_in_60_seconds_TuEpUrQCOkk.json",
+    "mp3": "exports/audio_TuEpUrQCOkk_20250912_064452.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T06:44:51.560525",
+    "last_synced": "2025-09-12T06:45:10.389837"
   }
 }
