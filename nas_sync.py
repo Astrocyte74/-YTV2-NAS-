@@ -64,16 +64,22 @@ def sync_sqlite_database():
         
         logger.info("✅ SQLite database synced successfully")
         
-        # Second, sync recent MP3 files (last 10 files)
+        # Second, sync most recent MP3 file
         exports_dir = Path("exports")
         if exports_dir.exists():
-            mp3_files = sorted(exports_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+            mp3_files = sorted(exports_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
             
             if mp3_files:
                 logger.info(f"🎵 Syncing {len(mp3_files)} recent MP3 files...")
                 
                 for mp3_file in mp3_files:
                     try:
+                        # Check if MP3 already exists on Render to avoid re-uploading
+                        check_response = requests.head(f"{render_url}/exports/{mp3_file.name}", timeout=10)
+                        if check_response.status_code == 200:
+                            logger.info(f"⏭️  Skipped MP3 (already exists): {mp3_file.name}")
+                            continue
+                            
                         with open(mp3_file, 'rb') as audio_file:
                             files = {
                                 'audio': (mp3_file.name, audio_file, 'audio/mpeg')
