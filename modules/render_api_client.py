@@ -387,7 +387,7 @@ class RenderAPIClient:
             'like_count': row['like_count'] or 0,
             'comment_count': row['comment_count'] or 0,
             'category': parse_json_field(row['category']),
-            'subcategory': row.get('subcategory'),
+            'subcategory': row['subcategory'] if 'subcategory' in row.keys() else None,
             'content_type': row['content_type'] or '',
             'complexity_level': row['complexity_level'] or '',
             'language': row['language'] or 'en',
