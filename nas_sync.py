@@ -80,7 +80,7 @@ def sync_sqlite_database():
                             }
                             
                             response = requests.post(
-                                f"{render_url}/api/upload-report",
+                                f"{render_url}/api/upload-audio",
                                 headers=headers,
                                 files=files,
                                 timeout=30
