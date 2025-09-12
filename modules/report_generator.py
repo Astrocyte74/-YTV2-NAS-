@@ -139,24 +139,14 @@ class JSONReportGenerator:
         self.sqlite_db = None
         if SQLITE_AVAILABLE:
             try:
-                # Try multiple possible database locations
-                db_paths = [
-                    Path("ytv2_content.db"),              # Root level (NAS location)
-                    Path("data/ytv2_content.db"),         # data subdirectory
-                    Path("./ytv2_content.db"),            # Current directory explicit
-                ]
+                # Use single consolidated database location
+                db_path = Path("data/ytv2_content.db")
                 
-                db_path = None
-                for path in db_paths:
-                    if path.exists():
-                        db_path = path
-                        break
-                
-                if db_path:
+                if db_path.exists():
                     self.sqlite_db = SQLiteContentIndex(str(db_path))
                     print(f"✅ SQLite backend initialized: {db_path}")
                 else:
-                    print(f"⚠️  SQLite database not found in: {[str(p) for p in db_paths]}")
+                    print(f"❌ SQLite database not found: {db_path}")
             except Exception as e:
                 print(f"❌ SQLite initialization failed: {e}")
                 self.sqlite_db = None

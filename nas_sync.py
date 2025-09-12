@@ -26,21 +26,11 @@ logger = logging.getLogger(__name__)
 
 def sync_sqlite_database():
     """Sync SQLite database and recent MP3 files to Dashboard"""
-    # Try multiple possible database locations
-    db_paths = [
-        Path("ytv2_content.db"),              # Root level (NAS location)
-        Path("data/ytv2_content.db"),         # data subdirectory
-        Path("./ytv2_content.db"),            # Current directory explicit
-    ]
+    # Use single consolidated database location
+    db_path = Path("data/ytv2_content.db")
     
-    db_path = None
-    for path in db_paths:
-        if path.exists():
-            db_path = path
-            break
-    
-    if not db_path:
-        logger.warning(f"SQLite database not found in: {[str(p) for p in db_paths]}")
+    if not db_path.exists():
+        logger.error(f"SQLite database not found: {db_path}")
         return False
 
     render_url = os.getenv('RENDER_DASHBOARD_URL')

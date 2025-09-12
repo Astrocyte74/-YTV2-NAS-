@@ -635,5 +635,68 @@
     "synced": true,
     "created_at": "2025-09-10T06:31:18.680587",
     "last_synced": "2025-09-10T06:33:36.190902"
+  },
+  "QVqIx-Y8s-s:audio": {
+    "stem": "the_largest_supply_chain_attack_ever_QVqIx-Y8s-s",
+    "json": "/app/data/reports/the_largest_supply_chain_attack_ever_QVqIx-Y8s-s.json",
+    "mp3": "exports/audio_QVqIx-Y8s-s_20250910_161523.mp3",
+    "synced": true,
+    "created_at": "2025-09-10T16:15:22.805107",
+    "last_synced": "2025-09-10T16:16:03.058814"
+  },
+  "wFGUMbXwdwY:audio": {
+    "stem": "jwst_broke_physics_new_discoveries_challenge_cosmo_wFGUMbXwdwY",
+    "json": "/app/data/reports/jwst_broke_physics_new_discoveries_challenge_cosmo_wFGUMbXwdwY.json",
+    "mp3": "exports/audio_wFGUMbXwdwY_20250911_222720.mp3",
+    "synced": true,
+    "created_at": "2025-09-11T22:27:19.422741",
+    "last_synced": "2025-09-11T22:28:11.376115"
+  },
+  "CEF_ya1tLfU:audio": {
+    "stem": "can_vermont_win_back_canadas_trump_averse_tourists_CEF_ya1tLfU",
+    "json": "/app/data/reports/can_vermont_win_back_canadas_trump_averse_tourists_CEF_ya1tLfU.json",
+    "mp3": "exports/audio_CEF_ya1tLfU_20250911_230857.mp3",
+    "synced": true,
+    "created_at": "2025-09-11T23:08:56.527967",
+    "last_synced": "2025-09-11T23:09:26.278074"
+  },
+  "Uie-ukupfXY:audio": {
+    "stem": "how_the_assassination_of_conservative_activist_cha_Uie-ukupfXY",
+    "json": "/app/data/reports/how_the_assassination_of_conservative_activist_cha_Uie-ukupfXY.json",
+    "mp3": "exports/audio_Uie-ukupfXY_20250911_235610.mp3",
+    "synced": true,
+    "created_at": "2025-09-11T23:56:09.899376",
+    "last_synced": "2025-09-11T23:56:26.589824"
+  },
+  "y4JvgfsO8PU:audio": {
+    "stem": "codebuff_claudecode_killer_new_ai_coding_agent_is__y4JvgfsO8PU",
+    "json": "/app/data/reports/codebuff_claudecode_killer_new_ai_coding_agent_is__y4JvgfsO8PU.json",
+    "mp3": null,
+    "synced": false,
+    "created_at": "2025-09-12T00:26:59.489178"
+  },
+  "A8d6YrYKsXQ:audio": {
+    "stem": "claude_code_in_zed_A8d6YrYKsXQ",
+    "json": "/app/data/reports/claude_code_in_zed_A8d6YrYKsXQ.json",
+    "mp3": "exports/audio_A8d6YrYKsXQ_20250912_003553.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T00:35:53.046766",
+    "last_synced": "2025-09-12T00:36:21.375911"
+  },
+  "bgB55pLTd3E:audio": {
+    "stem": "apple_watch_series_11_hands_on_11_new_things_to_kn_bgB55pLTd3E",
+    "json": "/app/data/reports/apple_watch_series_11_hands_on_11_new_things_to_kn_bgB55pLTd3E.json",
+    "mp3": "exports/audio_bgB55pLTd3E_20250912_004344.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T00:43:44.126023",
+    "last_synced": "2025-09-12T00:44:28.826369"
+  },
+  "iNyUmbmQQZg:audio": {
+    "stem": "is_it_normal_to_talk_to_yourself_iNyUmbmQQZg",
+    "json": "/app/data/reports/is_it_normal_to_talk_to_yourself_iNyUmbmQQZg.json",
+    "mp3": "exports/audio_iNyUmbmQQZg_20250912_005203.mp3",
+    "synced": true,
+    "created_at": "2025-09-12T00:52:03.249505",
+    "last_synced": "2025-09-12T00:52:30.948174"
   }
 }

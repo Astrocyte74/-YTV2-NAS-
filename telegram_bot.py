@@ -26,6 +26,14 @@ from modules.telegram_handler import YouTubeTelegramBot
 from modules.report_generator import JSONReportGenerator
 from youtube_summarizer import YouTubeSummarizer
 
+# SQLite backend support
+try:
+    from modules.sqlite_content_index import SQLiteContentIndex
+    USING_SQLITE = True
+except ImportError:
+    print("SQLite backend not available, using JSON fallback")
+    USING_SQLITE = False
+
 # Load environment variables from .env file and stack.env
 load_dotenv()
 

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class SQLiteContentIndex:
     """SQLite-based content management for YTV2 Dashboard."""
     
-    def __init__(self, db_path: str = "ytv2_content.db"):
+    def __init__(self, db_path: str = "data/ytv2_content.db"):
         """Initialize with database path."""
         self.db_path = Path(db_path)
         self._ensure_database_exists()

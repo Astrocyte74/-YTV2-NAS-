@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bulk Sync Enhanced JSON Files to Render Dashboard
-Uploads all enhanced JSON files from NAS to Render using the existing API
+Bulk Sync Backfilled JSON Files to Render Dashboard
+Uploads all JSON files with media_metadata from NAS to Render using the existing API
 """
 
 import json
@@ -33,14 +33,14 @@ class RenderBulkSync:
         print(f"[{timestamp}] {message}")
     
     def is_enhanced_file(self, file_path: Path) -> bool:
-        """Check if JSON file has enhanced metadata"""
+        """Check if JSON file has media metadata from backfill"""
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
-            # Check for enhanced metadata fields
-            youtube_meta = data.get('source_metadata', {}).get('youtube', {})
-            return youtube_meta.get('like_count') is not None
+            # Check for backfilled media_metadata fields
+            media_metadata = data.get('media_metadata', {})
+            return bool(media_metadata)  # Return True if media_metadata exists and is not empty
             
         except Exception as e:
             self.log(f"❌ Error checking {file_path.name}: {e}")
@@ -104,8 +104,8 @@ class RenderBulkSync:
             return False
     
     def get_enhanced_files(self) -> List[Path]:
-        """Get list of all enhanced JSON files"""
-        enhanced_files = []
+        """Get list of all JSON files with media_metadata"""
+        backfilled_files = []
         
         for json_file in self.reports_dir.glob('*.json'):
             if json_file.name.startswith('._'):
@@ -114,10 +114,10 @@ class RenderBulkSync:
             self.stats['total_files'] += 1
             
             if self.is_enhanced_file(json_file):
-                enhanced_files.append(json_file)
+                backfilled_files.append(json_file)
                 self.stats['enhanced_files'] += 1
         
-        return enhanced_files
+        return backfilled_files
     
     def warm_up_render_service(self) -> bool:
         """Warm up the Render service before bulk upload"""
@@ -145,15 +145,15 @@ class RenderBulkSync:
             self.log("❌ Service warm-up failed, aborting")
             return False
         
-        # Get enhanced files
-        self.log("🔍 Scanning for enhanced JSON files...")
+        # Get backfilled files
+        self.log("🔍 Scanning for backfilled JSON files with media_metadata...")
         enhanced_files = self.get_enhanced_files()
         
         if not enhanced_files:
-            self.log("❌ No enhanced files found!")
+            self.log("❌ No backfilled files with media_metadata found!")
             return False
         
-        self.log(f"📊 Found {len(enhanced_files)} enhanced files out of {self.stats['total_files']} total files")
+        self.log(f"📊 Found {len(enhanced_files)} backfilled files out of {self.stats['total_files']} total files")
         
         # Upload in batches
         batch_count = 0
@@ -182,7 +182,7 @@ class RenderBulkSync:
         self.log("BULK SYNC SUMMARY")
         self.log("="*60)
         self.log(f"📊 Total files scanned: {self.stats['total_files']}")
-        self.log(f"🔧 Enhanced files found: {self.stats['enhanced_files']}")
+        self.log(f"🔧 Backfilled files found: {self.stats['enhanced_files']}")
         self.log(f"✅ Successfully uploaded: {self.stats['uploaded']}")
         self.log(f"❌ Upload errors: {self.stats['errors']}")
         
