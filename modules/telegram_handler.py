@@ -768,23 +768,16 @@ class YouTubeTelegramBot:
                                 ledger.upsert(video_id, summary_type, entry)
                                 logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
                             
-                            # Efficiently sync database to Render using full sync
+                            # Efficiently sync just this content to Render
                             try:
+                                from nas_sync import sync_single_content_to_render
                                 content_id = f"yt:{video_id}"
                                 logging.info(f"📡 Syncing new content to Render: {content_id}")
-                                
-                                # Use full database sync (same as manual sync that works)
-                                env = os.environ.copy()
-                                sync_result = subprocess.run([
-                                    'python', 'sync_sqlite_db.py'
-                                ], env=env, capture_output=True, text=True, cwd='/app')
-                                db_sync_success = sync_result.returncode == 0
-                                
+                                db_sync_success = sync_single_content_to_render(content_id, audio_filepath)
                                 if db_sync_success:
                                     logging.info(f"✅ CONTENT SYNCED: 📊+🎵 → {content_id} synced to Render")
                                 else:
                                     logging.warning(f"⚠️ Content sync failed for {content_id}")
-                                    logging.warning(f"Sync stderr: {sync_result.stderr}")
                             except Exception as db_sync_error:
                                 logging.error(f"❌ Database sync error: {db_sync_error}")
                         else:
