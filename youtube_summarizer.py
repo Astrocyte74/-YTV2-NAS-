@@ -1155,14 +1155,34 @@ class YouTubeSummarizer:
             "named_entities": []
         }
         
-        # Validate categories (1-3 allowed)
-        if "category" in analysis and isinstance(analysis["category"], list):
-            for cat in analysis["category"][:3]:  # Max 3 categories
-                if cat in allowed_categories:
-                    validated["category"].append(cat)
+        # Validate categories with new subcategories structure
+        if "categories" in analysis and isinstance(analysis["categories"], list):
+            seen_categories = set()
+            validated_category_objects = []
+            
+            for cat_obj in analysis["categories"][:3]:  # Max 3 categories
+                if isinstance(cat_obj, dict) and cat_obj.get("category") in allowed_categories:
+                    category_name = cat_obj["category"]
+                    if category_name not in seen_categories:
+                        # Extract and validate subcategories
+                        subcats = cat_obj.get("subcategories", [])
+                        if isinstance(subcats, list) and subcats:
+                            valid_subcats = [str(sub).strip() for sub in subcats[:3] if str(sub).strip()]
+                        else:
+                            valid_subcats = ["Other"]
+                        
+                        validated_category_objects.append({
+                            "category": category_name,
+                            "subcategories": valid_subcats
+                        })
+                        validated["category"].append(category_name)  # Legacy compatibility
+                        seen_categories.add(category_name)
+            
+            validated["categories"] = validated_category_objects  # New structure
         
         if not validated["category"]:
             validated["category"] = ["General"]
+            validated["categories"] = [{"category": "General", "subcategories": ["Other"]}]
         
         # Validate content type
         if analysis.get("content_type") in allowed_content_types:
@@ -1237,6 +1257,16 @@ Summary: {safe_summary}
 
 CRITICAL: Every category MUST have a subcategory. Choose the most specific match.
 
+CATEGORIZATION RULES:
+1. ALWAYS prefer specialized categories (World War II, AI Software Development) over generic ones (History, Technology)
+2. If content mentions WWII, Nazi Germany, SS, Wehrmacht, Hitler, Pearl Harbor, D-Day, Pacific War, Holocaust → use "World War II (WWII)" category
+3. If content is about AI/ML programming, models, training, deployment → use "AI Software Development" category
+4. Only use "History → Modern History" if it's modern history but NOT specifically WWII
+5. Only use "Technology" for general tech content, not AI/ML specific content
+6. ASSIGN MULTIPLE CATEGORIES when content genuinely spans different areas (e.g., historical tech video could be both "History" and "Technology")
+7. AVOID duplicate categories - each category should be unique
+8. Content should have 2-3 categories when it covers multiple distinct topics, but only 1 category if it's clearly focused on one area
+
 CATEGORY STRUCTURE (Category → Required Subcategories):
 
 **Education** → Academic Subjects | Online Learning | Tutorials & Courses | Teaching Methods | Educational Technology | Student Life
@@ -1289,21 +1319,34 @@ CATEGORY STRUCTURE (Category → Required Subcategories):
 
 **General** → Miscellaneous | Mixed Content | Uncategorized | General Discussion | Variety Content | Other
 
-REQUIRED JSON FORMAT - subcategory is MANDATORY:
+Return ONLY valid JSON with this exact shape:
 {{
-    "category": ["Primary Category"],
-    "subcategory": "Specific Subcategory",
-    "content_type": "Tutorial|Review|Discussion|News|Documentary|Interview|Presentation|Guide",
-    "complexity_level": "Beginner|Intermediate|Advanced", 
-    "key_topics": ["topic-one", "topic-two", "topic-three"],
-    "named_entities": ["Person Name", "Organization", "Location"]
+  "categories": [
+    {{ "category": "<Category>", "subcategories": ["<Subcat 1>", "<Subcat 2>"] }}
+  ],
+  "languages": {{ "video_language": "en|fr|...", "summary_language": "en|fr|..." }},
+  "content_type": "Tutorial|Review|Discussion|News|Documentary|Interview|Presentation|Guide",
+  "complexity_level": "Beginner|Intermediate|Advanced",
+  "key_topics": ["kebab-case-1", "kebab-case-2", "kebab-case-3"],
+  "named_entities": ["Name or Org", "Name or Org"]
 }}
 
-RULES:
-- subcategory CANNOT be null - pick the closest match from the available options
-- Use exact subcategory names as listed above
-- Generate 3-5 key topics as lowercase hyphenated phrases
-- Identify 1-3 named entities (people, places, organizations)"""
+Rules:
+- Choose 1–3 categories total.
+- For EACH chosen category, select 1–3 subcategories FROM ITS OWN allowed list (no cross-category subcats).
+- Use exact names from the allowed lists. No nulls/empties/duplicates.
+- languages detects both original video language and summary language.
+- key_topics are lowercase, hyphenated phrases.
+
+EXAMPLES:
+Single Category:
+- "SS Weapon" → "category": ["World War II (WWII)"], "subcategory": "Technology & Weapons"
+- "Claude Code AI" → "category": ["AI Software Development"], "subcategory": "APIs & SDKs"
+
+Multiple Categories (when content genuinely spans areas):
+- "How AI Changed WWII Codebreaking" → "category": ["World War II (WWII)", "AI Software Development"], "subcategory": "Intelligence & Codebreaking"
+- "Teaching Python Programming" → "category": ["Education", "Technology"], "subcategory": "Teaching Methods"
+- "Tesla Business Analysis" → "category": ["Business", "Technology"], "subcategory": "Industry Analysis\""""
         
         try:
             # Record processing metadata
