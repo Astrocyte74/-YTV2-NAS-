@@ -1179,10 +1179,17 @@ class YouTubeSummarizer:
             
             validated["categories"] = validated_category_objects  # New structure
             validated["schema_version"] = 2  # Mark as using structured data
+            # Mirror flat names for compatibility
+            validated["category"] = [obj["category"] for obj in validated["categories"]]
         
-        if not validated["category"]:
-            validated["category"] = ["General"]
+        # Only populate fallback for pre-v2 data
+        if validated.get("schema_version", 1) < 2:
+            if not validated.get("category"):
+                validated["category"] = ["General"]
+        elif not validated.get("categories"):
+            # Fallback for v2 data without categories
             validated["categories"] = [{"category": "General", "subcategories": ["Other"]}]
+            validated["category"] = ["General"]
         
         # Validate content type
         if analysis.get("content_type") in allowed_content_types:
