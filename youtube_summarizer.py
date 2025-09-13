@@ -1175,10 +1175,10 @@ class YouTubeSummarizer:
                             "category": category_name,
                             "subcategories": valid_subcats
                         })
-                        validated["category"].append(category_name)  # Legacy compatibility
                         seen_categories.add(category_name)
             
             validated["categories"] = validated_category_objects  # New structure
+            validated["schema_version"] = 2  # Mark as using structured data
         
         if not validated["category"]:
             validated["category"] = ["General"]
@@ -1370,16 +1370,24 @@ Multiple Categories (when content genuinely spans areas):
                 raw_analysis = self._parse_safe_json(analysis_content)
                 validated_analysis = self._validate_analysis_result(raw_analysis)
                 
-                # Enhanced logging to show AI decisions
-                category = validated_analysis.get('category', ['Unknown'])
-                subcategory = validated_analysis.get('subcategory', 'None')
+                # Enhanced logging to show AI decisions (from structured data)
+                if validated_analysis.get('schema_version') == 2 and 'categories' in validated_analysis:
+                    # Show structured categories
+                    cats_for_log = [obj["category"] for obj in validated_analysis["categories"]]
+                    subs_for_log = {obj["category"]: obj.get("subcategories", []) for obj in validated_analysis["categories"]}
+                else:
+                    # Fallback to legacy format
+                    cats_for_log = validated_analysis.get('category', ['Unknown'])
+                    subs_for_log = {'legacy': validated_analysis.get('subcategory', 'None')}
+                
                 content_type = validated_analysis.get('content_type', 'Unknown')
                 complexity = validated_analysis.get('complexity_level', 'Unknown')
                 print(f"🎯 AI Analysis Results:")
-                print(f"   Category: {category}")
-                print(f"   Subcategory: {subcategory}")
+                print(f"   Categories: {cats_for_log}")
+                print(f"   Per-category subcats: {subs_for_log}")
                 print(f"   Content Type: {content_type}")  
                 print(f"   Complexity: {complexity}")
+                print(f"   Schema Version: {validated_analysis.get('schema_version', 1)}")
                 
                 # Add processing metadata
                 processing_end = datetime.now()
