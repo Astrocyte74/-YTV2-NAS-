@@ -1025,23 +1025,13 @@ class YouTubeSummarizer:
         allowed_content_types = ["Tutorial", "Review", "Discussion", "News", "Documentary", 
                                 "Interview", "Presentation", "Guide"]
         allowed_subcategories = {
-            "World War I (WWI)": [
-                "Causes & Prelude", "Major Battles & Campaigns", "Home Front & Society",
-                "Technology & Weapons", "Diplomacy & Treaties (Versailles)",
-                "Biographies & Leaders", "Aftermath & Interwar"
+            "Education": [
+                "Academic Subjects", "Online Learning", "Tutorials & Courses", 
+                "Teaching Methods", "Educational Technology", "Student Life"
             ],
-            "World War II (WWII)": [
-                "Causes & Prelude", "European Theatre", "Pacific Theatre",
-                "Home Front & Society", "Technology & Weapons", "Intelligence & Codebreaking",
-                "Holocaust & War Crimes", "Diplomacy & Conferences (Yalta, Potsdam)",
-                "Biographies & Commanders", "Aftermath & Reconstruction"
-            ],
-            "Cold War": [
-                "Origins & Ideologies", "Proxy Wars (Korea, Vietnam, Afghanistan)",
-                "Nuclear Strategy & Arms Race", "Espionage & Intelligence",
-                "Space Race & Technology", "Domestic Life & Culture",
-                "Diplomacy & Crises (Berlin, Cuba)", "Détente & End of Cold War",
-                "Leaders & Biographies"
+            "Entertainment": [
+                "Comedy & Humor", "Music & Performance", "Movies & TV", 
+                "Celebrity & Pop Culture", "Viral Content", "Reaction Content"
             ],
             "Technology": [
                 "Programming & Software Development", "Web Development", "Mobile Development",
@@ -1068,11 +1058,89 @@ class YouTubeSummarizer:
                 "Projectors & Screens", "Media Players & Sources",
                 "Cables & Connectivity", "Setups & Tours", "Troubleshooting & Tips"
             ],
+            "Business": [
+                "Entrepreneurship", "Marketing & Sales", "Finance & Investing", 
+                "Career Development", "Leadership & Management", "Industry Analysis"
+            ],
+            "Health & Wellness": [
+                "Fitness & Exercise", "Nutrition & Diet", "Mental Health", 
+                "Medical Information", "Lifestyle & Habits", "Alternative Medicine"
+            ],
+            "How-To & DIY": [
+                "Home Improvement", "Crafts & Making", "Repair & Maintenance", 
+                "Life Skills", "Creative Projects", "Tools & Techniques"
+            ],
+            "News & Politics": [
+                "Breaking News", "Political Analysis", "Current Events", 
+                "Journalism & Reporting", "Government & Policy", "International Affairs"
+            ],
+            "Gaming": [
+                "Game Reviews", "Gameplay & Walkthroughs", "Esports & Competitive", 
+                "Game Development", "Gaming Culture", "Retro Gaming"
+            ],
+            "Lifestyle": [
+                "Fashion & Style", "Travel & Adventure", "Food & Cooking", 
+                "Relationships", "Personal Development", "Home & Living"
+            ],
+            "Science & Nature": [
+                "Research & Discoveries", "Biology & Life Sciences", "Physics & Chemistry", 
+                "Environmental Science", "Nature & Wildlife", "Scientific Method"
+            ],
             "Astronomy": [
                 "Solar System & Planets", "Stars & Stellar Evolution",
                 "Galaxies & Cosmology", "Telescopes & Observing",
                 "Space Missions & Exploration", "Astrophotography",
                 "Amateur Astronomy", "Space News & Discoveries"
+            ],
+            "History": [
+                "Ancient Civilizations", "Medieval History", "Modern History", 
+                "Cultural Heritage", "Historical Analysis", "Biographies"
+            ],
+            "World War I (WWI)": [
+                "Causes & Prelude", "Major Battles & Campaigns", "Home Front & Society",
+                "Technology & Weapons", "Diplomacy & Treaties (Versailles)",
+                "Biographies & Leaders", "Aftermath & Interwar"
+            ],
+            "World War II (WWII)": [
+                "Causes & Prelude", "European Theatre", "Pacific Theatre",
+                "Home Front & Society", "Technology & Weapons", "Intelligence & Codebreaking",
+                "Holocaust & War Crimes", "Diplomacy & Conferences (Yalta, Potsdam)",
+                "Biographies & Commanders", "Aftermath & Reconstruction"
+            ],
+            "Cold War": [
+                "Origins & Ideologies", "Proxy Wars (Korea, Vietnam, Afghanistan)",
+                "Nuclear Strategy & Arms Race", "Espionage & Intelligence",
+                "Space Race & Technology", "Domestic Life & Culture",
+                "Diplomacy & Crises (Berlin, Cuba)", "Détente & End of Cold War",
+                "Leaders & Biographies"
+            ],
+            "Arts & Creativity": [
+                "Visual Arts", "Music Production", "Photography & Video", 
+                "Writing & Literature", "Dance & Performance", "Digital Art"
+            ],
+            "Religion & Philosophy": [
+                "Religious Teachings", "Spirituality & Practice", "Philosophical Thought", 
+                "Ethics & Morality", "Theological Studies", "Comparative Religion"
+            ],
+            "Sports": [
+                "Game Analysis", "Training & Fitness", "Player Profiles", 
+                "Sports News", "Equipment & Gear", "Fantasy Sports"
+            ],
+            "Hobbies & Special Interests": [
+                "Collecting", "Automotive", "Pets & Animals", 
+                "Outdoor Activities", "Niche Communities", "Specialized Skills"
+            ],
+            "Vlogs & Personal": [
+                "Daily Life", "Personal Stories", "Opinions & Commentary", 
+                "Q&A Sessions", "Behind-the-Scenes", "Life Updates"
+            ],
+            "Reviews & Products": [
+                "Product Reviews", "Unboxings", "Comparisons & Tests", 
+                "Service Reviews", "Buying Guides", "Tech Specs"
+            ],
+            "General": [
+                "Miscellaneous", "Mixed Content", "Uncategorized", 
+                "General Discussion", "Variety Content", "Other"
             ]
         }
         
@@ -1104,7 +1172,7 @@ class YouTubeSummarizer:
         if analysis.get("complexity_level") in allowed_complexity:
             validated["complexity_level"] = analysis["complexity_level"]
 
-        # Validate optional subcategory (only for WWI/WWII/Cold War categories)
+        # Validate required subcategory (now required for ALL categories)
         if isinstance(analysis.get("subcategory"), str) and validated["category"]:
             primary_cat = validated["category"][0]
             if primary_cat in allowed_subcategories:
@@ -1161,51 +1229,81 @@ class YouTubeSummarizer:
         title = str(metadata.get('title', 'Unknown'))[:200]  # Limit title length
         safe_summary = self._sanitize_content(summary, max_length=6000)
         
-        # Enhanced analysis prompt for universal schema
-        analysis_prompt = f"""Analyze this content and extract structured metadata.
+        # Enhanced analysis prompt with uniform subcategory structure
+        analysis_prompt = f"""Analyze this content and extract structured metadata using the hierarchical category system.
 
 Title: {title}
 Summary: {safe_summary}
 
-IMPORTANT: Choose the most specific category that best matches the content:
-- Education: Learning, tutorials, educational content, courses, academic topics
-- Entertainment: Comedy, music, movies, celebrities, pop culture, fun content  
-- Technology: Subcategories: Programming & Software Development; Web Development; Mobile Development; DevOps & Infrastructure; Databases & Data Science; Cybersecurity; Tech Reviews & Comparisons; Software Tutorials; Tech News & Trends
-- AI Software Development: Subcategories: Model Selection & Evaluation; Prompt Engineering & RAG; Training & Fine-Tuning; Deployment & Serving; Agents & MCP/Orchestration; APIs & SDKs; Data Engineering & ETL; Testing & Observability; Security & Safety; Cost Optimisation
-- Computer Hardware: Subcategories: CPUs & GPUs; Motherboards & Chipsets; Memory & Storage (SSD/NVMe); Cooling & Thermals; Power Supplies; PC Cases & Builds; Networking & NAS; Monitors & Peripherals; Benchmarks & Tuning; Troubleshooting & Repairs
-- Home Theater: Subcategories: AV Receivers & Amplifiers; Speakers & Subwoofers; Room Correction & Calibration (Dirac, Audyssey); Acoustic Treatment; Projectors & Screens; Media Players & Sources; Cables & Connectivity; Setups & Tours; Troubleshooting & Tips
-- Business: Entrepreneurship, marketing, finance, investing, career advice
-- Health & Wellness: Fitness, nutrition, medical topics, mental health, wellbeing
-- How-To & DIY: How‑to guides, crafts, home improvement, building, making things
-- News & Politics: Current events, journalism, breaking news, political coverage, analysis
-- Gaming: Video games, esports, game reviews, gaming culture, mods/dev
-- Lifestyle: Fashion, travel, food, relationships, personal development
-- Science & Nature: Research, experiments, discoveries, biology, physics, environment
-- Astronomy: Subcategories: Solar System & Planets; Stars & Stellar Evolution; Galaxies & Cosmology; Telescopes & Observing; Space Missions & Exploration; Astrophotography; Amateur Astronomy; Space News & Discoveries
-- History: General history, culture, heritage, ancient civilizations, other historical eras
-- World War I (WWI): Subcategories: Causes & Prelude; Major Battles & Campaigns; Home Front & Society; Technology & Weapons; Diplomacy & Treaties (Versailles); Biographies & Leaders; Aftermath & Interwar
-- World War II (WWII): Subcategories: Causes & Prelude; European Theatre; Pacific Theatre; Home Front & Society; Technology & Weapons; Intelligence & Codebreaking; Holocaust & War Crimes; Diplomacy & Conferences (Yalta, Potsdam); Biographies & Commanders; Aftermath & Reconstruction
-- Cold War: Subcategories: Origins & Ideologies; Proxy Wars (Korea, Vietnam, Afghanistan); Nuclear Strategy & Arms Race; Espionage & Intelligence; Space Race & Technology; Domestic Life & Culture; Diplomacy & Crises (Berlin, Cuba); Détente & End of Cold War; Leaders & Biographies
-- Arts & Creativity: Drawing, music production, dance, photography, videography, literature
-- Religion & Philosophy: Religious teachings, spirituality, doctrine, ethics, philosophy
-- Sports: Matches, analysis, training, highlights, athlete profiles
-- Hobbies & Special Interests: Cars, pets, collecting, outdoors, niche communities
-- Vlogs & Personal: Daily life, storytimes, opinions, Q&amp;A, behind‑the‑scenes
-- Reviews & Products: Product reviews, unboxings, comparisons, services, subscriptions
-- General: Only use if content doesn’t clearly fit other categories
+CRITICAL: Every category MUST have a subcategory. Choose the most specific match.
 
-Provide analysis in this exact JSON format:
+CATEGORY STRUCTURE (Category → Required Subcategories):
+
+**Education** → Academic Subjects | Online Learning | Tutorials & Courses | Teaching Methods | Educational Technology | Student Life
+
+**Entertainment** → Comedy & Humor | Music & Performance | Movies & TV | Celebrity & Pop Culture | Viral Content | Reaction Content
+
+**Technology** → Programming & Software Development | Web Development | Mobile Development | DevOps & Infrastructure | Databases & Data Science | Cybersecurity | Tech Reviews & Comparisons | Software Tutorials | Tech News & Trends
+
+**AI Software Development** → Model Selection & Evaluation | Prompt Engineering & RAG | Training & Fine-Tuning | Deployment & Serving | Agents & MCP/Orchestration | APIs & SDKs | Data Engineering & ETL | Testing & Observability | Security & Safety | Cost Optimisation
+
+**Computer Hardware** → CPUs & GPUs | Motherboards & Chipsets | Memory & Storage (SSD/NVMe) | Cooling & Thermals | Power Supplies | PC Cases & Builds | Networking & NAS | Monitors & Peripherals | Benchmarks & Tuning | Troubleshooting & Repairs
+
+**Home Theater** → AV Receivers & Amplifiers | Speakers & Subwoofers | Room Correction & Calibration (Dirac, Audyssey) | Acoustic Treatment | Projectors & Screens | Media Players & Sources | Cables & Connectivity | Setups & Tours | Troubleshooting & Tips
+
+**Business** → Entrepreneurship | Marketing & Sales | Finance & Investing | Career Development | Leadership & Management | Industry Analysis
+
+**Health & Wellness** → Fitness & Exercise | Nutrition & Diet | Mental Health | Medical Information | Lifestyle & Habits | Alternative Medicine
+
+**How-To & DIY** → Home Improvement | Crafts & Making | Repair & Maintenance | Life Skills | Creative Projects | Tools & Techniques
+
+**News & Politics** → Breaking News | Political Analysis | Current Events | Journalism & Reporting | Government & Policy | International Affairs
+
+**Gaming** → Game Reviews | Gameplay & Walkthroughs | Esports & Competitive | Game Development | Gaming Culture | Retro Gaming
+
+**Lifestyle** → Fashion & Style | Travel & Adventure | Food & Cooking | Relationships | Personal Development | Home & Living
+
+**Science & Nature** → Research & Discoveries | Biology & Life Sciences | Physics & Chemistry | Environmental Science | Nature & Wildlife | Scientific Method
+
+**Astronomy** → Solar System & Planets | Stars & Stellar Evolution | Galaxies & Cosmology | Telescopes & Observing | Space Missions & Exploration | Astrophotography | Amateur Astronomy | Space News & Discoveries
+
+**History** → Ancient Civilizations | Medieval History | Modern History | Cultural Heritage | Historical Analysis | Biographies
+
+**World War I (WWI)** → Causes & Prelude | Major Battles & Campaigns | Home Front & Society | Technology & Weapons | Diplomacy & Treaties (Versailles) | Biographies & Leaders | Aftermath & Interwar
+
+**World War II (WWII)** → Causes & Prelude | European Theatre | Pacific Theatre | Home Front & Society | Technology & Weapons | Intelligence & Codebreaking | Holocaust & War Crimes | Diplomacy & Conferences (Yalta, Potsdam) | Biographies & Commanders | Aftermath & Reconstruction
+
+**Cold War** → Origins & Ideologies | Proxy Wars (Korea, Vietnam, Afghanistan) | Nuclear Strategy & Arms Race | Espionage & Intelligence | Space Race & Technology | Domestic Life & Culture | Diplomacy & Crises (Berlin, Cuba) | Détente & End of Cold War | Leaders & Biographies
+
+**Arts & Creativity** → Visual Arts | Music Production | Photography & Video | Writing & Literature | Dance & Performance | Digital Art
+
+**Religion & Philosophy** → Religious Teachings | Spirituality & Practice | Philosophical Thought | Ethics & Morality | Theological Studies | Comparative Religion
+
+**Sports** → Game Analysis | Training & Fitness | Player Profiles | Sports News | Equipment & Gear | Fantasy Sports
+
+**Hobbies & Special Interests** → Collecting | Automotive | Pets & Animals | Outdoor Activities | Niche Communities | Specialized Skills
+
+**Vlogs & Personal** → Daily Life | Personal Stories | Opinions & Commentary | Q&A Sessions | Behind-the-Scenes | Life Updates
+
+**Reviews & Products** → Product Reviews | Unboxings | Comparisons & Tests | Service Reviews | Buying Guides | Tech Specs
+
+**General** → Miscellaneous | Mixed Content | Uncategorized | General Discussion | Variety Content | Other
+
+REQUIRED JSON FORMAT - subcategory is MANDATORY:
 {{
-    "category": ["Most Specific Category"],
-    "subcategory": "Most Specific Subcategory or null",
+    "category": ["Primary Category"],
+    "subcategory": "Specific Subcategory",
     "content_type": "Tutorial|Review|Discussion|News|Documentary|Interview|Presentation|Guide",
     "complexity_level": "Beginner|Intermediate|Advanced", 
     "key_topics": ["topic-one", "topic-two", "topic-three"],
     "named_entities": ["Person Name", "Organization", "Location"]
 }}
 
-Generate 3-5 key topics as lowercase hyphenated phrases.
-Identify 1-3 named entities (people, places, organizations)."""
+RULES:
+- subcategory CANNOT be null - pick the closest match from the available options
+- Use exact subcategory names as listed above
+- Generate 3-5 key topics as lowercase hyphenated phrases
+- Identify 1-3 named entities (people, places, organizations)"""
         
         try:
             # Record processing metadata
@@ -1222,15 +1320,21 @@ Identify 1-3 named entities (people, places, organizations)."""
             
             # Safe JSON parsing
             try:
+                # Log the raw JSON response from AI
+                print(f"🤖 Raw AI JSON Response:")
+                print(f"   {analysis_content}")
+                
                 raw_analysis = self._parse_safe_json(analysis_content)
                 validated_analysis = self._validate_analysis_result(raw_analysis)
                 
                 # Enhanced logging to show AI decisions
                 category = validated_analysis.get('category', ['Unknown'])
+                subcategory = validated_analysis.get('subcategory', 'None')
                 content_type = validated_analysis.get('content_type', 'Unknown')
                 complexity = validated_analysis.get('complexity_level', 'Unknown')
                 print(f"🎯 AI Analysis Results:")
                 print(f"   Category: {category}")
+                print(f"   Subcategory: {subcategory}")
                 print(f"   Content Type: {content_type}")  
                 print(f"   Complexity: {complexity}")
                 
