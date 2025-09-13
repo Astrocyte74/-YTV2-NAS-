@@ -1332,7 +1332,7 @@ Return ONLY valid JSON with this exact shape:
 }}
 
 Rules:
-- Choose 1–3 categories total.
+- Choose the 1-3 BEST categories and subcategories that pertain to this summary. When content covers multiple distinct areas, PREFER using multiple categories over forcing it into just one.
 - For EACH chosen category, select 1–3 subcategories FROM ITS OWN allowed list (no cross-category subcats).
 - Use exact names from the allowed lists. No nulls/empties/duplicates.
 - languages detects both original video language and summary language.
