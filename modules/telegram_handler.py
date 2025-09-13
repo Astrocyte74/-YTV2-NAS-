@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import urllib.parse
 from datetime import datetime
@@ -519,8 +520,6 @@ class YouTubeTelegramBot:
                         
                         # Efficiently sync to Render using full database sync
                         logging.info(f"📡 SYNC START: Uploading to Render dashboard...")
-                        import subprocess
-                        import os
                         
                         # Extract video ID for logging
                         video_metadata = result.get('metadata', {})
@@ -771,8 +770,6 @@ class YouTubeTelegramBot:
                             
                             # Efficiently sync database to Render using full sync
                             try:
-                                import subprocess
-                                import os
                                 content_id = f"yt:{video_id}"
                                 logging.info(f"📡 Syncing new content to Render: {content_id}")
                                 
