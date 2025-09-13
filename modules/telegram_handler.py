@@ -517,16 +517,22 @@ class YouTubeTelegramBot:
                         json_path_obj = Path(json_path)
                         stem = json_path_obj.stem
                         
-                        # Efficiently sync to Render (no audio for non-audio summaries)
+                        # Efficiently sync to Render using full database sync
                         logging.info(f"📡 SYNC START: Uploading to Render dashboard...")
-                        from nas_sync import sync_single_content_to_render
+                        import subprocess
+                        import os
                         
-                        # Extract video ID for targeted sync
+                        # Extract video ID for logging
                         video_metadata = result.get('metadata', {})
                         video_id = video_metadata.get('video_id', '')
                         content_id = f"yt:{video_id}" if video_id else stem
                         
-                        sync_success = sync_single_content_to_render(content_id, None)  # No audio
+                        # Use full database sync (same as manual sync that works)
+                        env = os.environ.copy()
+                        sync_result = subprocess.run([
+                            'python', 'sync_sqlite_db.py'
+                        ], env=env, capture_output=True, text=True, cwd='/app')
+                        sync_success = sync_result.returncode == 0
                         if sync_success:
                             logging.info(f"✅ SYNC SUCCESS: 📊 → {content_id}")
                             
@@ -763,16 +769,25 @@ class YouTubeTelegramBot:
                                 ledger.upsert(video_id, summary_type, entry)
                                 logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
                             
-                            # Efficiently sync just this content to Render
+                            # Efficiently sync database to Render using full sync
                             try:
-                                from nas_sync import sync_single_content_to_render
+                                import subprocess
+                                import os
                                 content_id = f"yt:{video_id}"
                                 logging.info(f"📡 Syncing new content to Render: {content_id}")
-                                db_sync_success = sync_single_content_to_render(content_id, audio_filepath)
+                                
+                                # Use full database sync (same as manual sync that works)
+                                env = os.environ.copy()
+                                sync_result = subprocess.run([
+                                    'python', 'sync_sqlite_db.py'
+                                ], env=env, capture_output=True, text=True, cwd='/app')
+                                db_sync_success = sync_result.returncode == 0
+                                
                                 if db_sync_success:
                                     logging.info(f"✅ CONTENT SYNCED: 📊+🎵 → {content_id} synced to Render")
                                 else:
                                     logging.warning(f"⚠️ Content sync failed for {content_id}")
+                                    logging.warning(f"Sync stderr: {sync_result.stderr}")
                             except Exception as db_sync_error:
                                 logging.error(f"❌ Database sync error: {db_sync_error}")
                         else:
