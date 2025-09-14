@@ -388,6 +388,7 @@ class RenderAPIClient:
             'comment_count': row['comment_count'] or 0,
             'category': parse_json_field(row['category']),
             'subcategory': row['subcategory'] if 'subcategory' in row.keys() else None,
+            'subcategories_json': row['subcategories_json'] if 'subcategories_json' in row.keys() else None,
             'content_type': row['content_type'] or '',
             'complexity_level': row['complexity_level'] or '',
             'language': row['language'] or 'en',
@@ -403,6 +404,22 @@ class RenderAPIClient:
         if row['summary_text']:
             content_data['summary_text'] = row['summary_text']
             content_data['summary_type'] = row['summary_type'] or 'comprehensive'
+        
+        # Add structured analysis data if subcategories_json is available
+        if content_data['subcategories_json']:
+            try:
+                subcats_data = json.loads(content_data['subcategories_json'])
+                content_data['analysis'] = {
+                    'schema_version': 2,
+                    'categories': subcats_data.get('categories', []),
+                    'content_type': content_data['content_type'],
+                    'complexity_level': content_data['complexity_level'],
+                    'language': content_data['language'],
+                    'key_topics': content_data['key_topics'],
+                    'named_entities': content_data['named_entities']
+                }
+            except (json.JSONDecodeError, KeyError) as e:
+                logger.warning(f"Failed to parse subcategories_json for {content_data['id']}: {e}")
         
         return content_data
 
