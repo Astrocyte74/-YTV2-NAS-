@@ -280,10 +280,49 @@ class JSONReportGenerator:
             else:
                 summary_text = str(summary_data)
             
+            # Process structured categories to generate subcategories_json and a legacy subcategory fallback
+            subcategories_json = None
+            legacy_subcategory = analysis.get('subcategory')
+            structured_categories = analysis.get('categories')
+            if not isinstance(structured_categories, list):
+                structured_categories = []
+            if structured_categories:
+                try:
+                    subcategories_json = json.dumps({"categories": structured_categories}, ensure_ascii=False)
+                    if not legacy_subcategory:
+                        for category_entry in structured_categories:
+                            if isinstance(category_entry, dict):
+                                subcats = category_entry.get('subcategories')
+                                if isinstance(subcats, list) and subcats:
+                                    legacy_subcategory = subcats[0]
+                                    break
+                except Exception as e:
+                    print(f"⚠️ Error processing structured categories: {e}")
+            
+            # Normalise category list for backwards compatibility and JSON storage
+            raw_categories = analysis.get('category') or []
+            if not isinstance(raw_categories, list):
+                raw_categories = [raw_categories] if raw_categories else []
+            if structured_categories:
+                for category_entry in structured_categories:
+                    if isinstance(category_entry, dict):
+                        name = category_entry.get('category')
+                        if name and name not in raw_categories:
+                            raw_categories.append(name)
+            normalised_categories = [c for c in raw_categories if c]
+
             # Build record data
             from datetime import datetime
             now = datetime.now().isoformat()
             
+            def _json_or_none(values: Any) -> Optional[str]:
+                if not values:
+                    return None
+                if not isinstance(values, (list, tuple)):
+                    values = [values]
+                values = [v for v in values if v]
+                return json.dumps(values, ensure_ascii=False) if values else None
+
             record_data = {
                 'id': video_id,
                 'title': report.get('title', 'Untitled'),
@@ -303,13 +342,14 @@ class JSONReportGenerator:
                 'view_count': metadata.get('view_count'),
                 'like_count': metadata.get('like_count'),
                 'comment_count': metadata.get('comment_count'),
-                'category': ', '.join(analysis.get('category', [])) if analysis.get('category') else None,
-                'subcategory': analysis.get('subcategory'),
+                'category': _json_or_none(normalised_categories),
+                'subcategory': legacy_subcategory,
+                'subcategories_json': subcategories_json,
                 'content_type': analysis.get('content_type'),
                 'complexity_level': analysis.get('complexity_level'),
                 'language': analysis.get('language'),
-                'key_topics': ', '.join(analysis.get('key_topics', [])) if analysis.get('key_topics') else None,
-                'named_entities': ', '.join(analysis.get('named_entities', [])) if analysis.get('named_entities') else None,
+                'key_topics': _json_or_none(analysis.get('key_topics')),
+                'named_entities': _json_or_none(analysis.get('named_entities')),
                 'format_source': 'direct_processing',
                 'processing_status': 'completed',
                 'created_at': now,
@@ -325,9 +365,9 @@ class JSONReportGenerator:
             (id, title, canonical_url, thumbnail_url, published_at, indexed_at, duration_seconds,
              word_count, has_audio, audio_duration_seconds, has_transcript, transcript_chars,
              video_id, channel_name, channel_id, view_count, like_count, comment_count,
-             category, subcategory, content_type, complexity_level, language, key_topics, named_entities,
+             category, subcategory, subcategories_json, content_type, complexity_level, language, key_topics, named_entities,
              format_source, processing_status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             '''
             
             cursor.execute(insert_sql, (
@@ -337,7 +377,7 @@ class JSONReportGenerator:
                 record_data['has_transcript'], record_data['transcript_chars'], record_data['video_id'],
                 record_data['channel_name'], record_data['channel_id'], record_data['view_count'],
                 record_data['like_count'], record_data['comment_count'], record_data['category'],
-                record_data.get('subcategory'), record_data['content_type'], record_data['complexity_level'], record_data['language'],
+                record_data.get('subcategory'), record_data.get('subcategories_json'), record_data['content_type'], record_data['complexity_level'], record_data['language'],
                 record_data['key_topics'], record_data['named_entities'], record_data['format_source'],
                 record_data['processing_status'], record_data['created_at'], record_data['updated_at']
             ))
