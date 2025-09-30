@@ -775,8 +775,8 @@ class YouTubeTelegramBot:
             audio_filename = f"audio_{video_id}_{timestamp}.mp3"
             
             # Generate placeholder path for SQLite-only workflow (no JSON files needed)
-            json_filepath = f"yt_{video_id}_placeholder.json"  # Used for video ID extraction in SQLite updates
-            logging.info(f"📊 Using SQLite-only workflow for video_id: {video_id}")
+            json_filepath = f"yt_{video_id}_placeholder.json"  # Placeholder used for NAS compatibility
+            logging.info(f"📊 Using Postgres-centric workflow (SQLite disabled) for video_id: {video_id}")
 
             # Generate the audio file (run in executor to avoid blocking event loop)
             logging.info(f"🎙️ Generating TTS audio for: {title}")

@@ -129,7 +129,7 @@ class YouTubeSummarizer:
                 or "nsig" in normalized_error
             )
             if format_error_triggers and not ydl_opts.get('_format_fallback_applied'):
-                print("🛠️ yt-dlp fallback: retrying with generic format selection")
+                logging.warning("🛠️ yt-dlp: format unavailable, retrying with generic options")
                 fallback_opts = deepcopy(ydl_opts)
                 fallback_opts['_format_fallback_applied'] = True
                 # Remove subtitle/metadata writes to simplify request footprint
@@ -174,8 +174,8 @@ class YouTubeSummarizer:
                 print(f"⚠️ Video unavailable or private: {error_msg}")
                 return None
                 
-            print(f"❌ yt-dlp extraction failed: {error_msg}")
-            return None
+                logging.warning(f"⚠️ yt-dlp metadata extraction failed: {error_msg}")
+                return None
             
         except Exception as e:
             print(f"❌ Unexpected error in yt-dlp: {e}")
@@ -258,7 +258,7 @@ class YouTubeSummarizer:
                 'release_timestamp': 0,
             }
         except Exception as e:
-            print(f"⚠️ Fallback metadata extraction failed: {str(e)}")
+            logging.warning(f"⚠️ Fallback metadata extraction failed: {str(e)}")
 
         return {
             'title': f'Video {video_id}',
