@@ -6,10 +6,15 @@ Quick test script to verify ffprobe extraction with enhanced logging
 import sys
 from pathlib import Path
 
-# Add modules to path
-sys.path.append(str(Path(__file__).parent / "modules"))
+ROOT_DIR = Path(__file__).resolve().parents[1]
+MODULES_DIR = ROOT_DIR / 'modules'
 
-from report_generator import get_mp3_duration_seconds
+for path in (ROOT_DIR, MODULES_DIR):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+from modules.report_generator import get_mp3_duration_seconds
 
 def test_ffprobe():
     # Test with an existing MP3 file

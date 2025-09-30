@@ -90,7 +90,7 @@ The migration maintains backward compatibility:
 
 Run the comprehensive test suite:
 ```bash
-python test_api_sync.py
+python tools/test_api_sync.py
 ```
 
 Tests verify:
@@ -100,16 +100,7 @@ Tests verify:
 
 ## Cleanup
 
-Run the cleanup script to identify and remove obsolete code:
-```bash
-python cleanup_obsolete_sync.py
-```
-
-This will:
-- Identify obsolete files
-- Check for active usage
-- Create backups before removal
-- Provide migration recommendations
+Legacy cleanup helpers were deprecated; obsolete SQLite scripts have already been removed from `main`.
 
 ## Rollback Plan
 

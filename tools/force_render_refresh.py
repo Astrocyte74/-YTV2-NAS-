@@ -6,8 +6,16 @@ by re-uploading the database, which should trigger it to use the latest code.
 """
 
 import os
+import sys
 import logging
 from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+for path in (ROOT_DIR, ROOT_DIR / 'modules'):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
 from nas_sync import sync_sqlite_database
 
 # Set up logging

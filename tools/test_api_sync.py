@@ -9,10 +9,16 @@ import sys
 import logging
 from pathlib import Path
 
-# Add modules directory to path
-sys.path.insert(0, str(Path(__file__).parent / 'modules'))
+# Ensure project root and modules directory are on sys.path
+ROOT_DIR = Path(__file__).resolve().parents[1]
+MODULES_DIR = ROOT_DIR / 'modules'
 
-from render_api_client import create_client_from_env
+for path in (ROOT_DIR, MODULES_DIR):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
+from modules.render_api_client import create_client_from_env
 from nas_sync import sync_content_via_api
 
 # Set up logging

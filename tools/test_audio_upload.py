@@ -8,6 +8,13 @@ import sys
 import os
 import logging
 from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+for path in (ROOT_DIR, ROOT_DIR / 'modules'):
+    path_str = str(path)
+    if path_str not in sys.path:
+        sys.path.insert(0, path_str)
+
 from modules.render_api_client import create_client_from_env
 
 # Set up logging
@@ -90,12 +97,12 @@ def main():
     """Main function."""
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python test_audio_upload.py <content_id> [audio_pattern]")
+        print("  python tools/test_audio_upload.py <content_id> [audio_pattern]")
         print()
         print("Examples:")
-        print("  python test_audio_upload.py yt:TuEpUrQCOkk")
-        print("  python test_audio_upload.py yt:TuEpUrQCOkk 'audio_TuEpUrQCOkk_*.mp3'")
-        print("  python test_audio_upload.py yt:TuEpUrQCOkk 'audio_TuEpUrQCOkk_20250912_064452.mp3'")
+        print("  python tools/test_audio_upload.py yt:TuEpUrQCOkk")
+        print("  python tools/test_audio_upload.py yt:TuEpUrQCOkk 'audio_TuEpUrQCOkk_*.mp3'")
+        print("  python tools/test_audio_upload.py yt:TuEpUrQCOkk 'audio_TuEpUrQCOkk_20250912_064452.mp3'")
         sys.exit(1)
     
     content_id = sys.argv[1]
