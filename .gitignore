@@ -49,5 +49,6 @@ archive_nas/
 # Data files that shouldn't be in repo
 data/reports/
 data/backups/
+data/logs/
 data/ledger.json
 data/ytv2_content.db
