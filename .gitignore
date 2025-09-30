@@ -20,6 +20,11 @@ logs/
 cache/
 *.mp3
 *.wav
+backups/
+data/transcripts/
+data/process_locks.db
+render_ytv2_content.db
+ytv2_content_enhanced.db
 
 # Archives / old docs (had secrets)
 archive_nas/

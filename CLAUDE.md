@@ -189,6 +189,27 @@ The NAS component syncs with the Dashboard component via:
 - **JSON format** for structured data exchange
 - **Error handling** with retry logic for network issues
 
+## PostgreSQL Migration & Legacy Cleanup
+
+### Root Cause Recap (September 2025)
+- Auto-running `sync_sqlite_db.py` after each video overwrote the entire Render database, undoing deletions and racing with manual maintenance.
+- Maintaining dual SQLite databases (NAS + Render) created brittle variant plumbing and complicated recovery.
+
+### Fixes Applied
+- ✅ Migrated to PostgreSQL as the single source of truth (`POSTGRES_ONLY=true`).
+- ✅ Added `SQLITE_SYNC_ENABLED` feature flag; defaults to `false` when Postgres-only mode is active.
+- ✅ Removed the legacy `sync_sqlite_db.py` calls and all SQLite fallbacks from Telegram/NAS tooling.
+- ✅ Hardened ingest (video ID normalisation, audio existence checks, no "most recent file" fallback).
+
+### Operational Safeguards
+- Nightly `backup_database_nas.sh` cron plus Asustor snapshots provide rollbacks.
+- Postgres ingest upserts per-video records, so manual deletions on Render persist.
+- Always run the Postgres ingest health check before large backfills.
+
+### Next Steps
+- Keep `POSTGRES_ONLY=true` in production; only toggle `SQLITE_SYNC_ENABLED=true` for forensic analysis.
+- Run dual-sync smoke tests whenever Postgres credentials/config change.
+
 ## Important Implementation Notes
 
 - This is **processing-only** - all web serving happens on the Dashboard component
@@ -199,3 +220,5 @@ The NAS component syncs with the Dashboard component via:
 - **Audio generation** extracts and exports playable content
 - **Dashboard sync** enables web access to all generated content
 - **Modular design** separates concerns for maintainability
+
+**Last Safe State**: PostgreSQL-only sync with Gemini JSON guardrails (September 30, 2025)
