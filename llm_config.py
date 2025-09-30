@@ -26,6 +26,14 @@ class LLMConfig:
             "primary": [("openai", "gpt-5-nano"), ("openrouter", "anthropic/claude-3-haiku-20240307"), ("ollama", "phi3:latest")],
             "fallback": [("openrouter", "openai/gpt-4o-mini"), ("openrouter", "anthropic/claude-3.7-sonnet")]
         },
+        "flash": {
+            "primary": [("openrouter", "google/gemini-2.5-flash-lite")],
+            "fallback": [
+                ("openrouter", "deepseek/deepseek-v3.1-terminus"),
+                ("openai", "gpt-5-nano"),
+                ("openrouter", "openai/gpt-4o-mini")
+            ]
+        },
         "creative": {
             "primary": [("openai", "gpt-5"), ("openrouter", "anthropic/claude-4-opus"), ("openai", "gpt-5-mini")],
             "fallback": [("openrouter", "anthropic/claude-3-5-sonnet-20241022"), ("openrouter", "openai/gpt-4o")]

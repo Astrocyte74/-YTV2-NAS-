@@ -32,7 +32,7 @@ from modules import ledger, render_probe
 
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
-from nas_sync import upload_to_render
+from nas_sync import upload_to_render, dual_sync_upload
 
 
 class YouTubeTelegramBot:
@@ -311,7 +311,7 @@ class YouTubeTelegramBot:
             
             # Delete from NAS
             nas_ok = False
-            nas_path = Path(f'./data/reports/{report_id}.json')
+            nas_path = Path(f'/app/data/reports/{report_id}.json')
             if nas_path.exists():
                 try:
                     nas_path.unlink()
@@ -449,7 +449,12 @@ class YouTubeTelegramBot:
                     # Continue to fresh processing below instead of trying to re-sync files
             
             # Process the video (new processing)
-            logging.info(f"🎬 PROCESSING: {video_id} | {summary_type} | user: {user_name} | URL: {self.last_video_url}")
+            logging.info(
+                f"🎬 PROCESSING: {video_id} | {summary_type} | user: {user_name} | URL: {self.last_video_url}"
+            )
+            logging.info(
+                f"🧠 LLM: {self.summarizer.llm_provider}/{self.summarizer.model}"
+            )
             
             result = await self.summarizer.process_video(
                 self.last_video_url,
@@ -475,7 +480,14 @@ class YouTubeTelegramBot:
                 report_dict = create_report_from_youtube_summarizer(result)
                 json_path = self.json_exporter.save_report(report_dict)
                 export_info["json_path"] = Path(json_path).name
-                logging.info(f"✅ Exported JSON report: {json_path}")
+
+                # Verify the JSON file was actually created
+                json_path_obj = Path(json_path)
+                if json_path_obj.exists():
+                    logging.info(f"✅ Exported JSON report: {json_path}")
+                else:
+                    logging.warning(f"⚠️ JSON export returned path but file not created: {json_path}")
+                    logging.warning(f"   This will cause dual-sync to fail!")
                 
                 # Add to ledger immediately after saving
                 stem = Path(json_path).stem
@@ -518,38 +530,99 @@ class YouTubeTelegramBot:
                         json_path_obj = Path(json_path)
                         stem = json_path_obj.stem
                         
-                        # Efficiently sync to Render using full database sync
-                        logging.info(f"📡 SYNC START: Uploading to Render dashboard...")
-                        
+                        # Dual-sync to SQLite + PostgreSQL (T-Y020A)
+                        logging.info(f"📡 DUAL-SYNC START: Uploading to configured targets...")
+
                         # Extract video ID for logging
                         video_metadata = result.get('metadata', {})
                         video_id = video_metadata.get('video_id', '')
                         content_id = f"yt:{video_id}" if video_id else stem
-                        
-                        # Use full database sync (same as manual sync that works)
-                        env = os.environ.copy()
-                        sync_result = subprocess.run([
-                            'python', 'sync_sqlite_db.py'
-                        ], env=env, capture_output=True, text=True, cwd='/app')
-                        sync_success = sync_result.returncode == 0
+
+                        # Use dual-sync with JSON report path
+                        report_path = Path(f"/app/data/reports/{stem}.json")
+                        sync_results = dual_sync_upload(report_path)
+
+                        # Determine success (at least one target succeeded)
+                        sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+                        postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+                        sync_success = sqlite_ok or postgres_ok
+
                         if sync_success:
-                            logging.info(f"✅ SYNC SUCCESS: 📊 → {content_id}")
-                            
+                            targets = []
+                            if sqlite_ok: targets.append("SQLite")
+                            if postgres_ok: targets.append("PostgreSQL")
+                            logging.info(f"✅ DUAL-SYNC SUCCESS: 📊 → {content_id} (targets: {', '.join(targets)})")
+
                             # Update ledger and mark as synced
                             entry = ledger.get(video_id, summary_type)
                             if entry:
                                 entry["synced"] = True
                                 entry["last_synced"] = datetime.now().isoformat()
+                                entry["sync_targets"] = targets  # Track which targets succeeded
                                 ledger.upsert(video_id, summary_type, entry)
-                                logging.info(f"📊 Updated ledger: synced=True")
+                                logging.info(f"📊 Updated ledger: synced=True, targets={targets}")
                         else:
-                            logging.error(f"❌ SYNC FAILED: Upload failed for {stem}")
-                            
+                            logging.error(f"❌ DUAL-SYNC FAILED: All targets failed for {stem}")
+
                     except Exception as sync_e:
-                        logging.warning(f"⚠️ Render sync error: {sync_e}")
+                        logging.warning(f"⚠️ Dual-sync error: {sync_e}")
                 else:
-                    # For audio summaries, defer sync until after TTS generation
-                    logging.info(f"⏳ SYNC DEFERRED: Audio summary detected, will sync after TTS generation")
+                    # For audio summaries, still sync the content metadata now
+                    # Audio file will be synced later when TTS is complete
+                    try:
+                        json_path_obj = Path(json_path)
+                        stem = json_path_obj.stem
+
+                        # Extract video ID for logging
+                        video_metadata = result.get('metadata', {})
+                        video_id = video_metadata.get('video_id', '')
+                        content_id = f"yt:{video_id}" if video_id else stem
+
+                        logging.info(f"📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for {content_id}")
+
+                        # Use dual-sync with JSON report path (content only, audio comes later)
+                        report_path = json_path_obj  # Use the actual JSON file path instead of reconstructing
+
+                        # Handle timing issue - file might not be fully written yet
+                        import time
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            if report_path.exists():
+                                break
+                            logging.debug(f"📄 Waiting for file to be written (attempt {attempt + 1}/{max_retries}): {report_path}")
+                            time.sleep(0.1)  # Wait 100ms between attempts
+
+                        if report_path.exists():
+                            sync_results = dual_sync_upload(report_path)
+
+                            # Determine success (at least one target succeeded)
+                            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+                            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+                            sync_success = sqlite_ok or postgres_ok
+
+                            if sync_success:
+                                targets = []
+                                if sqlite_ok: targets.append("SQLite")
+                                if postgres_ok: targets.append("PostgreSQL")
+                                logging.info(f"✅ DUAL-SYNC CONTENT: 📊 → {content_id} (targets: {', '.join(targets)})")
+                                logging.info(f"⏳ Audio sync will happen after TTS generation")
+
+                                # Update ledger and mark as synced
+                                entry = ledger.get(video_id, summary_type)
+                                if entry:
+                                    entry["synced"] = True
+                                    entry["last_synced"] = datetime.now().isoformat()
+                                    entry["sync_targets"] = targets  # Track which targets succeeded
+                                    ledger.upsert(video_id, summary_type, entry)
+                                    logging.info(f"📊 Updated ledger: synced=True, targets={targets}")
+                            else:
+                                logging.error(f"❌ DUAL-SYNC CONTENT FAILED: All targets failed for {stem}")
+                        else:
+                            logging.warning(f"⚠️ JSON report not found for content sync: {report_path}")
+
+                    except Exception as sync_e:
+                        logging.warning(f"⚠️ Dual-sync content error: {sync_e}")
+                        logging.info(f"⏳ Will retry full sync after TTS generation")
                 
                 # TODO: Generate HTML on-demand when "Full Report" is clicked
                 # For now, skip HTML to prevent duplicate dashboard cards
@@ -697,7 +770,6 @@ class YouTubeTelegramBot:
             title = video_info.get('title', 'Unknown Title')
             
             # Generate TTS audio
-            from datetime import datetime
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             video_id = video_info.get('video_id', 'unknown')
             audio_filename = f"audio_{video_id}_{timestamp}.mp3"
@@ -768,18 +840,84 @@ class YouTubeTelegramBot:
                                 ledger.upsert(video_id, summary_type, entry)
                                 logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
                             
-                            # Efficiently sync just this content to Render
+                            # Dual-sync content + audio to configured targets (T-Y020A)
                             try:
-                                from nas_sync import sync_single_content_to_render
                                 content_id = f"yt:{video_id}"
-                                logging.info(f"📡 Syncing new content to Render: {content_id}")
-                                db_sync_success = sync_single_content_to_render(content_id, audio_filepath)
-                                if db_sync_success:
-                                    logging.info(f"✅ CONTENT SYNCED: 📊+🎵 → {content_id} synced to Render")
+                                logging.info(f"📡 Dual-syncing content+audio: {content_id}")
+
+                                # Find the JSON report for this content
+                                reports_dir = Path("/app/data/reports")
+                                report_pattern = f"*{video_id}*.json"
+
+                                # Debug: list what files exist
+                                all_reports = list(reports_dir.glob("*.json"))
+                                logging.info(f"🔍 Looking for pattern '{report_pattern}' in {reports_dir}")
+                                logging.info(f"🔍 Found {len(all_reports)} JSON files in reports dir")
+
+                                # Find exact match by video_id (improved matching)
+                                # Look for files that end with video_id.json or contain _video_id pattern
+                                report_files = []
+                                logging.info(f"🔍 Searching for video_id: '{video_id}' (length: {len(video_id)})")
+
+                                for f in all_reports:
+                                    fname = f.name
+                                    logging.debug(f"🔍 Checking file: {fname}")
+
+                                    # Match patterns: video_id.json, *_video_id.json, or *video_id*.json (but prefer exact endings)
+                                    if fname == f"{video_id}.json":
+                                        report_files.append(f)
+                                        logging.info(f"🔍 Exact match (pattern 1): {fname}")
+                                    elif fname.endswith(f"_{video_id}.json"):
+                                        report_files.append(f)
+                                        logging.info(f"🔍 Exact match (pattern 2): {fname}")
+                                    elif f"_{video_id}_" in fname:
+                                        report_files.append(f)
+                                        logging.info(f"🔍 Exact match (pattern 3): {fname}")
+                                    elif video_id in fname and len(video_id) >= 8:  # Only for long video IDs to avoid false matches
+                                        report_files.append(f)
+                                        logging.info(f"🔍 Substring match: {fname}")
+
+                                logging.info(f"🔍 Pattern matching complete. Found {len(report_files)} matches.")
+
+                                if report_files:
+                                    # Sort by modification time, use most recent
+                                    report_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                                    logging.info(f"🔍 Found {len(report_files)} files matching video_id {video_id}")
+                                    for rf in report_files[:3]:  # Show top 3
+                                        logging.info(f"🔍   - {rf.name}")
                                 else:
-                                    logging.warning(f"⚠️ Content sync failed for {content_id}")
+                                    logging.info(f"🔍 No files found containing video_id {video_id}")
+                                    if all_reports:
+                                        # Show some recent files for debugging
+                                        recent_reports = sorted(all_reports, key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+                                        logging.info(f"🔍 Recent files: {[f.name for f in recent_reports]}")
+
+                                if report_files:
+                                    report_path = report_files[0]  # Use most recent
+                                    logging.info(f"✅ Using report: {report_path.name}")
+
+                                    # Dual-sync with both content and audio
+                                    audio_path = Path(audio_filepath) if audio_filepath else None
+                                    sync_results = dual_sync_upload(report_path, audio_path)
+
+                                    # Check results
+                                    sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+                                    postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+
+                                    if sqlite_ok or postgres_ok:
+                                        targets = []
+                                        if sqlite_ok: targets.append("SQLite")
+                                        if postgres_ok: targets.append("PostgreSQL")
+                                        logging.info(f"✅ CONTENT+AUDIO SYNCED: 📊+🎵 → {content_id} (targets: {', '.join(targets)})")
+                                    else:
+                                        logging.warning(f"⚠️ Content+audio sync failed for {content_id}")
+                                else:
+                                    logging.error(f"❌ Could not find JSON report for video_id {video_id}")
+                                    logging.error(f"   Expected file patterns: {video_id}.json, *_{video_id}.json, *{video_id}*.json")
+                                    logging.error(f"   Will skip dual-sync for this video to avoid syncing wrong content")
+
                             except Exception as db_sync_error:
-                                logging.error(f"❌ Database sync error: {db_sync_error}")
+                                logging.error(f"❌ Dual-sync error: {db_sync_error}")
                         else:
                             logging.warning("⚠️ Missing video_id or audio file for sync")
                     except Exception as sync_e:
@@ -866,7 +1004,6 @@ class YouTubeTelegramBot:
             await query.edit_message_text(f"🎙️ Generating audio summary... Creating TTS audio file.")
             
             # Generate TTS audio
-            from datetime import datetime
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             video_id = video_info.get('video_id', 'unknown')
             audio_filename = f"audio_{video_id}_{timestamp}.mp3"

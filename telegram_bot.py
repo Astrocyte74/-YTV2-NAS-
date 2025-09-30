@@ -867,7 +867,7 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
         
         try:
             # Look for JSON report first
-            json_file = Path('./data/reports') / f"{report_id}.json"
+            json_file = Path('/app/data/reports') / f"{report_id}.json"
             if json_file.exists():
                 report_data = json.loads(json_file.read_text())
                 self.send_response(200)
