@@ -443,6 +443,8 @@ class PostgreSQLSyncClient:
                     continue
 
                 variant_name = key.replace('_', '-')
+                if key == 'audio' and summary_data.get('summary_type'):
+                    variant_name = summary_data['summary_type']
                 if variant_name in processed_variants:
                     continue
 
