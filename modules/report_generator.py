@@ -21,6 +21,14 @@ try:
 except ImportError:
     SQLITE_AVAILABLE = False
 
+# Feature flag to control SQLite usage. Default to disabled when POSTGRES_ONLY is set.
+_postgres_only = os.getenv('POSTGRES_ONLY', 'false').lower() == 'true'
+SQLITE_SYNC_ENABLED = os.getenv('SQLITE_SYNC_ENABLED')
+if SQLITE_SYNC_ENABLED is None:
+    SQLITE_SYNC_ENABLED = not _postgres_only
+else:
+    SQLITE_SYNC_ENABLED = SQLITE_SYNC_ENABLED.lower() == 'true'
+
 # API client support for direct Render sync
 try:
     from .render_api_client import RenderAPIClient, create_client_from_env
@@ -143,9 +151,9 @@ class JSONReportGenerator:
         self.reports_dir = Path(reports_dir)
         self.reports_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize SQLite backend if available
+        # Initialize SQLite backend if available and enabled
         self.sqlite_db = None
-        if SQLITE_AVAILABLE:
+        if SQLITE_AVAILABLE and SQLITE_SYNC_ENABLED:
             try:
                 # Use single consolidated database location
                 db_path = Path("data/ytv2_content.db")
@@ -233,24 +241,19 @@ class JSONReportGenerator:
         if filepath.exists() and not overwrite:
             filepath = self._resolve_filename_conflict(filepath)
         
-        # Save to SQLite database as primary storage (JSON generation removed)
+        # Save to both SQLite (primary) and JSON (for dual-sync compatibility)
         if self.sqlite_db:
             try:
                 self._save_to_sqlite(report)
-                print(f"✅ Saved to SQLite database (JSON generation disabled)")
+                print(f"✅ Saved to SQLite database")
             except Exception as e:
                 print(f"❌ SQLite save failed: {e}")
                 print(f"📊 SQLite database available ({self.sqlite_db.get_report_count()} existing records)")
-                # Fallback: create JSON only if SQLite fails
-                print(f"📄 Creating JSON as fallback...")
-                with open(filepath, 'w', encoding='utf-8') as f:
-                    json.dump(report, f, indent=2, ensure_ascii=False)
-                print(f"⚠️  Fallback JSON created: {filepath}")
-        else:
-            print(f"❌ SQLite database not available - creating JSON fallback")
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(report, f, indent=2, ensure_ascii=False)
-            print(f"📄 JSON fallback created: {filepath}")
+
+        # Always create JSON file for dual-sync compatibility
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        print(f"📄 JSON report created: {filepath}")
         
         return str(filepath.absolute())
     
@@ -312,7 +315,6 @@ class JSONReportGenerator:
             normalised_categories = [c for c in raw_categories if c]
 
             # Build record data
-            from datetime import datetime
             now = datetime.now().isoformat()
             
             def _json_or_none(values: Any) -> Optional[str]:
@@ -322,6 +324,9 @@ class JSONReportGenerator:
                     values = [values]
                 values = [v for v in values if v]
                 return json.dumps(values, ensure_ascii=False) if values else None
+
+            if not SQLITE_SYNC_ENABLED or not self.sqlite_db:
+                return
 
             record_data = {
                 'id': video_id,
@@ -407,9 +412,9 @@ class JSONReportGenerator:
     
     def _update_sqlite_mp3_metadata(self, report_id: str, mp3_duration_seconds: int, voice: str):
         """Update SQLite record with MP3 metadata after audio generation."""
-        if not self.sqlite_db:
+        if not SQLITE_SYNC_ENABLED or not self.sqlite_db:
             return
-            
+
         try:
             conn = self.sqlite_db._get_connection()
             cursor = conn.cursor()
@@ -423,7 +428,6 @@ class JSONReportGenerator:
             WHERE id = ?
             '''
             
-            from datetime import datetime
             now = datetime.now().isoformat()
             
             cursor.execute(update_sql, (True, mp3_duration_seconds, now, report_id))
@@ -818,7 +822,6 @@ def update_json_with_mp3_metadata(json_filepath: str, mp3_filepath: str, voice: 
     try:
         from pathlib import Path
         import json
-        from datetime import datetime
         
         # Get MP3 duration using ffprobe (clean, reliable)
         # Ensure we have absolute path for Docker compatibility

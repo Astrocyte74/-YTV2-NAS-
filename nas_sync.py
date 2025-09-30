@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, Any
 import logging
 from modules.render_api_client import RenderAPIClient, create_client_from_env
+from modules.dual_sync_coordinator import create_dual_sync_coordinator
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,70 @@ def sync_sqlite_database():
     """Legacy function - redirects to new API-based sync."""
     logger.warning("sync_sqlite_database() is deprecated, use sync_content_via_api()")
     return sync_content_via_api()
+
+def dual_sync_upload(report_path, audio_path=None):
+    """
+    Upload report and audio using configured sync targets.
+
+    Args:
+        report_path (str/Path): Path to JSON report file
+        audio_path (str/Path): Optional path to MP3 audio file (auto-detected if None)
+
+    Returns:
+        dict: Results from all targets
+    """
+    try:
+        coordinator = create_dual_sync_coordinator()
+
+        report_path = Path(report_path)
+        if not report_path.exists():
+            logger.error(f"Report file not found: {report_path}")
+            return False
+
+        stem = report_path.stem
+
+        # Load and validate JSON report
+        try:
+            with open(report_path, 'r', encoding='utf-8') as f:
+                report_data = json.load(f)
+
+            # Convert JSON report to universal schema format expected by API
+            if 'content_source' not in report_data:
+                # Legacy format - needs conversion
+                logger.info(f"Converting legacy report format for {stem}")
+                content_data = convert_legacy_report_to_api_format(report_data)
+            else:
+                # Already in universal schema format
+                content_data = report_data
+
+        except Exception as e:
+            logger.error(f"Failed to load/parse report {stem}: {e}")
+            return False
+
+        # Auto-pair audio if not provided using stem-based matching
+        if audio_path is None:
+            candidate = Path('./exports') / f"{stem}.mp3"
+            if candidate.exists():
+                audio_path = candidate
+                logger.info(f"Auto-detected audio file: {audio_path}")
+
+        # Sync to all configured targets
+        results = coordinator.sync_content(content_data, audio_path)
+
+        # Determine overall success (at least one target succeeded)
+        success = any(bool(target_result.get('report')) for target_result in results.values())
+
+        if success:
+            logger.info(f"✅ Dual-sync completed for {stem}")
+        else:
+            logger.error(f"❌ Dual-sync failed for {stem} (all targets failed)")
+
+        return results
+
+    except Exception as e:
+        logger.error(f"Dual-sync function error: {e}")
+        return False
+
 
 def upload_to_render(report_path, audio_path=None, max_retries=6):
     """
