@@ -697,7 +697,7 @@ class YouTubeTelegramBot:
                 f"📝 **{summary_type.replace('-', ' ').title()} Summary:**"
             ]
             
-            header_text = "\n".join(header_parts)
+            header_text = "\n".join(part for part in header_parts if part)
             
             # Create inline keyboard with link buttons if exports were successful
             reply_markup = None
