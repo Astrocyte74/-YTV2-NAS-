@@ -1070,15 +1070,19 @@ class YouTubeTelegramBot:
     async def _send_long_message(self, query, header_text: str, summary_text: str, reply_markup=None):
         """Send long messages by splitting into multiple Telegram messages if needed."""
         try:
+            summary_text = summary_text or ""
+            safe_summary = self._escape_markdown(summary_text)
+            safe_header = header_text or ""
+
             # Calculate available space for summary content
             # Reserve space for header, formatting, and safety margin
-            header_length = len(header_text)
+            header_length = len(safe_header)
             safety_margin = 100  # Buffer for formatting and other text
             available_space = self.MAX_MESSAGE_LENGTH - header_length - safety_margin
             
             # If summary fits in one message, send normally
-            if len(summary_text) <= available_space:
-                full_message = f"{header_text}\n{summary_text}"
+            if len(safe_summary) <= available_space:
+                full_message = f"{safe_header}\n{safe_summary}"
                 await query.edit_message_text(full_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
                 return
             
@@ -1086,10 +1090,10 @@ class YouTubeTelegramBot:
             print(f"📱 Long summary detected ({len(summary_text):,} chars) - splitting into multiple messages")
             
             # Split summary into chunks that fit within message limits
-            chunks = self._split_text_into_chunks(summary_text, available_space)
+            chunks = self._split_text_into_chunks(safe_summary, available_space)
             
             # Send first message with header + first chunk
-            first_message = f"{header_text}\n{chunks[0]}"
+            first_message = f"{safe_header}\n{chunks[0]}"
             if len(chunks) > 1:
                 first_message += f"\n\n📄 *Continued in next message... ({len(chunks)} parts total)*"
             
@@ -1118,8 +1122,8 @@ class YouTubeTelegramBot:
             import traceback
             logging.error(f"Full traceback: {traceback.format_exc()}")
             # Fallback to truncated message with buttons
-            truncated_summary = summary_text[:1000] + "..." if len(summary_text) > 1000 else summary_text
-            fallback_message = f"{header_text}\n{truncated_summary}\n\n⚠️ *Summary was truncated due to length. View full summary on dashboard.*"
+            truncated_summary = safe_summary[:1000] + "..." if len(safe_summary) > 1000 else safe_summary
+            fallback_message = f"{safe_header}\n{truncated_summary}\n\n⚠️ *Summary was truncated due to length. View full summary on dashboard.*"
             try:
                 await query.edit_message_text(fallback_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
             except Exception as fallback_e:
@@ -1156,6 +1160,10 @@ class YouTubeTelegramBot:
                 sentence_break = text.rfind('. ', current_pos, end_pos - 100)
                 if sentence_break > current_pos:
                     break_point = sentence_break + 1  # Include the period
+
+            # Avoid ending chunk on trailing backslash which would escape next chunk's first character
+            while break_point > current_pos and text[break_point - 1] == '\\':
+                break_point -= 1
             
             # Add this chunk
             chunk = text[current_pos:break_point].strip()
