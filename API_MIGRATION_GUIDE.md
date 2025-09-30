@@ -5,32 +5,26 @@ This guide documents the migration from database file sync to API-based synchron
 ## Overview
 
 **Before**: NAS uploaded SQLite database files to Render
-**After**: NAS sends individual content records via REST API using UPSERT logic
+**After**: NAS sends individual content records via Postgres ingest (`/ingest/report`, `/ingest/audio`) using UPSERT logic
 
 ## Key Changes
 
 ### 1. New API Endpoints (Render Side)
 
-- `POST /api/content` - Create or update content with UPSERT logic
-- `PUT /api/content/{id}` - Update specific content fields  
-- Existing `POST /api/upload-audio` - Upload MP3 files
+- `POST /ingest/report` - Create or update content (UPSERT)
+- `POST /ingest/audio`  - Upload MP3 files and link to content
 
-### 2. New NAS Components
+### 2. NAS Components (2025)
 
-- `modules/render_api_client.py` - Comprehensive API client
-- Updated `nas_sync.py` - API-based sync functions
-- Updated `modules/report_generator.py` - Direct API sync capability
+- `modules/postgres_sync_client.py` - Ingest client for Postgres dashboard
+- `modules/dual_sync_coordinator.py` - Coordinates report/audio uploads and health checks
+- Updated `nas_sync.py` - High-level sync entry points (full sync, per-report dual sync)
+- `modules/report_generator.py` - Generates reports; writes to SQLite only when explicitly enabled
 
-### 3. Obsolete Components
+### 3. Obsolete Components (already removed)
 
-**Files marked for cleanup:**
-- `sync_sqlite_db.py` - Database file upload (replaced by API client)
-- `tools/bulk_sync_to_render.py` - Bulk JSON upload (replaced by API client)
-- `test_database_sync.py` - Old database sync test
-
-**Functions/Endpoints marked for cleanup:**
-- `POST /api/upload-database` - Database file upload
-- `POST /api/upload-report` - JSON file upload (partially replaced)
+- `sync_sqlite_db.py`, `tools/bulk_sync_to_render.py`, `test_database_sync.py`
+- Legacy dashboard endpoints `/api/upload-database` and `/api/upload-report`
 
 ## Migration Benefits
 
@@ -53,38 +47,34 @@ This guide documents the migration from database file sync to API-based synchron
 
 ### Environment Variables
 ```bash
-# Required for API client
-export RENDER_API_URL="https://your-dashboard.onrender.com"
-export SYNC_SECRET="your-sync-secret"
+# Required for ingest client
+export RENDER_DASHBOARD_URL="https://your-dashboard.onrender.com"
+export INGEST_TOKEN="your-ingest-token"
+export SYNC_SECRET="legacy-shared-secret"   # still used for delete callbacks
+export POSTGRES_ONLY=true
+export SQLITE_SYNC_ENABLED=false
 ```
 
 ### New Sync Functions
 
-**Full database sync via API:**
+**Full ingest sync (reports + audio):**
+```python
+from nas_sync import dual_sync_upload
+dual_sync_upload("data/reports/video_id.json", "exports/audio_video_id.mp3")
+```
+
+**Bulk backfill / sanity check:**
 ```python
 from nas_sync import sync_content_via_api
-success = sync_content_via_api()
-```
-
-**Individual report upload:**
-```python  
-from nas_sync import upload_to_render
-success = upload_to_render("path/to/report.json", "path/to/audio.mp3")
-```
-
-**Direct API sync from report generator:**
-```python
-from modules.report_generator import JSONReportGenerator
-generator = JSONReportGenerator()
-generator.sync_report_to_api(report_data, audio_path)
+sync_content_via_api()  # Respects POSTGRES_ONLY / SQLITE_SYNC_ENABLED
 ```
 
 ### Legacy Compatibility
 
-The migration maintains backward compatibility:
-- `sync_sqlite_database()` redirects to new API sync
-- `upload_to_render()` converts legacy reports to new format
-- Environment variables work with both old and new variable names
+The migration maintains limited backward compatibility:
+- `sync_sqlite_database()` now logs a deprecation warning and proxies to `sync_content_via_api()`
+- `upload_to_render()` converts legacy reports to universal schema before invoking the ingest client
+- `SYNC_SECRET` is still honored for delete callbacks, but ingest auth relies on `INGEST_TOKEN`
 
 ## Testing
 
@@ -117,15 +107,15 @@ The API endpoints support both old and new sync methods during transition.
 Monitor the new API sync:
 
 **Success Indicators:**
-- HTTP 200 responses from `/api/content`
-- UPSERT actions logged (created/updated)  
-- Audio uploads to `/api/upload-audio`
+- HTTP 200 responses from `/ingest/report`
+- UPSERT actions logged (created/updated)
+- Audio uploads to `/ingest/audio`
 - No database file uploads needed
 
 **Error Indicators:**
-- HTTP 4xx/5xx responses from API
+- HTTP 4xx/5xx responses from `/ingest/report` or `/ingest/audio`
 - Network timeout errors
-- Authentication failures
+- Authentication failures (`INGEST_TOKEN` mismatch)
 - Missing content records on dashboard
 
 ## Support
@@ -136,9 +126,9 @@ Monitor the new API sync:
 - Review API client logs for detailed errors
 
 **Sync Issues:**
-- Verify SQLite database exists at `data/ytv2_content.db`
-- Check universal schema format conversion
-- Monitor Render dashboard for content appearance
+- Confirm `POSTGRES_ONLY=true` and `SQLITE_SYNC_ENABLED=false`
+- Check logs for `Dual-sync SUCCESS` vs warning messages
+- Monitor the dashboard for new cards (consider SSE/WebSocket refresh)
 
 **Performance Issues:**
 - Adjust retry logic in API client

@@ -1,6 +1,6 @@
 # CLAUDE.md - YTV2-NAS Processing Engine
 
-This is the **processing component** of the YTV2 hybrid architecture - it handles YouTube video processing, AI summarization, and content generation on your NAS.
+This is the **processing component** of the YTV2 hybrid architecture. It now runs in **Postgres-only mode** (no dual SQLite writes) and handles YouTube video processing, AI summarization (Gemini Flash Lite by default), and content generation on your NAS.
 
 ## Project Architecture
 
@@ -76,10 +76,10 @@ This is the **processing engine** of the YTV2 hybrid architecture:
 - Error handling for various video types and restrictions
 
 #### `nas_sync.py` - Dashboard Synchronization
-- Uploads JSON reports to Dashboard component
-- Syncs audio files and exports
-- Handles authentication and error recovery
-- Maintains sync status and retry logic
+- Uploads JSON reports + audio to Postgres ingest endpoints
+- Coordinates retries and health checks via `DualSyncCoordinator`
+- Honors feature flags (`POSTGRES_ONLY`, `SQLITE_SYNC_ENABLED`)
+- Converts legacy JSON reports when re-syncing
 
 #### `export_utils.py` - Content Export
 - Multi-format export: JSON, Markdown, HTML, PDF
@@ -112,30 +112,31 @@ This is the **processing engine** of the YTV2 hybrid architecture:
 - Error messaging and user feedback
 
 **`modules/report_generator.py`** - Report Creation
-- JSON report structure and validation
+- JSON report structure and validation (only writes to SQLite when explicitly enabled)
 - Template processing and data formatting
-- Metadata extraction and organization
+- Metadata extraction, summary variants, and language tagging
 
-### Data Flow
+### Data Flow (2025)
 
 1. **Telegram Input** → User sends YouTube URL via bot
-2. **Processing** → Video downloaded, transcribed, summarized by AI
-3. **Report Generation** → Structured JSON with metadata and summaries
-4. **Audio Export** → Audio files extracted with proper metadata
-5. **Dashboard Sync** → Files uploaded to web component
-6. **User Access** → Web dashboard displays reports with audio playback
+2. **Processing** → Video downloaded, transcript fetched, summaries generated (multi-language aware)
+3. **Report Generation** → Structured JSON with summary variants & language metadata
+4. **Audio Export** → TTS audio generated, chunked if necessary, merged via ffmpeg
+5. **Dashboard Sync** → Reports/audio upserted to Postgres ingest (`/ingest/report`, `/ingest/audio`)
+6. **User Access** → Dashboard displays new cards (WebSocket/SSE refresh recommended)
 
 ### File Structure
 
 #### Active Processing Files
 - `telegram_bot.py` - Main Telegram bot
-- `youtube_summarizer.py` - Video processing engine
-- `nas_sync.py` - Dashboard synchronization
+- `youtube_summarizer.py` - Video processing engine (Gemini Flash Lite default)
+- `nas_sync.py` - Dashboard synchronization (Postgres ingest)
 - `export_utils.py` - Content export utilities
-- `llm_config.py` - AI model configuration
+- `llm_config.py` - AI model configuration & provider fallbacks
 - `modules/` - Processing utilities and helpers
-- `data/` - Generated JSON reports
-- `exports/` - Audio files and other exports
+- `tools/` - Diagnostics/test scripts (see `tools/README.md`)
+- `data/` - Runtime reports/transcripts (ignored by Git, documented in `data/README.md`)
+- `exports/` - Generated audio files (ignored by Git)
 - `config/` - Configuration files and templates
 - `requirements.txt` - Python dependencies
 
@@ -156,18 +157,23 @@ OPENAI_API_KEY=your_key_here
 ANTHROPIC_API_KEY=your_key_here
 OPENROUTER_API_KEY=your_key_here
 
-# Dashboard Integration
-RENDER_DASHBOARD_URL=your_dashboard_url_here
-SYNC_SECRET=your_shared_secret_here
+# Dashboard Integration (Postgres ingest)
+RENDER_DASHBOARD_URL=https://your-dashboard.onrender.com
+INGEST_TOKEN=your_ingest_token_here
+SYNC_SECRET=your_shared_secret_here  # legacy webhook/delete actions
+
+# Feature Flags
+POSTGRES_ONLY=true
+SQLITE_SYNC_ENABLED=false
 ```
 
 #### Optional Configuration
 ```bash
 # Processing Settings
+LLM_PROVIDER=openrouter
+LLM_MODEL=google/gemini-2.5-flash-lite
 MAX_VIDEO_DURATION=3600
-DOWNLOAD_AUDIO_ONLY=true
-LLM_PROVIDER=openai
-LLM_MODEL=gpt-4
+DOWNLOAD_AUDIO_ONLY=false
 ```
 
 ### Deployment
@@ -182,12 +188,12 @@ This component is designed for **NAS deployment** using Docker:
 
 ### Integration with Dashboard
 
-The NAS component syncs with the Dashboard component via:
+The NAS component syncs with the Postgres dashboard via:
 
-- **HTTP API** for uploading reports and files
-- **Shared secrets** for authentication
-- **JSON format** for structured data exchange
-- **Error handling** with retry logic for network issues
+- **HTTP ingest API** (`/ingest/report`, `/ingest/audio`) secured by `INGEST_TOKEN`
+- **DualSyncCoordinator** orchestrating retries and health checks
+- **JSON payloads** containing summary variants (`audio-fr`, etc.) and languages
+- **Optional SSE/WebSocket** on the dashboard for real-time refreshes when new reports arrive
 
 ## PostgreSQL Migration & Legacy Cleanup
 
@@ -200,6 +206,8 @@ The NAS component syncs with the Dashboard component via:
 - ✅ Added `SQLITE_SYNC_ENABLED` feature flag; defaults to `false` when Postgres-only mode is active.
 - ✅ Removed the legacy `sync_sqlite_db.py` calls and all SQLite fallbacks from Telegram/NAS tooling.
 - ✅ Hardened ingest (video ID normalisation, audio existence checks, no "most recent file" fallback).
+- ✅ Added yt-dlp fallback metadata scraping (channel/duration preserved even when formats are blocked).
+- ✅ Propagated summary languages (`summary_language`, `audio_language`, `analysis.language`) so `audio-fr` and `audio-es` variants render correctly on the dashboard.
 
 ### Operational Safeguards
 - Nightly `backup_database_nas.sh` cron plus Asustor snapshots provide rollbacks.
@@ -220,5 +228,6 @@ The NAS component syncs with the Dashboard component via:
 - **Audio generation** extracts and exports playable content
 - **Dashboard sync** enables web access to all generated content
 - **Modular design** separates concerns for maintainability
+- **Telemetry**: yt-dlp format warnings are expected; metadata scraping fallback will fill in channel/duration.
 
 **Last Safe State**: PostgreSQL-only sync with Gemini JSON guardrails (September 30, 2025)

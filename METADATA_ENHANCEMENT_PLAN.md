@@ -1,6 +1,6 @@
 # YTV2 Metadata Enhancement & Cleanup Plan
 **Created**: 2025-09-08
-**Status**: Phase 1 - Ready to implement cleanup script
+**Status**: Phase 2 completed (metadata fallbacks live); Phase 3 optional
 
 ## 🎯 Objective
 Enhance YouTube metadata extraction with additional fields and backfill existing JSON reports with missing data, while cleaning up duplicates and orphaned files.
@@ -87,32 +87,14 @@ python cleanup_reports.py --backup-dir ./backups/
 python cleanup_reports.py --limit 10 --dry-run
 ```
 
-### ⏳ Phase 2: Update YouTube Summarizer
+### ✅ Phase 2: Update YouTube Summarizer (COMPLETED)
 **File**: `/Volumes/Docker/YTV2/youtube_summarizer.py`
 
-**Changes needed** (lines 375-390 & 231-245):
-```python
-# In _get_transcript_and_metadata_via_api() around line 231
-metadata = {
-    # ... existing fields ...
-    
-    # Add under source_metadata.youtube:
-    'like_count': info.get('like_count', 0),
-    'comment_count': info.get('comment_count', 0),
-    'channel_follower_count': info.get('channel_follower_count', 0),
-    'categories': info.get('categories', []),
-    'age_limit': info.get('age_limit', 0),
-    'live_status': info.get('live_status', 'not_live'),
-    'resolution': info.get('resolution', ''),
-    'fps': info.get('fps', 0),
-    'automatic_captions': list(info.get('automatic_captions', {}).keys()),
-    'subtitles': list(info.get('subtitles', {}).keys()),
-    'release_timestamp': info.get('release_timestamp', 0),
-    'availability': info.get('availability', 'public'),
-}
-```
+- Added fallbacks to parse `ytInitialPlayerResponse` when yt-dlp returns “requested format not available”.
+- Populated `source_metadata.youtube` with engagement + technical fields even when formats are blocked.
+- Captured transcript language (`transcript_language`) and propagated summary languages (`summary_language`, `audio_language`).
 
-### ⏳ Phase 3: Backfill Script
+### ⏳ Phase 3: Backfill Script (OPTIONAL)
 **File**: `/Volumes/Docker/YTV2/tools/backfill_metadata.py`
 
 **Features**:
