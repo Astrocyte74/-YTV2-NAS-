@@ -291,6 +291,7 @@ class YouTubeSummarizer:
     def _get_transcript_and_metadata_via_api(self, video_id: str, youtube_url: str) -> dict:
         """Extract transcript and attempt basic metadata using youtube-transcript-api + web scraping"""
         transcript_text = None
+        transcript_language = None
         
         # Get transcript via youtube-transcript-api with multiple language support
         if TRANSCRIPT_API_AVAILABLE:
@@ -313,12 +314,11 @@ class YouTubeSummarizer:
                 ]
                 
                 transcript_data = None
-                used_language = None
                 
                 for lang_code in language_codes:
                     try:
                         transcript_data = api.fetch(video_id, [lang_code])
-                        used_language = lang_code
+                        transcript_language = lang_code
                         break
                     except Exception:
                         continue
@@ -326,7 +326,7 @@ class YouTubeSummarizer:
                 if transcript_data:
                     text_parts = [snippet.text for snippet in transcript_data]
                     transcript_text = ' '.join(text_parts)
-                    print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {used_language}")
+                    print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
                 else:
                     print(f"⚠️ YouTube Transcript API: No supported language found")
                     
@@ -415,6 +415,7 @@ class YouTubeSummarizer:
         
         return {
             'transcript': transcript_text,
+            'transcript_language': transcript_language,
             'metadata': metadata
         }
     
@@ -500,6 +501,7 @@ class YouTubeSummarizer:
         result = self._get_transcript_and_metadata_via_api(video_id, youtube_url)
         transcript_text = result['transcript']
         metadata = result['metadata']
+        transcript_language = result.get('transcript_language') or 'en'
         
         # If we got a good transcript, return immediately with web-scraped metadata
         if transcript_text and len(transcript_text.strip()) > 100:
@@ -507,6 +509,7 @@ class YouTubeSummarizer:
                 'metadata': metadata,
                 'transcript': transcript_text,
                 'content_type': 'transcript',
+                'transcript_language': transcript_language,
                 'success': True
             }
         
@@ -641,10 +644,12 @@ class YouTubeSummarizer:
                         'content_type': 'description_only'
                     }
                 
+                transcript_language = transcript_language or info.get('language') or 'en'
                 return {
                     'metadata': metadata,
                     'transcript': transcript_text,
                     'content_type': content_type,
+                    'transcript_language': transcript_language,
                     'success': True
                 }
                 
@@ -662,6 +667,7 @@ class YouTubeSummarizer:
                     'metadata': fallback_metadata,
                     'transcript': transcript_text,
                     'content_type': 'transcript',
+                    'transcript_language': transcript_language,
                     'success': True
                 }
             else:
@@ -814,8 +820,10 @@ class YouTubeSummarizer:
             
             return {
                 'audio': final_audio_text,
+                'summary': final_audio_text,
                 'summary_type': summary_type,
-                'generated_at': datetime.now().isoformat()
+                'generated_at': datetime.now().isoformat(),
+                'language': 'fr' if normalized_type == "audio_fr" else 'es'
             }
         
         # Prepare context and prompts based on summary type
@@ -1058,7 +1066,8 @@ class YouTubeSummarizer:
             'summary': summary_text,
             'headline': final_headline,
             'summary_type': summary_type,
-            'generated_at': datetime.now().isoformat()
+            'generated_at': datetime.now().isoformat(),
+            'language': metadata.get('language', 'en')
         }
     
     def _sanitize_content(self, content: str, max_length: int = 8000) -> str:
@@ -1577,6 +1586,8 @@ Multiple Categories (when content genuinely spans areas):
             }
         
         metadata = transcript_data['metadata']
+        transcript_language = transcript_data.get('transcript_language') or metadata.get('language') or 'en'
+        metadata['language'] = transcript_language
         transcript = transcript_data['transcript']
         content_type = transcript_data.get('content_type', 'transcript')
         
@@ -1616,6 +1627,15 @@ Multiple Categories (when content genuinely spans areas):
         # Step 2: Generate summary
         print("Generating summary...")
         summary_data = await self.generate_summary(transcript, metadata, summary_type, proficiency_level)
+
+        summary_language = None
+        if isinstance(summary_data, dict):
+            summary_language = summary_data.get('language')
+            if 'summary' not in summary_data and isinstance(summary_data.get('audio'), str):
+                summary_data['summary'] = summary_data['audio']
+
+        if isinstance(summary_data, str) and not summary_language:
+            summary_language = transcript_language
         
         # Step 3: Analyze content (using summary for token efficiency)
         print("Analyzing content...")
@@ -1635,6 +1655,10 @@ Multiple Categories (when content genuinely spans areas):
             summary_text = transcript[:6000]
 
         analysis_data = await self.analyze_content(summary_text, metadata)
+        if summary_language:
+            analysis_data['language'] = summary_language
+        else:
+            summary_language = analysis_data.get('language', transcript_language)
         
         # Enhanced universal schema compliance
         from urllib.parse import urlparse
@@ -1669,6 +1693,9 @@ Multiple Categories (when content genuinely spans areas):
             },
             
             'analysis': analysis_data,
+            'original_language': transcript_language,
+            'summary_language': summary_language,
+            'audio_language': summary_language,
             
             # Legacy fields for backward compatibility
             'url': youtube_url,
@@ -1821,6 +1848,12 @@ Multiple Categories (when content genuinely spans areas):
         result["summary"] = primary_text
         result["summary_type"] = canonical_variant
         result["generated_at"] = datetime.now().isoformat()
+        if normalized_type == "audio_fr":
+            result["language"] = 'fr'
+        elif normalized_type == "audio_es":
+            result["language"] = 'es'
+        else:
+            result["language"] = metadata.get('language', 'en')
 
         if primary_text:
             title_prompt = f"""

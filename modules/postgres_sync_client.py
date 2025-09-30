@@ -359,7 +359,10 @@ class PostgreSQLSyncClient:
         )
 
         # Extract language info
-        language = content_data.get('analysis', {}).get('language', 'en')
+        analysis_language = content_data.get('analysis', {}).get('language', 'en')
+        original_language = content_data.get('original_language', analysis_language)
+        summary_language = content_data.get('summary_language', analysis_language)
+        audio_language = content_data.get('audio_language', summary_language)
 
         # Build payload matching what T-Y020C expects
         payload = {
@@ -374,9 +377,9 @@ class PostgreSQLSyncClient:
             'canonical_url': content_data.get('canonical_url'),
             'indexed_at': content_data.get('indexed_at') or datetime.now(timezone.utc).isoformat(),
             # Language fields required by PostgreSQL
-            'original_language': language,
-            'summary_language': language,
-            'audio_language': language,
+            'original_language': original_language,
+            'summary_language': summary_language,
+            'audio_language': audio_language,
             # Word count from source data
             'word_count': content_data.get('word_count', 0)
         }
