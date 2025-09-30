@@ -138,7 +138,9 @@ class YouTubeSummarizer:
                 fallback_opts.pop('writeinfojson', None)
                 fallback_opts.pop('subtitleslangs', None)
                 fallback_opts.pop('subtitlesformat', None)
-                fallback_opts['format'] = 'bestvideo*+bestaudio/best'
+                fallback_opts['format'] = 'best'
+                fallback_opts['noplaylist'] = True
+                fallback_opts['simulate'] = True
 
                 extractor_args = fallback_opts.get('extractor_args') or {}
                 if 'youtube' in extractor_args:
@@ -180,65 +182,97 @@ class YouTubeSummarizer:
             return None
     
     def _get_fallback_metadata(self, youtube_url: str, video_id: str) -> dict:
-        """Get basic metadata from YouTube page when yt-dlp fails"""
+        """Get metadata by scraping the watch page when yt-dlp fails."""
         try:
+            import json
+            import re
             import requests
             from bs4 import BeautifulSoup
-            
-            # Get basic page content
+
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
             response = requests.get(youtube_url, headers=headers, timeout=10)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # Extract title from page title or meta tags
-                title = 'Unknown Title'
-                title_tag = soup.find('title')
-                if title_tag:
-                    title = title_tag.get_text().replace(' - YouTube', '').strip()
-                
-                # Try to get channel name from meta tags
-                uploader = 'Unknown'
-                channel_meta = soup.find('meta', {'name': 'author'})
-                if channel_meta:
-                    uploader = channel_meta.get('content', 'Unknown')
-                
-                return {
-                    'title': title,
-                    'description': '',
-                    'uploader': uploader,
-                    'upload_date': '',
-                    'duration': 0,
-                    'duration_string': 'Unknown',
-                    'view_count': 0,
-                    'url': youtube_url,
-                    'video_id': video_id,
-                    'id': video_id,
-                    'channel_url': '',
-                    'tags': [],
-                    'thumbnail': f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else '',
-                }
+            response.raise_for_status()
+
+            html_text = response.text
+            soup = BeautifulSoup(html_text, 'html.parser')
+
+            title = 'Unknown Title'
+            title_tag = soup.find('title')
+            if title_tag:
+                title = title_tag.get_text().replace(' - YouTube', '').strip()
+
+            uploader = 'Unknown'
+            channel_meta = soup.find('meta', {'name': 'author'})
+            if channel_meta:
+                uploader = channel_meta.get('content', 'Unknown')
+
+            player_response = None
+            match = re.search(r'ytInitialPlayerResponse\s*=\s*({.+?});', html_text, re.DOTALL)
+            if match:
+                try:
+                    player_response = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    player_response = None
+
+            video_details = player_response.get('videoDetails', {}) if player_response else {}
+
+            duration_seconds = int(video_details.get('lengthSeconds', '0')) if video_details.get('lengthSeconds') else 0
+            view_count = int(video_details.get('viewCount', '0')) if video_details.get('viewCount') else 0
+            channel_id = video_details.get('channelId', '')
+            uploader = video_details.get('author', uploader)
+            description = video_details.get('shortDescription', '')
+            publish_date = video_details.get('publishDate', '')
+
+            return {
+                'title': video_details.get('title', title),
+                'description': description,
+                'uploader': uploader,
+                'upload_date': publish_date,
+                'duration': duration_seconds,
+                'duration_string': str(duration_seconds) if duration_seconds else 'Unknown',
+                'view_count': view_count,
+                'url': youtube_url,
+                'video_id': video_id,
+                'id': video_id,
+                'channel_url': f'https://www.youtube.com/channel/{channel_id}' if channel_id else '',
+                'tags': video_details.get('keywords', []),
+                'thumbnail': f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else '',
+                'like_count': 0,
+                'comment_count': 0,
+                'channel_follower_count': 0,
+                'uploader_id': channel_id,
+                'uploader_url': f'https://www.youtube.com/channel/{channel_id}' if channel_id else '',
+                'categories': [],
+                'availability': 'public',
+                'live_status': 'live' if video_details.get('isLive') else 'not_live',
+                'age_limit': 0,
+                'resolution': '',
+                'fps': 0,
+                'aspect_ratio': 0.0,
+                'vcodec': '',
+                'acodec': '',
+                'automatic_captions': [],
+                'subtitles': [],
+                'release_timestamp': 0,
+            }
         except Exception as e:
             print(f"⚠️ Fallback metadata extraction failed: {str(e)}")
-        
-        # Final fallback - basic info only
+
         return {
             'title': f'Video {video_id}',
             'description': '',
             'uploader': 'Unknown',
             'upload_date': '',
             'duration': 0,
-            'duration_string': 'Unknown', 
+            'duration_string': 'Unknown',
             'view_count': 0,
             'url': youtube_url,
             'video_id': video_id,
             'id': video_id,
             'channel_url': '',
             'tags': [],
-            # Always provide at least the standard YouTube thumbnail URL so downstream dashboards have artwork
             'thumbnail': f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else '',
         }
 
@@ -308,6 +342,9 @@ class YouTubeSummarizer:
                 'no_warnings': True,
                 'extract_flat': False,
                 'ignoreconfig': True,  # Ignore any system/user config that might force incompatible formats
+                'noplaylist': True,
+                'simulate': True,
+                'format': 'best',
                 
                 # Robustness from OpenAI suggestions
                 'extractor_args': {
@@ -326,46 +363,54 @@ class YouTubeSummarizer:
             # Use robust extraction with retry logic
             info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
             if not info:
-                raise Exception("Robust yt-dlp extraction failed")
+                logging.warning("⚠️ yt-dlp metadata extraction failed after retries; continuing with fallback metadata")
+                info = None
             
-            thumb_id = info.get('id', video_id)
-            metadata = {
-                    'title': info.get('title', 'Unknown'),
-                    'description': info.get('description', ''),
-                    'uploader': info.get('uploader', 'Unknown'), 
-                    'upload_date': info.get('upload_date', ''),
-                    'duration': info.get('duration', 0),
-                    'duration_string': info.get('duration_string', 'Unknown'),
-                    'view_count': info.get('view_count', 0),
-                    'url': youtube_url,
-                    'video_id': video_id,
-                    'id': info.get('id', video_id),
-                    'channel_url': info.get('channel_url', ''),
-                    'tags': info.get('tags', []),
-                    'thumbnail': info.get('thumbnail') or (f'https://img.youtube.com/vi/{thumb_id}/mqdefault.jpg' if thumb_id else ''),
-                    
-                    # NEW ENHANCED METADATA FIELDS
-                    'like_count': info.get('like_count', 0),
-                    'comment_count': info.get('comment_count', 0),
-                    'channel_follower_count': info.get('channel_follower_count', 0),
-                    'uploader_id': info.get('uploader_id', ''),
-                    'uploader_url': info.get('uploader_url', ''),
-                    'categories': info.get('categories', []),
-                    'availability': info.get('availability', 'public'),
-                    'live_status': info.get('live_status', 'not_live'),
-                    'age_limit': info.get('age_limit', 0),
-                    'resolution': info.get('resolution', ''),
-                    'fps': info.get('fps', 0),
-                    'aspect_ratio': info.get('aspect_ratio', 0.0),
-                    'vcodec': info.get('vcodec', ''),
-                    'acodec': info.get('acodec', ''),
-                    'automatic_captions': list(info.get('automatic_captions', {}).keys()),
-                    'subtitles': list(info.get('subtitles', {}).keys()),
-                    'release_timestamp': info.get('release_timestamp', 0),
-                }
+            if info:
+                thumb_id = info.get('id', video_id)
+                metadata = {
+                        'title': info.get('title', 'Unknown'),
+                        'description': info.get('description', ''),
+                        'uploader': info.get('uploader', 'Unknown'), 
+                        'upload_date': info.get('upload_date', ''),
+                        'duration': info.get('duration', 0),
+                        'duration_string': info.get('duration_string', 'Unknown'),
+                        'view_count': info.get('view_count', 0),
+                        'url': youtube_url,
+                        'video_id': video_id,
+                        'id': info.get('id', video_id),
+                        'channel_url': info.get('channel_url', ''),
+                        'tags': info.get('tags', []),
+                        'thumbnail': info.get('thumbnail') or (f'https://img.youtube.com/vi/{thumb_id}/mqdefault.jpg' if thumb_id else ''),
+                        
+                        # NEW ENHANCED METADATA FIELDS
+                        'like_count': info.get('like_count', 0),
+                        'comment_count': info.get('comment_count', 0),
+                        'channel_follower_count': info.get('channel_follower_count', 0),
+                        'uploader_id': info.get('uploader_id', ''),
+                        'uploader_url': info.get('uploader_url', ''),
+                        'categories': info.get('categories', []),
+                        'availability': info.get('availability', 'public'),
+                        'live_status': info.get('live_status', 'not_live'),
+                        'age_limit': info.get('age_limit', 0),
+                        'resolution': info.get('resolution', ''),
+                        'fps': info.get('fps', 0),
+                        'aspect_ratio': info.get('aspect_ratio', 0.0),
+                        'vcodec': info.get('vcodec', ''),
+                        'acodec': info.get('acodec', ''),
+                        'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+                        'subtitles': list(info.get('subtitles', {}).keys()),
+                        'release_timestamp': info.get('release_timestamp', 0),
+                    }
+            else:
+                metadata = None
         except Exception as e:
             print(f"⚠️ yt-dlp metadata extraction failed: {e}")
             # Fallback to web scraping
+            metadata = self._get_fallback_metadata(youtube_url, video_id)
+        
+        if metadata is None:
+            logging.warning("⚠️ Falling back to HTML scraping for metadata")
             metadata = self._get_fallback_metadata(youtube_url, video_id)
         
         return {
