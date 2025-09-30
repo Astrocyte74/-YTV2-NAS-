@@ -11,6 +11,7 @@ import os
 import re
 import subprocess
 import time
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -119,7 +120,38 @@ class YouTubeSummarizer:
                 
         except yt_dlp.utils.DownloadError as e:
             error_msg = str(e)
-            
+            normalized_error = error_msg.lower()
+
+            # Fallback: try again with stripped-down options when formats aren't available
+            format_error_triggers = (
+                "requested format is not available" in normalized_error
+                or "not available on this app" in normalized_error
+                or "nsig" in normalized_error
+            )
+            if format_error_triggers and not ydl_opts.get('_format_fallback_applied'):
+                print("🛠️ yt-dlp fallback: retrying with generic format selection")
+                fallback_opts = deepcopy(ydl_opts)
+                fallback_opts['_format_fallback_applied'] = True
+                # Remove subtitle/metadata writes to simplify request footprint
+                fallback_opts.pop('writeautomaticsub', None)
+                fallback_opts.pop('writesubtitles', None)
+                fallback_opts.pop('writeinfojson', None)
+                fallback_opts.pop('subtitleslangs', None)
+                fallback_opts.pop('subtitlesformat', None)
+                fallback_opts['format'] = 'bestvideo*+bestaudio/best'
+
+                extractor_args = fallback_opts.get('extractor_args') or {}
+                if 'youtube' in extractor_args:
+                    youtube_args = extractor_args['youtube'].copy()
+                    youtube_args.pop('player-client', None)
+                    if youtube_args:
+                        extractor_args['youtube'] = youtube_args
+                    else:
+                        extractor_args.pop('youtube', None)
+                    fallback_opts['extractor_args'] = extractor_args
+
+                return self._extract_with_robust_ytdlp(youtube_url, fallback_opts, attempt + 1)
+
             if "403" in error_msg or "Forbidden" in error_msg:
                 print(f"🚫 Rate limited (403) on attempt {attempt}")
                 if attempt < max_attempts:
@@ -187,7 +219,7 @@ class YouTubeSummarizer:
                     'id': video_id,
                     'channel_url': '',
                     'tags': [],
-                    'thumbnail': '',
+                    'thumbnail': f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else '',
                 }
         except Exception as e:
             print(f"⚠️ Fallback metadata extraction failed: {str(e)}")
@@ -206,7 +238,8 @@ class YouTubeSummarizer:
             'id': video_id,
             'channel_url': '',
             'tags': [],
-            'thumbnail': '',
+            # Always provide at least the standard YouTube thumbnail URL so downstream dashboards have artwork
+            'thumbnail': f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else '',
         }
 
     def _extract_video_id(self, youtube_url: str) -> str:
@@ -274,11 +307,12 @@ class YouTubeSummarizer:
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
+                'ignoreconfig': True,  # Ignore any system/user config that might force incompatible formats
                 
                 # Robustness from OpenAI suggestions
                 'extractor_args': {
                     'youtube': {
-                        'player-client': ['android']
+                        'player-client': ['android', 'web']  # Allow fallback to multiple official clients
                     }
                 },
                 'http_headers': {
@@ -294,6 +328,7 @@ class YouTubeSummarizer:
             if not info:
                 raise Exception("Robust yt-dlp extraction failed")
             
+            thumb_id = info.get('id', video_id)
             metadata = {
                     'title': info.get('title', 'Unknown'),
                     'description': info.get('description', ''),
@@ -307,7 +342,7 @@ class YouTubeSummarizer:
                     'id': info.get('id', video_id),
                     'channel_url': info.get('channel_url', ''),
                     'tags': info.get('tags', []),
-                    'thumbnail': info.get('thumbnail', ''),
+                    'thumbnail': info.get('thumbnail') or (f'https://img.youtube.com/vi/{thumb_id}/mqdefault.jpg' if thumb_id else ''),
                     
                     # NEW ENHANCED METADATA FIELDS
                     'like_count': info.get('like_count', 0),
@@ -437,22 +472,17 @@ class YouTubeSummarizer:
             ydl_opts = {
                 # Basic extraction settings
                 'skip_download': True,
-                'writeinfojson': True,
-                'writeautomaticsub': True,
-                'writesubtitles': True,
-                'subtitleslangs': ['en', 'en-US', 'en-GB'],
-                'subtitlesformat': 'best',
                 'quiet': True,
                 'no_warnings': True,
                 'extract_flat': False,
+                'ignoreconfig': True,  # Avoid surprises from global yt-dlp config (e.g., forced formats)
                 
                 # ROBUSTNESS ENHANCEMENTS FROM OPENAI SUGGESTIONS
                 
                 # 1. Android client preference to avoid desktop detection
                 'extractor_args': {
                     'youtube': {
-                        'player-client': ['android'],  # Primary robust client (OpenAI rec)
-                        'skip': ['hls', 'dash']        # Skip unnecessary formats
+                        'player-client': ['android', 'web'],  # Cycle through resilient clients
                     }
                 },
                 
@@ -493,6 +523,7 @@ class YouTubeSummarizer:
                 raise Exception("Robust yt-dlp extraction failed")
             
             # Get basic metadata
+            thumb_id = info.get('id') or video_id
             metadata = {
                     'title': info.get('title', ''),
                     'description': info.get('description', ''),
@@ -506,7 +537,7 @@ class YouTubeSummarizer:
                     'id': info.get('id', ''),
                     'channel_url': info.get('channel_url', ''),
                     'tags': info.get('tags', []),
-                    'thumbnail': info.get('thumbnail', ''),
+                    'thumbnail': info.get('thumbnail') or (f"https://img.youtube.com/vi/{thumb_id}/mqdefault.jpg" if thumb_id else ''),
                     
                     # NEW ENHANCED METADATA FIELDS
                     'like_count': info.get('like_count', 0),
@@ -1226,15 +1257,52 @@ class YouTubeSummarizer:
         """Safely parse JSON with size limits and validation"""
         if not json_string or len(json_string) > max_size:
             raise ValueError("JSON string too large or empty")
-        
+
         import json
+        import re
+
+        raw = json_string.strip()
+        if not raw:
+            raise ValueError("JSON string too large or empty")
+
         try:
-            result = json.loads(json_string.strip())
+            result = json.loads(raw)
             if not isinstance(result, dict):
                 raise ValueError("Expected JSON object")
             return result
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON: {str(e)}")
+        except json.JSONDecodeError as original_error:
+            # Attempt to sanitize common wrapper patterns (e.g., Markdown code fences)
+            candidates = []
+
+            fence_pattern = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL | re.IGNORECASE)
+            fence_match = fence_pattern.match(raw)
+            if fence_match:
+                candidates.append(fence_match.group(1).strip())
+
+            # Handle responses prefixed with a bare "json" identifier
+            if raw.lower().startswith('json'):
+                candidates.append(raw[4:].strip())
+
+            # Extract substring between the outermost braces as a fallback
+            first_brace = raw.find('{')
+            last_brace = raw.rfind('}')
+            if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+                candidates.append(raw[first_brace:last_brace + 1].strip())
+
+            seen = set()
+            for candidate in candidates:
+                candidate = candidate.strip()
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                try:
+                    result = json.loads(candidate)
+                    if isinstance(result, dict):
+                        return result
+                except json.JSONDecodeError:
+                    continue
+
+            raise ValueError(f"Invalid JSON: {str(original_error)}")
     
     async def analyze_content(self, summary: str, metadata: Dict) -> Dict[str, Union[str, List[str]]]:
         """Perform secure content analysis with universal schema support
@@ -1357,7 +1425,6 @@ Multiple Categories (when content genuinely spans areas):
         
         try:
             # Record processing metadata
-            from datetime import datetime
             processing_start = datetime.now()
             
             analysis_content = await self._robust_llm_call(
@@ -1423,7 +1490,6 @@ Multiple Categories (when content genuinely spans areas):
     
     def _get_fallback_analysis(self, error_msg: str) -> dict:
         """Generate fallback analysis result with universal schema compliance"""
-        from datetime import datetime
         return {
             "category": ["General"],
             "content_type": "Discussion",
@@ -1508,7 +1574,21 @@ Multiple Categories (when content genuinely spans areas):
         
         # Step 3: Analyze content (using summary for token efficiency)
         print("Analyzing content...")
-        summary_text = summary_data.get('summary', '') if isinstance(summary_data, dict) else str(summary_data)
+        if isinstance(summary_data, dict):
+            summary_text = summary_data.get('summary', '') or ''
+            if not summary_text:
+                for key in ('comprehensive', 'key_insights', 'bullet_points', 'audio'):
+                    candidate = summary_data.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        summary_text = candidate.strip()
+                        break
+        else:
+            summary_text = str(summary_data)
+
+        if not summary_text.strip():
+            print("⚠️ Summary text unavailable for analysis. Falling back to transcript excerpt.")
+            summary_text = transcript[:6000]
+
         analysis_data = await self.analyze_content(summary_text, metadata)
         
         # Enhanced universal schema compliance
@@ -1566,7 +1646,6 @@ Multiple Categories (when content genuinely spans areas):
             return datetime.now().isoformat()
         
         try:
-            from datetime import datetime
             dt = datetime.strptime(upload_date, '%Y%m%d')
             return dt.isoformat() + 'Z'
         except ValueError:
@@ -1657,10 +1736,10 @@ Multiple Categories (when content genuinely spans areas):
         # Combine all chunk summaries into final summary
         print(f"🔄 Combining {len(chunk_summaries)} section summaries...")
         combined_summary = await self._combine_chunk_summaries(chunk_summaries, metadata, summary_type)
-        
+
         # Only generate the requested summary type to save processing time and API costs
         result = {"comprehensive": combined_summary}
-        
+
         if normalized_type == "key_points":
             result["bullet_points"] = await self._extract_bullet_points(combined_summary)
         elif normalized_type == "insights": 
@@ -1672,7 +1751,49 @@ Multiple Categories (when content genuinely spans areas):
         elif normalized_type == "audio_es":
             result["audio"] = await self._create_translated_audio_summary(combined_summary, "Spanish", proficiency_level)
         # For "comprehensive" type, we already have the comprehensive summary
-        
+
+        variant_map = {
+            "comprehensive": "comprehensive",
+            "key_points": "key-points",
+            "insights": "key-insights",
+            "audio": "audio",
+            "audio_fr": "audio-fr",
+            "audio_es": "audio-es",
+        }
+
+        primary_variant_key_map = {
+            "key_points": "bullet_points",
+            "insights": "key_insights",
+            "audio": "audio",
+            "audio_fr": "audio",
+            "audio_es": "audio",
+        }
+
+        primary_key = primary_variant_key_map.get(normalized_type, "comprehensive")
+        primary_text = result.get(primary_key) or combined_summary or ""
+
+        canonical_variant = variant_map.get(normalized_type, "comprehensive")
+        result["summary"] = primary_text
+        result["summary_type"] = canonical_variant
+        result["generated_at"] = datetime.now().isoformat()
+
+        if primary_text:
+            title_prompt = f"""
+            Write a single, specific headline (12–16 words, no emojis) that states subject and concrete value.
+            **IMPORTANT: Respond in the same language as the content.**
+            Source title: {metadata.get('title', '')}
+            Summary:
+            {primary_text[:1200]}
+            """
+
+            headline_text = await self._robust_llm_call(
+                [HumanMessage(content=title_prompt)],
+                "Headline generation"
+            )
+
+            result['headline'] = headline_text or "Generated Summary"
+            print(f"📝 Generated Headline: {result['headline']}")
+
         return result
 
     async def _combine_chunk_summaries(self, chunk_summaries: List[str], metadata: Dict, summary_type: str) -> str:
