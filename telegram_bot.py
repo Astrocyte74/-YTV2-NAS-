@@ -241,7 +241,7 @@ def extract_html_report_metadata(file_path: Path) -> Dict:
 class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
     """HTTP request handler with modern template system"""
 
-    CORS_ALLOWED_HEADERS = 'Authorization, Content-Type, ngrok-skip-browser-warning'
+    CORS_ALLOWED_HEADERS = 'Authorization, Content-Type, ngrok-skip-browser-warning, X-Reprocess-Token'
     CORS_ALLOWED_METHODS = 'GET,POST,OPTIONS'
 
     def send_cors_headers(self):
