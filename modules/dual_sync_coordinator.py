@@ -23,6 +23,8 @@ from datetime import datetime
 
 from .render_api_client import create_client_from_env as create_sqlite_client
 from .postgres_sync_client import create_postgres_client_from_env
+from .metrics import metrics
+from .event_stream import emit_report_event
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +194,16 @@ class DualSyncCoordinator:
             if report_result:
                 result['report'] = report_result
                 self.stats['postgres']['report_success'] += 1
+                metrics.record_ingest(True, video_id)
+                emit_report_event(
+                    'report-synced',
+                    {
+                        'video_id': video_id,
+                        'content_id': content_data.get('id') or f"yt:{video_id}",
+                        'summary_type': (content_data.get('summary') or {}).get('summary_type'),
+                        'targets': ['postgres'],
+                    },
+                )
                 logger.info(f"[SYNC] target=postgres video_id={video_id} op=report status=ok upserted={report_result.get('upserted')}")
 
                 # Audio sync SECOND (sets has_audio flag after metadata exists)
@@ -202,20 +214,66 @@ class DualSyncCoordinator:
                     if audio_result:
                         result['audio'] = audio_result
                         self.stats['postgres']['audio_success'] += 1
+                        metrics.record_audio(True)
+                        emit_report_event(
+                            'audio-synced',
+                            {
+                                'video_id': video_id,
+                                'content_id': content_data.get('id') or f"yt:{video_id}",
+                                'audio_path': str(audio_path),
+                                'targets': ['postgres'],
+                            },
+                        )
                         logger.info(f"[SYNC] target=postgres video_id={video_id} op=audio status=ok url={audio_result.get('public_url')}")
                     else:
                         self.stats['postgres']['audio_fail'] += 1
+                        metrics.record_audio(False)
+                        emit_report_event(
+                            'audio-sync-failed',
+                            {
+                                'video_id': video_id,
+                                'content_id': content_data.get('id') or f"yt:{video_id}",
+                                'audio_path': str(audio_path),
+                            },
+                        )
                         logger.error(f"[SYNC] target=postgres video_id={video_id} op=audio status=fail")
             else:
                 self.stats['postgres']['report_fail'] += 1
+                metrics.record_ingest(False, video_id)
+                emit_report_event(
+                    'report-sync-failed',
+                    {
+                        'video_id': video_id,
+                        'content_id': content_data.get('id') or f"yt:{video_id}",
+                    },
+                )
                 logger.error(f"[SYNC] target=postgres video_id={video_id} op=report status=fail")
 
         except Exception as e:
             error_msg = str(e)[:100]  # Truncate for logging
             logger.error(f"[SYNC] target=postgres video_id={video_id} op=report/audio status=fail error={error_msg}")
             self.stats['postgres']['report_fail'] += 1
+            metrics.record_ingest(False, video_id)
+            emit_report_event(
+                'report-sync-error',
+                {
+                    'video_id': video_id,
+                    'content_id': content_data.get('id') or f"yt:{video_id}",
+                    'error': error_msg,
+                },
+            )
             if audio_path:
                 self.stats['postgres']['audio_fail'] += 1
+                metrics.record_audio(False)
+                emit_report_event(
+                    'audio-sync-error',
+                    {
+                        'video_id': video_id,
+                        'content_id': content_data.get('id') or f"yt:{video_id}",
+                        'audio_path': str(audio_path),
+                        'error': error_msg,
+                    },
+                )
 
         return result
 

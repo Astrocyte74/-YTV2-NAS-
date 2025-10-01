@@ -13,18 +13,23 @@ import logging
 import time
 import hashlib
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 import threading
+import queue
+from socketserver import ThreadingMixIn
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import socket
+from urllib.parse import urlparse, parse_qs
 
 # Import our modular components
 from modules.telegram_handler import YouTubeTelegramBot
 from modules.report_generator import JSONReportGenerator
 from youtube_summarizer import YouTubeSummarizer
+from modules.metrics import metrics
+from modules.event_stream import report_event_stream, emit_report_event
 
 # SQLite backend support
 try:
@@ -81,6 +86,16 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+BOT_INSTANCE: Optional[YouTubeTelegramBot] = None  # Set in main()
+
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP server that handles each request in its own thread."""
+
+    daemon_threads = True
+    allow_reuse_address = True
+
 
 # Template loading utility
 def load_template(template_name: str) -> Optional[str]:
@@ -225,10 +240,31 @@ def extract_html_report_metadata(file_path: Path) -> Dict:
 
 class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
     """HTTP request handler with modern template system"""
-    
+
+    CORS_ALLOWED_HEADERS = 'Authorization, Content-Type, ngrok-skip-browser-warning'
+    CORS_ALLOWED_METHODS = 'GET,POST,OPTIONS'
+
+    def send_cors_headers(self):
+        origin = self.headers.get('Origin')
+        allowed_origin = origin if origin else '*'
+        self.send_header('Access-Control-Allow-Origin', allowed_origin)
+        self.send_header('Vary', 'Origin')
+        self.send_header('Access-Control-Allow-Headers', self.CORS_ALLOWED_HEADERS)
+        self.send_header('Access-Control-Allow-Methods', self.CORS_ALLOWED_METHODS)
+        self.send_header('Access-Control-Max-Age', '600')
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_cors_headers()
+        self.end_headers()
+
     def do_GET(self):
         if self.path == '/':
             self.serve_dashboard()
+        elif self.path == '/api/report-events':
+            self.serve_api_report_events()
+        elif self.path == '/api/metrics':
+            self.serve_api_metrics()
         elif self.path == '/status':
             self.serve_status()
         elif self.path.startswith('/api/'):
@@ -247,6 +283,8 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         if self.path == '/delete-reports':
             self.handle_delete_reports()
+        elif self.path == '/api/reprocess':
+            self.handle_reprocess_request()
         else:
             self.send_error(404, "Endpoint not found")
     
@@ -770,26 +808,31 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
     def serve_api(self):
         """Serve API endpoints"""
         try:
-            if self.path == '/api/reports':
-                self.serve_api_reports()
-            elif self.path.startswith('/api/reports/'):
-                self.serve_api_report_detail()
-            elif self.path == '/api/config':
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query_params = parse_qs(parsed.query)
+
+            if path == '/api/reports':
+                self.serve_api_reports(query_params)
+            elif path.startswith('/api/reports/'):
+                report_id = path.rsplit('/', 1)[-1]
+                self.serve_api_report_detail(report_id)
+            elif path == '/api/config':
                 self.serve_api_config()
+            elif path == '/api/metrics':
+                self.serve_api_metrics()
             else:
                 self.send_error(404, "API endpoint not found")
         except Exception as e:
             logger.error(f"Error serving API {self.path}: {e}")
             self.send_error(500, "API error")
     
-    def serve_api_reports(self):
+    def serve_api_reports(self, query_params=None):
         """Serve reports list API endpoint"""
         try:
-            # Get all reports (JSON preferred, HTML legacy)
             report_generator = JSONReportGenerator()
             json_reports = report_generator.list_reports()
-            
-            # Convert to API format
+
             api_reports = []
             for report in json_reports:
                 api_reports.append({
@@ -808,15 +851,13 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                     "model": report.get('model', 'Unknown'),
                     "summary_preview": report.get('summary_preview', '')
                 })
-            
-            # Add HTML reports for legacy support
+
             html_dirs = [Path('./exports'), Path('.')]
             for report_dir in html_dirs:
                 if report_dir.exists():
-                    html_files = [f for f in report_dir.glob('*.html') 
-                                if f.name not in ['dashboard_template.html', 'report_template.html']
-                                and not f.name.startswith('._')]
-                    
+                    html_files = [f for f in report_dir.glob('*.html')
+                                  if f.name not in ['dashboard_template.html', 'report_template.html']
+                                  and not f.name.startswith('._')]
                     for html_file in html_files:
                         try:
                             metadata = extract_html_report_metadata(html_file)
@@ -835,42 +876,218 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                             })
                         except Exception:
                             continue
-            
-            # Sort by timestamp (newest first)
+
             api_reports.sort(key=lambda x: x['timestamp'], reverse=True)
-            
+
             response_data = {
                 "reports": api_reports,
                 "total": len(api_reports),
                 "json_count": len(json_reports),
                 "html_count": len(api_reports) - len(json_reports)
             }
-            
+
+            latest_only = False
+            if query_params:
+                values = query_params.get('latest')
+                if values:
+                    latest_only = any(str(value).lower() in ('1', 'true', 'yes') for value in values)
+
             self.send_response(200)
+            self.send_cors_headers()
             self.send_header('Content-type', 'application/json')
             self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
-            self.wfile.write(json.dumps(response_data, ensure_ascii=False, indent=2).encode())
-            
+            if latest_only:
+                payload = {"report": api_reports[0] if api_reports else None}
+                self.wfile.write(json.dumps(payload, ensure_ascii=False).encode())
+            else:
+                self.wfile.write(json.dumps(response_data, ensure_ascii=False, indent=2).encode())
+
         except Exception as e:
             logger.error(f"Error serving reports API: {e}")
             error_data = {"error": "Failed to load reports", "message": str(e)}
             self.send_response(500)
+            self.send_cors_headers()
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(error_data).encode())
+
+    def serve_api_report_events(self):
+        """Stream report ingest events via server-sent events."""
+        client = None
+        try:
+            self.send_response(200)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'text/event-stream')
+            self.send_header('Cache-Control', 'no-cache')
+            self.send_header('Connection', 'keep-alive')
+            self.send_header('X-Accel-Buffering', 'no')
+            self.end_headers()
+
+            client = report_event_stream.register(self)
+            self.close_connection = False
+
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+            except Exception:
+                report_event_stream.unregister(client)
+                return
+
+            while True:
+                try:
+                    message = client.queue.get(timeout=15)
+                except queue.Empty:
+                    try:
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                        break
+                    continue
+
+                try:
+                    self.wfile.write(message.encode('utf-8'))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                    break
+        finally:
+            if client is not None:
+                report_event_stream.unregister(client)
+            self.close_connection = True
+
+    def serve_api_metrics(self):
+        """Return current processing metrics."""
+        snapshot = metrics.snapshot()
+        self.send_response(200)
+        self.send_cors_headers()
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.write(json.dumps(snapshot, ensure_ascii=False).encode('utf-8'))
+
+    def handle_reprocess_request(self):
+        """Schedule a headless reprocess job via the Telegram bot event loop."""
+        global BOT_INSTANCE
+
+        if BOT_INSTANCE is None or BOT_INSTANCE.loop is None:
+            self.send_response(503)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'bot-unavailable'}).encode('utf-8'))
+            return
+
+        content_length = int(self.headers.get('Content-Length') or 0)
+        if content_length <= 0:
+            self.send_response(400)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'empty-request'}).encode('utf-8'))
+            return
+
+        try:
+            body = self.rfile.read(content_length)
+            payload = json.loads(body.decode('utf-8'))
+        except Exception as exc:
+            self.send_response(400)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'invalid-json', 'details': str(exc)}).encode('utf-8'))
+            return
+
+        required_token = os.getenv('REPROCESS_AUTH_TOKEN')
+        provided_token = self.headers.get('X-Reprocess-Token')
+
+        if required_token and provided_token != required_token:
+            self.send_response(403)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'forbidden'}).encode('utf-8'))
+            return
+
+        video_id = payload.get('video_id') or payload.get('id')
+        video_url = payload.get('url')
+        summary_types = payload.get('summary_types')
+        force = bool(payload.get('force', False))
+        regenerate_audio = payload.get('regenerate_audio', True)
+
+        if not video_id and video_url:
+            match = BOT_INSTANCE.youtube_url_pattern.search(video_url)
+            if match:
+                video_id = match.group(1)
+
+        if not video_id:
+            self.send_response(400)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'missing-video-id'}).encode('utf-8'))
+            return
+
+        if isinstance(summary_types, str):
+            summary_types = [item.strip() for item in summary_types.split(',') if item.strip()]
+        elif not isinstance(summary_types, list):
+            summary_types = None
+
+        try:
+            loop = BOT_INSTANCE.loop
+
+            future = asyncio.run_coroutine_threadsafe(
+                BOT_INSTANCE.reprocess_video(
+                    video_id,
+                    summary_types=summary_types,
+                    force=force,
+                    regenerate_audio=bool(regenerate_audio),
+                    video_url=video_url,
+                ),
+                loop,
+            )
+
+            def _done_callback(fut: asyncio.Future):
+                try:
+                    fut.result()
+                except Exception:
+                    logger.exception("Reprocess task failed")
+
+            future.add_done_callback(_done_callback)
+
+            self.send_response(202)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response = {
+                'status': 'scheduled',
+                'video_id': video_id,
+                'summary_types': summary_types,
+            }
+            emit_report_event(
+                'reprocess-scheduled',
+                {
+                    'video_id': video_id,
+                    'summary_types': summary_types,
+                },
+            )
+            self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+        except Exception as exc:
+            logger.exception("Failed to schedule reprocess job")
+            self.send_response(500)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'schedule-failed', 'details': str(exc)}).encode('utf-8'))
     
-    def serve_api_report_detail(self):
+    def serve_api_report_detail(self, report_id):
         """Serve individual report API endpoint"""
-        # Extract report ID from path
-        report_id = self.path.split('/')[-1]
-        
         try:
             # Look for JSON report first
             json_file = Path('/app/data/reports') / f"{report_id}.json"
             if json_file.exists():
                 report_data = json.loads(json_file.read_text())
                 self.send_response(200)
+                self.send_cors_headers()
                 self.send_header('Content-type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps(report_data, ensure_ascii=False, indent=2).encode())
@@ -889,11 +1106,12 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                         "message": "HTML report - limited API data available"
                     }
                     self.send_response(200)
+                    self.send_cors_headers()
                     self.send_header('Content-type', 'application/json')
                     self.end_headers()
                     self.wfile.write(json.dumps(response_data, ensure_ascii=False, indent=2).encode())
                     return
-            
+
             # Report not found
             self.send_error(404, "Report not found")
             
@@ -901,10 +1119,11 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             logger.error(f"Error serving report detail API: {e}")
             error_data = {"error": "Failed to load report", "message": str(e)}
             self.send_response(500)
+            self.send_cors_headers()
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(error_data).encode())
-    
+
     def serve_api_config(self):
         """Serve configuration API endpoint"""
         try:
@@ -925,6 +1144,7 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             }
             
             self.send_response(200)
+            self.send_cors_headers()
             self.send_header('Content-type', 'application/json')
             self.send_header('Cache-Control', 'public, max-age=300')  # Cache for 5 minutes
             self.end_headers()
@@ -934,6 +1154,7 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             logger.error(f"Error serving config API: {e}")
             error_data = {"error": "Failed to load configuration", "message": str(e)}
             self.send_response(500)
+            self.send_cors_headers()
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(error_data).encode())
@@ -1017,7 +1238,7 @@ def start_http_server():
     
     try:
         server_address = ('', port)
-        httpd = HTTPServer(server_address, ModernDashboardHTTPRequestHandler)
+        httpd = ThreadedHTTPServer(server_address, ModernDashboardHTTPRequestHandler)
         
         logger.info(f"🌐 HTTP Server started on port {port}")
         logger.info(f"📊 Dashboard available at: http://localhost:{port}")
@@ -1095,15 +1316,20 @@ async def main():
     # Create and start Telegram bot
     try:
         telegram_bot = YouTubeTelegramBot(telegram_token, allowed_user_ids)
-        
+        global BOT_INSTANCE
+        BOT_INSTANCE = telegram_bot
+
         logger.info("🚀 Starting Telegram bot...")
-        
+
         # Run both services concurrently
-        await asyncio.gather(
-            telegram_bot.run(),
-            run_dashboard_monitor(httpd)
-        )
-        
+        try:
+            await asyncio.gather(
+                telegram_bot.run(),
+                run_dashboard_monitor(httpd)
+            )
+        finally:
+            BOT_INSTANCE = None
+
     except Exception as e:
         logger.error(f"Error running Telegram bot: {e}")
         if httpd:

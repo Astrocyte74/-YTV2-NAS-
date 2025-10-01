@@ -29,6 +29,8 @@ from telegram.constants import ParseMode
 from export_utils import SummaryExporter
 from modules.report_generator import JSONReportGenerator, create_report_from_youtube_summarizer
 from modules import ledger, render_probe
+from modules.metrics import metrics
+from modules.event_stream import emit_report_event
 
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
@@ -51,6 +53,7 @@ class YouTubeTelegramBot:
         self.application = None
         self.summarizer = None
         self.last_video_url = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
         
         # Initialize exporters and ensure directories exist
         Path("./data/reports").mkdir(parents=True, exist_ok=True)
@@ -78,6 +81,293 @@ class YouTubeTelegramBot:
             logging.info(f"✅ YouTube summarizer initialized with {self.summarizer.llm_provider}/{self.summarizer.model}")
         except Exception as e:
             logging.error(f"Failed to initialize YouTubeSummarizer: {e}")
+
+    # ------------------------------------------------------------------
+    # Utility helpers for reprocessing and internal orchestration
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_video_id(video_id: str) -> str:
+        video_id = (video_id or '').strip()
+        if video_id.startswith('yt:'):
+            video_id = video_id.split(':', 1)[1]
+        return video_id
+
+    def _discover_summary_types(self, video_id: str) -> List[str]:
+        """Infer summary types available for a video from reports or ledger."""
+        if not video_id:
+            return []
+
+        video_id = self._normalize_video_id(video_id)
+        summary_types: set[str] = set()
+        reports_dir = Path('./data/reports')
+
+        for path in reports_dir.glob(f'*{video_id}*.json'):
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                summary_meta = data.get('summary') or {}
+                summary_type = summary_meta.get('summary_type') or summary_meta.get('type')
+                if summary_type:
+                    summary_types.add(summary_type)
+            except Exception:
+                continue
+
+        if summary_types:
+            return sorted(summary_types)
+
+        ledger_data = ledger.list_all()
+        for key in ledger_data.keys():
+            try:
+                ledger_video, summary_type = key.split(':', 1)
+            except ValueError:
+                continue
+            if ledger_video == video_id:
+                summary_types.add(summary_type)
+
+        return sorted(summary_types)
+
+    def _resolve_video_url(self, video_id: str, provided_url: Optional[str] = None) -> Optional[str]:
+        """Find the best URL for a given video id."""
+        if provided_url:
+            return provided_url
+
+        video_id = self._normalize_video_id(video_id)
+        reports_dir = Path('./data/reports')
+
+        for path in reports_dir.glob(f'*{video_id}*.json'):
+            try:
+                data = json.loads(path.read_text(encoding='utf-8'))
+                url = data.get('canonical_url') or data.get('video', {}).get('url')
+                if url:
+                    return url
+            except Exception:
+                continue
+
+        ledger_data = ledger.list_all()
+        for key, entry in ledger_data.items():
+            try:
+                ledger_video, _ = key.split(':', 1)
+            except ValueError:
+                continue
+            if ledger_video != video_id:
+                continue
+            json_path = entry.get('json')
+            if json_path:
+                try:
+                    data = json.loads(Path(json_path).read_text(encoding='utf-8'))
+                    url = data.get('canonical_url') or data.get('video', {}).get('url')
+                    if url:
+                        return url
+                except Exception:
+                    continue
+
+        # Fallback if nothing else found
+        if len(video_id) == 11:
+            return f"https://www.youtube.com/watch?v={video_id}"
+        return None
+
+    async def _generate_tts_audio_file(self, summary_text: str, video_id: str, json_path: Path) -> Optional[str]:
+        """Generate TTS audio in a background thread to avoid blocking."""
+        if not summary_text:
+            return None
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        audio_filename = f"audio_{video_id}_{timestamp}.mp3"
+
+        loop = asyncio.get_running_loop()
+
+        def _run() -> Optional[str]:
+            return asyncio.run(self.summarizer.generate_tts_audio(summary_text, audio_filename, str(json_path)))
+
+        audio_filepath = await loop.run_in_executor(None, _run)
+        if audio_filepath and Path(audio_filepath).exists():
+            metrics.record_tts(True)
+        else:
+            metrics.record_tts(False)
+        return audio_filepath if audio_filepath else None
+
+    async def _reprocess_single_summary(
+        self,
+        video_id: str,
+        video_url: str,
+        summary_type: str,
+        ledger_entry: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+        regenerate_audio: bool = True,
+    ) -> Dict[str, Any]:
+        """Reprocess a single summary variant headlessly."""
+
+        ledger_entry = dict(ledger_entry or {})
+        proficiency = ledger_entry.get('proficiency')
+        job_result: Dict[str, Any] = {
+            'summary_type': summary_type,
+            'status': 'pending',
+        }
+
+        try:
+            result = await self.summarizer.process_video(
+                video_url,
+                summary_type=summary_type,
+                proficiency_level=proficiency,
+            )
+
+            if not result or result.get('error'):
+                job_result.update({'status': 'error', 'error': result.get('error') if isinstance(result, dict) else 'unknown'})
+                metrics.record_reprocess_result(False)
+                return job_result
+
+            report_dict = create_report_from_youtube_summarizer(result)
+            json_path = Path(self.json_exporter.save_report(report_dict))
+            job_result['report_path'] = str(json_path)
+
+            summary_meta = report_dict.get('summary') or {}
+            summary_text = summary_meta.get('summary') or ''
+
+            audio_path = None
+            is_audio = summary_type.startswith('audio')
+
+            if is_audio:
+                if regenerate_audio:
+                    audio_path = await self._generate_tts_audio_file(summary_text, video_id, json_path)
+                else:
+                    existing_mp3 = ledger_entry.get('mp3')
+                    if existing_mp3 and Path(existing_mp3).exists():
+                        audio_path = existing_mp3
+                if audio_path:
+                    job_result['audio_path'] = audio_path
+
+            # Sync with dashboard (include audio if available)
+            try:
+                audio_path_obj = Path(audio_path) if audio_path else None
+                sync_results = dual_sync_upload(json_path, audio_path_obj)
+            except Exception as sync_error:
+                job_result.update({'status': 'error', 'error': str(sync_error)})
+                metrics.record_reprocess_result(False)
+                return job_result
+
+            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+            targets = []
+            if sqlite_ok:
+                targets.append('sqlite')
+            if postgres_ok:
+                targets.append('postgres')
+            job_result['sync_targets'] = targets
+
+            success = bool(targets)
+            job_result['status'] = 'ok' if success else 'error'
+            metrics.record_reprocess_result(success)
+
+            ledger_entry.update(
+                {
+                    'stem': json_path.stem,
+                    'json': str(json_path),
+                    'synced': success,
+                    'last_synced': datetime.now().isoformat(),
+                    'reprocessed_at': datetime.now().isoformat(),
+                }
+            )
+            if is_audio and audio_path:
+                ledger_entry['mp3'] = audio_path
+            if targets:
+                ledger_entry['sync_targets'] = targets
+            ledger.upsert(video_id, summary_type, ledger_entry)
+
+            emit_report_event(
+                'reprocess-complete',
+                {
+                    'video_id': video_id,
+                    'summary_type': summary_type,
+                    'status': job_result['status'],
+                    'targets': targets,
+                },
+            )
+
+            return job_result
+
+        except Exception as e:
+            logging.exception(f"Reprocess failure for {video_id}:{summary_type}")
+            job_result.update({'status': 'error', 'error': str(e)})
+            metrics.record_reprocess_result(False)
+            emit_report_event(
+                'reprocess-error',
+                {
+                    'video_id': video_id,
+                    'summary_type': summary_type,
+                    'error': str(e),
+                },
+            )
+            return job_result
+
+    async def reprocess_video(
+        self,
+        video_id: str,
+        summary_types: Optional[List[str]] = None,
+        force: bool = False,
+        regenerate_audio: bool = True,
+        video_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Public entry point to reprocess summaries for an existing video."""
+
+        normalized_id = self._normalize_video_id(video_id)
+        summary_types = summary_types or self._discover_summary_types(normalized_id)
+
+        if not summary_types:
+            metrics.record_reprocess_result(False)
+            emit_report_event(
+                'reprocess-error',
+                {
+                    'video_id': normalized_id,
+                    'error': 'no-summary-types',
+                },
+            )
+            raise ValueError(f"No summary types found for video {normalized_id}")
+
+        resolved_url = self._resolve_video_url(normalized_id, provided_url=video_url)
+        if not resolved_url:
+            metrics.record_reprocess_result(False)
+            emit_report_event(
+                'reprocess-error',
+                {
+                    'video_id': normalized_id,
+                    'error': 'missing-url',
+                },
+            )
+            raise ValueError(f"Could not resolve URL for video {normalized_id}")
+
+        metrics.record_reprocess_request(len(summary_types))
+        emit_report_event(
+            'reprocess-requested',
+            {
+                'video_id': normalized_id,
+                'summary_types': summary_types,
+            },
+        )
+
+        ledger_data = ledger.list_all()
+        results = []
+        for summary_type in summary_types:
+            ledger_entry = ledger_data.get(f"{normalized_id}:{summary_type}")
+            job_result = await self._reprocess_single_summary(
+                normalized_id,
+                resolved_url,
+                summary_type,
+                ledger_entry=ledger_entry,
+                force=force,
+                regenerate_audio=regenerate_audio,
+            )
+            results.append(job_result)
+            if job_result.get('status') == 'ok':
+                ledger_data[f"{normalized_id}:{summary_type}"] = ledger.get(normalized_id, summary_type)
+
+        failures = sum(1 for r in results if r.get('status') != 'ok')
+
+        return {
+            'video_id': normalized_id,
+            'summary_types': summary_types,
+            'results': results,
+            'failures': failures,
+        }
     
     def setup_handlers(self):
         """Set up bot command and message handlers."""
@@ -787,6 +1077,7 @@ class YouTubeTelegramBot:
             )
             
             if audio_filepath and Path(audio_filepath).exists():
+                metrics.record_tts(True)
                 # Send the audio as a voice message
                 try:
                     # Create buttons for the audio message too
@@ -1050,6 +1341,7 @@ class YouTubeTelegramBot:
             else:
                 # TTS generation failed, send text only
                 logging.warning("⚠️ TTS generation failed, sending text only")
+                metrics.record_tts(False)
                 # Ensure summary is a string for slicing
                 summary_text = str(summary) if summary else "No summary available"
                 response_text = f"🎙️ **Audio Summary** (TTS failed)\n\n" \
@@ -1208,6 +1500,7 @@ class YouTubeTelegramBot:
     async def run(self):
         """Start the bot."""
         try:
+            self.loop = asyncio.get_running_loop()
             self.application = Application.builder().token(self.token).build()
             self.setup_handlers()
             
