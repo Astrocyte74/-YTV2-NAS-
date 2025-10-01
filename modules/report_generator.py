@@ -611,7 +611,7 @@ class JSONReportGenerator:
                 }
                 reports.append(metadata)
                 
-            except (json.JSONDecodeError, KeyError) as e:
+            except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as e:
                 # Skip invalid files
                 continue
         
