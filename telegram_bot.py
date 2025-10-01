@@ -830,6 +830,12 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
     def serve_api_reports(self, query_params=None):
         """Serve reports list API endpoint"""
         try:
+            latest_only = False
+            if query_params:
+                values = query_params.get('latest')
+                if values:
+                    latest_only = any(str(value).lower() in ('1', 'true', 'yes') for value in values)
+
             report_generator = JSONReportGenerator()
             json_reports = report_generator.list_reports()
 
@@ -852,30 +858,31 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                     "summary_preview": report.get('summary_preview', '')
                 })
 
-            html_dirs = [Path('./exports'), Path('.')]
-            for report_dir in html_dirs:
-                if report_dir.exists():
-                    html_files = [f for f in report_dir.glob('*.html')
-                                  if f.name not in ['dashboard_template.html', 'report_template.html']
-                                  and not f.name.startswith('._')]
-                    for html_file in html_files:
-                        try:
-                            metadata = extract_html_report_metadata(html_file)
-                            api_reports.append({
-                                "id": html_file.stem,
-                                "filename": metadata['filename'],
-                                "title": metadata['title'],
-                                "channel": metadata['channel'],
-                                "duration": 0,
-                                "created_date": metadata['created_date'],
-                                "created_time": metadata['created_time'],
-                                "timestamp": metadata['timestamp'],
-                                "type": "html",
-                                "url": "",
-                                "video_id": ""
-                            })
-                        except Exception:
-                            continue
+            if not latest_only:
+                html_dirs = [Path('./exports'), Path('.')]
+                for report_dir in html_dirs:
+                    if report_dir.exists():
+                        html_files = [f for f in report_dir.glob('*.html')
+                                      if f.name not in ['dashboard_template.html', 'report_template.html']
+                                      and not f.name.startswith('._')]
+                        for html_file in html_files:
+                            try:
+                                metadata = extract_html_report_metadata(html_file)
+                                api_reports.append({
+                                    "id": html_file.stem,
+                                    "filename": metadata['filename'],
+                                    "title": metadata['title'],
+                                    "channel": metadata['channel'],
+                                    "duration": 0,
+                                    "created_date": metadata['created_date'],
+                                    "created_time": metadata['created_time'],
+                                    "timestamp": metadata['timestamp'],
+                                    "type": "html",
+                                    "url": "",
+                                    "video_id": ""
+                                })
+                            except Exception:
+                                continue
 
             api_reports.sort(key=lambda x: x['timestamp'], reverse=True)
 
@@ -885,12 +892,6 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                 "json_count": len(json_reports),
                 "html_count": len(api_reports) - len(json_reports)
             }
-
-            latest_only = False
-            if query_params:
-                values = query_params.get('latest')
-                if values:
-                    latest_only = any(str(value).lower() in ('1', 'true', 'yes') for value in values)
 
             self.send_response(200)
             self.send_cors_headers()
