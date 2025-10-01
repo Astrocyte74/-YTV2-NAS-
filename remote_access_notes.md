@@ -36,7 +36,8 @@
   - `send_cors_headers()` now covers `Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, and headers `Authorization`, `Content-Type`, `ngrok-skip-browser-warning`.
   - `do_OPTIONS` returns 204, satisfying ngrok/browser preflight.
   - Applied to `/api/metrics`, `/api/report-events`, `/api/reprocess`, `/api/reports`, `/api/reports?latest=true`, `/api/report/<id>`, and `/api/config`.
-  - `/api/reports?latest=true` now returns `{ "report": ... }` (single item) for the polling fallback.
+- `/api/reports?latest=true` now returns `{ "report": ... }` (single item) for the polling fallback.
+- Invalid/partial JSON files are skipped when building the latest list, preventing decode errors from corrupt or partially-written reports.
 
 ## Frontend Integration (Render)
 - Environment variables in Render:
