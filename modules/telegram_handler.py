@@ -840,13 +840,29 @@ class YouTubeTelegramBot:
                 placeholder_json = f"yt_{video_id}_listen.json"
 
                 await query.answer("Generating audio…")
+                # Visible status line below the summary
+                status_msg = None
+                try:
+                    status_msg = await query.message.reply_text("⏳ Generating audio…")
+                except Exception:
+                    status_msg = None
                 audio_path = await self.summarizer.generate_tts_audio(clean_text, filename, placeholder_json)
                 if not audio_path or not Path(audio_path).exists():
                     await query.answer("TTS failed", show_alert=True)
+                    try:
+                        if status_msg:
+                            await status_msg.edit_text("❌ Audio generation failed")
+                    except Exception:
+                        pass
                     return
 
                 with open(audio_path, 'rb') as f:
                     await query.message.reply_voice(voice=f, caption="▶️ One‑off playback", parse_mode=ParseMode.MARKDOWN)
+                try:
+                    if status_msg:
+                        await status_msg.edit_text("✅ Audio sent")
+                except Exception:
+                    pass
             except Exception as e:
                 logging.error(f"listen_this error: {e}")
                 await query.answer("Error generating audio", show_alert=True)
@@ -861,6 +877,12 @@ class YouTubeTelegramBot:
                     return
                 # Keep the original summary visible; show a toast instead of replacing text
                 await query.answer("Generating quiz…")
+                # Visible status line below the summary
+                status_msg = None
+                try:
+                    status_msg = await query.message.reply_text("⏳ Generating quiz…")
+                except Exception:
+                    status_msg = None
 
                 # Find Key Points text, synthesize if needed
                 kp_text = self._resolve_summary_text(video_id, 'bullet-points')
@@ -945,15 +967,29 @@ class YouTubeTelegramBot:
                 qz = f"https://quizzernator.onrender.com/?quiz=api:{final_name}&autoplay=1"
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("▶️ Play in Quizzernator", url=qz)],
-                    [InlineKeyboardButton("📂 See in Dashboard", url=f"{dash.rstrip('/')}/api/quiz/{final_name}")]
+                    [InlineKeyboardButton("📂 See in Dashboard", url=f"{dash.rstrip('/')}/api/quiz/{final_name}")],
+                    [InlineKeyboardButton("🧩 Generate Again", callback_data=f"gen_quiz:{video_id}"),
+                     InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")]
                 ])
                 await query.message.reply_text(
                     f"✅ Saved quiz: {final_name}\n\nUse the buttons below to play or view details.",
                     reply_markup=kb
                 )
+                try:
+                    if status_msg:
+                        await status_msg.edit_text("✅ Quiz saved")
+                except Exception:
+                    pass
             except Exception as e:
                 logging.error(f"gen_quiz error: {e}")
-                await query.message.reply_text("❌ Error generating quiz.")
+                try:
+                    await query.message.reply_text("❌ Error generating quiz.")
+                finally:
+                    try:
+                        if 'status_msg' in locals() and status_msg:
+                            await status_msg.edit_text("❌ Quiz generation failed")
+                    except Exception:
+                        pass
 
         else:
             await query.edit_message_text("❌ Unknown option selected.")
