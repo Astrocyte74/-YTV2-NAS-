@@ -334,7 +334,7 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             
             if template_content:
                 # Get base URL
-                base_url = os.getenv('DASHBOARD_URL', 'https://ytv2-vy9k.onrender.com')
+                base_url = os.getenv('DASHBOARD_URL', 'https://ytv2-dashboard-postgres.onrender.com')
                 
                 # Replace template placeholders
                 dashboard_html = template_content.format(

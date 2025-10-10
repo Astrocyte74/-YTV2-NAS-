@@ -195,7 +195,7 @@ class RenderBulkSync:
 def main():
     # Configuration
     reports_dir = "/volume1/Docker/YTV2/data/reports"
-    render_url = "https://ytv2-vy9k.onrender.com"
+    render_url = "https://ytv2-dashboard-postgres.onrender.com"
     
     # Validate directory
     if not Path(reports_dir).exists():

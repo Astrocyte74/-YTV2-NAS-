@@ -31,6 +31,7 @@ from modules.report_generator import JSONReportGenerator, create_report_from_you
 from modules import ledger, render_probe
 from modules.metrics import metrics
 from modules.event_stream import emit_report_event
+from modules.summary_variants import merge_summary_variants, normalize_variant_id
 
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
@@ -39,7 +40,15 @@ from nas_sync import upload_to_render, dual_sync_upload
 
 class YouTubeTelegramBot:
     """Telegram bot for YouTube video summarization."""
-    
+    VARIANT_LABELS = {
+        'comprehensive': "📝 Comprehensive",
+        'bullet-points': "🎯 Key Points",
+        'key-insights': "💡 Insights",
+        'audio': "🎙️ Audio Summary",
+        'audio-fr': "🎙️ Audio français 🇫🇷",
+        'audio-es': "🎙️ Audio español 🇪🇸",
+    }
+
     def __init__(self, token: str, allowed_user_ids: List[int]):
         """
         Initialize the Telegram bot.
@@ -53,14 +62,18 @@ class YouTubeTelegramBot:
         self.application = None
         self.summarizer = None
         self.last_video_url = None
+        self.last_video_id = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         
         # Initialize exporters and ensure directories exist
         Path("./data/reports").mkdir(parents=True, exist_ok=True)
         Path("./exports").mkdir(parents=True, exist_ok=True)
+        Path("./data/tts_cache").mkdir(parents=True, exist_ok=True)
         
         self.html_exporter = SummaryExporter("./exports")
         self.json_exporter = JSONReportGenerator("./data/reports")
+        # In-memory cache for one-off TTS playback keyed by (chat_id, message_id)
+        self.tts_cache: Dict[tuple, Dict[str, Any]] = {}
         
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
@@ -93,6 +106,82 @@ class YouTubeTelegramBot:
             video_id = video_id.split(':', 1)[1]
         return video_id
 
+    @staticmethod
+    def _extract_video_id(youtube_url: str) -> str:
+        """Extract plain video id from a YouTube URL."""
+        youtube_url = (youtube_url or '').strip()
+        if 'v=' in youtube_url:
+            return youtube_url.split('v=', 1)[1].split('&')[0]
+        return youtube_url.rstrip('/').split('/')[-1]
+
+    def _friendly_variant_label(self, variant: str) -> str:
+        base, _, suffix = variant.partition(':')
+        base_label = self.VARIANT_LABELS.get(base, base.replace('-', ' ').title())
+        if suffix:
+            suffix_clean = suffix.replace('-', ' ').replace('_', ' ').title()
+            return f"{base_label} ({suffix_clean})"
+        return base_label
+
+    def _build_summary_keyboard(self, existing_variants: Optional[List[str]] = None, video_id: Optional[str] = None):
+        existing_variants = existing_variants or []
+        existing_bases = {variant.split(':', 1)[0] for variant in existing_variants}
+
+        def label_for(variant_key: str) -> str:
+            label = self.VARIANT_LABELS.get(variant_key, variant_key.replace('-', ' ').title())
+            return f"{label} ✅" if variant_key in existing_bases else label
+
+        keyboard = [
+            [
+                InlineKeyboardButton(label_for('comprehensive'), callback_data="summarize_comprehensive"),
+                InlineKeyboardButton(label_for('bullet-points'), callback_data="summarize_bullet-points")
+            ],
+            [
+                InlineKeyboardButton(label_for('key-insights'), callback_data="summarize_key-insights"),
+                InlineKeyboardButton(label_for('audio'), callback_data="summarize_audio")
+            ],
+            [
+                InlineKeyboardButton(label_for('audio-fr'), callback_data="summarize_audio-fr"),
+                InlineKeyboardButton(label_for('audio-es'), callback_data="summarize_audio-es")
+            ]
+        ]
+
+        if existing_bases and video_id:
+            dashboard_url = (
+                os.getenv('DASHBOARD_URL')
+                or os.getenv('POSTGRES_DASHBOARD_URL')
+                or 'https://ytv2-dashboard-postgres.onrender.com'
+            )
+            if dashboard_url:
+                report_id_encoded = urllib.parse.quote(video_id, safe='')
+                keyboard.append([
+                    InlineKeyboardButton("📄 Open summary", url=f"{dashboard_url}#report={report_id_encoded}")
+                ])
+
+        return InlineKeyboardMarkup(keyboard)
+
+    def _existing_variants_message(self, video_id: str, variants: List[str]) -> str:
+        if not variants:
+            return "🎬 Processing YouTube video...\n\nChoose your summary type:"
+
+        variants_sorted = sorted(variants)
+        lines = ["✅ Existing summaries for this video:"]
+        lines.extend(f"• {self._friendly_variant_label(variant)}" for variant in variants_sorted)
+        lines.append("\nRe-run a variant below or open the summary card.")
+        return "\n".join(lines)
+
+    async def _send_existing_summary_notice(self, query, video_id: str, summary_type: str):
+        variants = self._discover_summary_types(video_id)
+        message_lines = [
+            f"✅ {self._friendly_variant_label(summary_type)} is already on the dashboard."
+        ]
+        if variants:
+            message_lines.append("\nAvailable variants:")
+            message_lines.extend(f"• {self._friendly_variant_label(variant)}" for variant in sorted(variants))
+        message_lines.append("\nOpen the summary or re-run a variant below.")
+
+        reply_markup = self._build_summary_keyboard(variants, video_id)
+        await query.edit_message_text("\n".join(message_lines), reply_markup=reply_markup)
+
     def _discover_summary_types(self, video_id: str) -> List[str]:
         """Infer summary types available for a video from reports or ledger."""
         if not video_id:
@@ -106,14 +195,33 @@ class YouTubeTelegramBot:
             try:
                 data = json.loads(path.read_text(encoding='utf-8'))
                 summary_meta = data.get('summary') or {}
-                summary_type = summary_meta.get('summary_type') or summary_meta.get('type')
+                summary_type = normalize_variant_id(summary_meta.get('summary_type') or summary_meta.get('type'))
                 if summary_type:
                     summary_types.add(summary_type)
+
+                variants_meta = summary_meta.get('variants')
+                if isinstance(variants_meta, list):
+                    for entry in variants_meta:
+                        if not isinstance(entry, dict):
+                            continue
+                        variant_id = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                        if variant_id:
+                            summary_types.add(variant_id)
+                # Also consider top-level summary_variants used for Postgres ingest (if present)
+                top_variants = data.get('summary_variants')
+                if isinstance(top_variants, list):
+                    for entry in top_variants:
+                        if isinstance(entry, dict):
+                            vid = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                            if vid:
+                                summary_types.add(vid)
             except Exception:
                 continue
 
         if summary_types:
-            return sorted(summary_types)
+            found_local = sorted(summary_types)
+        else:
+            found_local = []
 
         ledger_data = ledger.list_all()
         for key in ledger_data.keys():
@@ -122,7 +230,51 @@ class YouTubeTelegramBot:
             except ValueError:
                 continue
             if ledger_video == video_id:
-                summary_types.add(summary_type)
+                normalized = normalize_variant_id(summary_type)
+                if normalized:
+                    summary_types.add(normalized)
+
+        # Optional: query dashboard API for authoritative variants if available
+        # Prefer Postgres dashboard URL; also support legacy env var names
+        dash_url = (
+            os.getenv('DASHBOARD_URL')
+            or os.getenv('POSTGRES_DASHBOARD_URL')
+            or os.getenv('RENDER_DASHBOARD_URL')
+        )
+        if dash_url and requests is not None:
+            try:
+                url = f"{dash_url.rstrip('/')}/api/reports/{video_id}"
+                headers = {}
+                token = os.getenv('DASHBOARD_TOKEN')
+                if token:
+                    headers['Authorization'] = f"Bearer {token}"
+                r = requests.get(url, headers=headers, timeout=6)
+                if r.status_code == 200:
+                    payload = r.json() or {}
+                    # New Postgres payload shape
+                    sv = payload.get('summary_variants')
+                    if isinstance(sv, list):
+                        for entry in sv:
+                            if isinstance(entry, dict):
+                                vid = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                                if vid:
+                                    summary_types.add(vid)
+                    # Legacy payloads
+                    s = payload.get('summary') or {}
+                    if isinstance(s, dict):
+                        v = s.get('variants')
+                        if isinstance(v, list):
+                            for entry in v:
+                                if isinstance(entry, dict):
+                                    vid = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                                    if vid:
+                                        summary_types.add(vid)
+                        st = normalize_variant_id(s.get('summary_type') or s.get('type'))
+                        if st:
+                            summary_types.add(st)
+            except Exception:
+                # Network or parsing errors should not block local detection
+                pass
 
         return sorted(summary_types)
 
@@ -217,7 +369,37 @@ class YouTubeTelegramBot:
                 return job_result
 
             report_dict = create_report_from_youtube_summarizer(result)
-            json_path = Path(self.json_exporter.save_report(report_dict))
+
+            # Merge with existing variants (if any) before persisting
+            target_basename = self.json_exporter._generate_filename(report_dict)
+            candidate_name = target_basename if target_basename.endswith('.json') else f"{target_basename}.json"
+            candidate_path = Path(self.json_exporter.reports_dir) / candidate_name
+
+            existing_report = None
+            if candidate_path.exists():
+                try:
+                    with open(candidate_path, 'r', encoding='utf-8') as existing_file:
+                        existing_report = json.load(existing_file)
+                except Exception as load_error:
+                    logger.warning(
+                        "⚠️  Failed to load existing report for variant merge (%s): %s",
+                        candidate_path,
+                        load_error,
+                    )
+
+            report_dict = merge_summary_variants(
+                new_report=report_dict,
+                requested_variant=summary_type,
+                existing_report=existing_report,
+            )
+
+            json_path = Path(
+                self.json_exporter.save_report(
+                    report_dict,
+                    filename=target_basename,
+                    overwrite=True,
+                )
+            )
             job_result['report_path'] = str(json_path)
 
             summary_meta = report_dict.get('summary') or {}
@@ -493,29 +675,17 @@ class YouTubeTelegramBot:
             await update.message.reply_text("❌ Could not extract a valid YouTube URL from your message.")
             return
         
-        # Store the URL for potential model switching
+        # Store context for follow-up actions
         self.last_video_url = video_url
-        
-        # Send processing message with options
-        keyboard = [
-            [
-                InlineKeyboardButton("📝 Comprehensive", callback_data="summarize_comprehensive"),
-                InlineKeyboardButton("🎯 Key Points", callback_data="summarize_bullet-points")
-            ],
-            [
-                InlineKeyboardButton("💡 Insights", callback_data="summarize_key-insights"),
-                InlineKeyboardButton("🎙️ Audio Summary", callback_data="summarize_audio")
-            ],
-            [
-                InlineKeyboardButton("🎙️ Audio français 🇫🇷", callback_data="summarize_audio-fr"),
-                InlineKeyboardButton("🎙️ Audio español 🇪🇸", callback_data="summarize_audio-es")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
+        raw_video_id = self._extract_video_id(video_url)
+        self.last_video_id = self._normalize_video_id(raw_video_id)
+
+        existing_variants = self._discover_summary_types(self.last_video_id)
+        reply_markup = self._build_summary_keyboard(existing_variants, self.last_video_id)
+        message_text = self._existing_variants_message(self.last_video_id, existing_variants)
+
         await update.message.reply_text(
-            f"🎬 Processing YouTube video...\n\n"
-            f"Choose your summary type:",
+            message_text,
             reply_markup=reply_markup
         )
     
@@ -575,7 +745,7 @@ class YouTubeTelegramBot:
                 if requests is None:
                     return False, "Dashboard (requests library not available)"
                     
-                dashboard_url = os.getenv('DASHBOARD_URL', 'https://ytv2-vy9k.onrender.com')
+                dashboard_url = os.getenv('DASHBOARD_URL', 'https://ytv2-dashboard-postgres.onrender.com')
                 dashboard_token = os.getenv('DASHBOARD_TOKEN', '')
                 url = f"{dashboard_url}/api/delete/{urllib.parse.quote(rid, safe='')}"
                 headers = {}
@@ -632,31 +802,196 @@ class YouTubeTelegramBot:
             await query.edit_message_reply_markup(reply_markup=None)
             await query.answer("Cancelled")
         
+        elif callback_data.startswith('listen_this'):
+            # One-off TTS for the exact summary on this message
+            try:
+                parts = callback_data.split(':')
+                video_id = parts[1] if len(parts) >= 3 else (self.last_video_id or '')
+                variant = parts[2] if len(parts) >= 3 else ''
+
+                chat_id = query.message.chat.id
+                message_id = query.message.message_id
+
+                payload = self._get_oneoff_tts(chat_id, message_id)
+                text = None
+                if isinstance(payload, dict):
+                    text = payload.get('text')
+                    video_id = payload.get('video_id') or video_id
+                    variant = payload.get('variant') or variant
+
+                if not text:
+                    # Fallback to report lookup
+                    if not video_id or not variant:
+                        await query.answer("No summary text found", show_alert=True)
+                        return
+                    text = self._resolve_summary_text(video_id, variant)
+
+                if not text:
+                    await query.answer("No summary text available for TTS", show_alert=True)
+                    return
+
+                # Minimal transform only; do not LLM-rewrite
+                base_variant = (variant or '').split(':', 1)[0]
+                clean_text = text if base_variant.startswith('audio') else self._format_for_tts_minimal(text)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"listen_{video_id}_{timestamp}.mp3"
+                placeholder_json = f"yt_{video_id}_listen.json"
+
+                await query.answer("Generating audio…")
+                audio_path = await self.summarizer.generate_tts_audio(clean_text, filename, placeholder_json)
+                if not audio_path or not Path(audio_path).exists():
+                    await query.answer("TTS failed", show_alert=True)
+                    return
+
+                with open(audio_path, 'rb') as f:
+                    await query.message.reply_voice(voice=f, caption="▶️ One‑off playback", parse_mode=ParseMode.MARKDOWN)
+            except Exception as e:
+                logging.error(f"listen_this error: {e}")
+                await query.answer("Error generating audio", show_alert=True)
+
         else:
             await query.edit_message_text("❌ Unknown option selected.")
     
     async def _show_main_summary_options(self, query):
         """Show the main summary type selection buttons"""
-        keyboard = [
-            [
-                InlineKeyboardButton("📝 Comprehensive", callback_data="summarize_comprehensive"),
-                InlineKeyboardButton("🎯 Key Points", callback_data="summarize_bullet-points")
-            ],
-            [
-                InlineKeyboardButton("💡 Insights", callback_data="summarize_key-insights"),
-                InlineKeyboardButton("🎙️ Audio Summary", callback_data="summarize_audio")
-            ],
-            [
-                InlineKeyboardButton("🎙️ Audio français 🇫🇷", callback_data="summarize_audio-fr"),
-                InlineKeyboardButton("🎙️ Audio español 🇪🇸", callback_data="summarize_audio-es")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        variants = self._discover_summary_types(self.last_video_id) if self.last_video_id else []
+        reply_markup = self._build_summary_keyboard(variants, self.last_video_id)
+        message = self._existing_variants_message(self.last_video_id or '', variants)
         await query.edit_message_text(
-            f"🎬 Choose your summary type:",
-            parse_mode=ParseMode.MARKDOWN,
+            message,
             reply_markup=reply_markup
         )
+
+    # ------------------------- One-off TTS utilities -------------------------
+    def _tts_cache_path(self, chat_id: int, message_id: int) -> Path:
+        base = Path("./data/tts_cache") / str(chat_id)
+        base.mkdir(parents=True, exist_ok=True)
+        return base / f"{message_id}.json"
+
+    def _cache_oneoff_tts(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
+        try:
+            self.tts_cache[(chat_id, message_id)] = dict(payload)
+            path = self._tts_cache_path(chat_id, message_id)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception as e:
+            logging.warning(f"⚠️ Failed to persist tts_cache for {chat_id}:{message_id}: {e}")
+
+    def _get_oneoff_tts(self, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        payload = self.tts_cache.get((chat_id, message_id))
+        if payload:
+            return payload
+        try:
+            path = self._tts_cache_path(chat_id, message_id)
+            if path.exists():
+                return json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            pass
+        return None
+
+    def _format_for_tts_minimal(self, text: str) -> str:
+        """Minimal cleanup for TTS: remove markdown/HTML and normalize bullet lines."""
+        if not isinstance(text, str):
+            return ""
+        import re as _re
+        s = text.replace('\r', '\n')
+        # Remove simple markdown markers
+        s = s.replace('**', '').replace('__', '').replace('`', '')
+        # Strip HTML
+        s = _re.sub(r'<[^>]+>', '', s)
+        # Normalize bullets to sentences
+        lines = [ln.strip() for ln in s.split('\n')]
+        out = []
+        for ln in lines:
+            if not ln:
+                out.append('')
+                continue
+            ln = _re.sub(r'^[\-*•]\s+', '', ln)
+            if ln and ln[-1] not in '.!?':
+                ln += '.'
+            out.append(ln)
+        s = '\n'.join(out)
+        s = _re.sub(r'\n{3,}', '\n\n', s)
+        return s.strip()
+
+    def _get_dashboard_base(self) -> Optional[str]:
+        return (
+            os.getenv('DASHBOARD_URL')
+            or os.getenv('POSTGRES_DASHBOARD_URL')
+            or os.getenv('RENDER_DASHBOARD_URL')
+        )
+
+    def _load_local_report(self, video_id: str) -> Optional[Dict[str, Any]]:
+        reports_dir = Path('./data/reports')
+        for path in sorted(reports_dir.glob(f'*{video_id}*.json')):
+            try:
+                return json.loads(path.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+        return None
+
+    def _extract_variant_text(self, report: Dict[str, Any], variant: str) -> Optional[str]:
+        variant = normalize_variant_id(variant)
+        if not report:
+            return None
+        s = report.get('summary') or {}
+        # Check explicit variants list
+        vs = s.get('variants')
+        if isinstance(vs, list):
+            for entry in vs:
+                if isinstance(entry, dict):
+                    v = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                    if v == variant:
+                        txt = entry.get('text') or entry.get('summary') or entry.get('content')
+                        if isinstance(txt, str) and txt.strip():
+                            return txt
+        # Check top-level summary if types match
+        st = normalize_variant_id(s.get('summary_type') or s.get('type'))
+        if st == variant:
+            txt = s.get('summary') or s.get('text')
+            if isinstance(txt, str) and txt.strip():
+                return txt
+        # Try top-level summary_variants (ingest payloads)
+        sv = report.get('summary_variants')
+        if isinstance(sv, list):
+            for entry in sv:
+                if isinstance(entry, dict):
+                    v = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                    if v == variant:
+                        txt = entry.get('text')
+                        if isinstance(txt, str) and txt.strip():
+                            return txt
+        return None
+
+    def _fetch_report_from_dashboard(self, video_id: str) -> Optional[Dict[str, Any]]:
+        base = self._get_dashboard_base()
+        if not base or not requests:
+            return None
+        try:
+            url = f"{base.rstrip('/')}/api/reports/{video_id}"
+            headers = {}
+            token = os.getenv('DASHBOARD_TOKEN')
+            if token:
+                headers['Authorization'] = f"Bearer {token}"
+            r = requests.get(url, headers=headers, timeout=8)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            return None
+        return None
+
+    def _resolve_summary_text(self, video_id: str, variant: str) -> Optional[str]:
+        # 1) Local report
+        report = self._load_local_report(video_id)
+        txt = self._extract_variant_text(report or {}, variant)
+        if isinstance(txt, str) and txt.strip():
+            return txt
+        # 2) Dashboard
+        report = self._fetch_report_from_dashboard(video_id)
+        txt = self._extract_variant_text(report or {}, variant)
+        if isinstance(txt, str) and txt.strip():
+            return txt
+        return None
     
     async def _show_proficiency_selector(self, query, summary_type: str):
         """Show proficiency level selector for language learning"""
@@ -723,14 +1058,14 @@ class YouTubeTelegramBot:
         
         try:
             # Extract video ID
-            video_id = self.last_video_url.split('v=')[-1].split('&')[0] if 'v=' in self.last_video_url else self.last_video_url.split('/')[-1]
+            video_id = self.last_video_id or self._normalize_video_id(self._extract_video_id(self.last_video_url))
             
             # Check ledger before processing
             entry = ledger.get(video_id, summary_type)
             if entry:
                 logging.info(f"📄 Found existing entry for {video_id}:{summary_type}")
-                if render_probe.render_has(entry["stem"]):
-                    await query.edit_message_text("✅ Already summarized and on dashboard!")
+                if render_probe.render_has(entry.get("stem")):
+                    await self._send_existing_summary_notice(query, video_id, summary_type)
                     logging.info(f"♻️ SKIPPED: {video_id} already on dashboard")
                     return
                 else:
@@ -935,6 +1270,9 @@ class YouTubeTelegramBot:
             title = video_info.get('title', 'Unknown Title')
             channel = video_info.get('uploader') or video_info.get('channel') or 'Unknown Channel'
             duration_info = self._format_duration_and_savings(video_info)
+            # Base identifiers used by action buttons and caching
+            video_id = video_info.get('video_id', '')
+            base_type = (summary_type or '').split(':', 1)[0]
             
             # Get summary content - handle both old and new summary structures
             summary_data = result.get('summary', {})
@@ -992,7 +1330,11 @@ class YouTubeTelegramBot:
             # Create inline keyboard with link buttons if exports were successful
             reply_markup = None
             if export_info and (export_info.get('html_path') or export_info.get('json_path')):
-                dashboard_url = os.getenv('DASHBOARD_URL', 'https://ytv2-vy9k.onrender.com')
+                dashboard_url = (
+                    os.getenv('DASHBOARD_URL')
+                    or os.getenv('POSTGRES_DASHBOARD_URL')
+                    or 'https://ytv2-dashboard-postgres.onrender.com'
+                )
                 
                 # Extract report ID for the deep link and delete functionality
                 report_id = None
@@ -1006,33 +1348,39 @@ class YouTubeTelegramBot:
                 # Only add buttons if we have a public URL (Telegram can't access localhost)
                 if dashboard_url:
                     keyboard = []
-                    
+
                     # Encode report ID for URL safety
                     report_id_encoded = urllib.parse.quote(report_id, safe='') if report_id else ''
-                    
-                    # Create button row with all three buttons
-                    button_row = [
+
+                    # Row 1: Dashboard | Open Summary
+                    row1 = [
                         InlineKeyboardButton("📊 Dashboard", url=dashboard_url)
                     ]
-                    
                     if report_id_encoded:
-                        button_row.append(
-                            InlineKeyboardButton("📄 Open summary", 
-                                                url=f"{dashboard_url}#report={report_id_encoded}")
-                        )
+                        row1.append(InlineKeyboardButton("📄 Open Summary", url=f"{dashboard_url}#report={report_id_encoded}"))
+
+                    keyboard.append(row1)
+
+                    # Row 2: Listen | Add Variant | Delete…
+                    row2: List[InlineKeyboardButton] = []
+                    if report_id_encoded:
+                        # Listen to exactly this summary (one-off TTS)
+                        base_variant = base_type
+                        listen_cb = f"listen_this:{video_id}:{base_variant}"
+                        if len(listen_cb.encode('utf-8')) <= 64:
+                            row2.append(InlineKeyboardButton("▶️ Listen", callback_data=listen_cb))
+                        row2.append(InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"))
                         # Limit callback data to avoid Telegram's 64 byte limit
                         callback_data = f"delete_{report_id}"
                         if len(callback_data.encode('utf-8')) > 64:
-                            # Truncate report_id if too long
                             max_id_len = 64 - len("delete_")
                             truncated_id = report_id[:max_id_len]
                             callback_data = f"delete_{truncated_id}"
-                        
-                        button_row.append(
-                            InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data)
-                        )
-                    
-                    keyboard.append(button_row)
+                        row2.append(InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data))
+
+                    if row2:
+                        keyboard.append(row2)
+
                     reply_markup = InlineKeyboardMarkup(keyboard)
                 else:
                     reply_markup = None
@@ -1040,7 +1388,24 @@ class YouTubeTelegramBot:
             
             # Always send the full text (it will auto-split via _send_long_message)
             # The 'summary' variable already contains the correct text for the chosen summary type
-            await self._send_long_message(query, header_text, summary, reply_markup)
+            sent_msg = await self._send_long_message(query, header_text, summary, reply_markup)
+
+            # Cache exact text for one-off TTS replay (message-scoped)
+            try:
+                if sent_msg is not None:
+                    chat_id = sent_msg.chat_id if hasattr(sent_msg, 'chat_id') else sent_msg.chat.id
+                    message_id = sent_msg.message_id
+                    payload = {
+                        "video_id": video_id,
+                        "variant": base_type,
+                        "language": (result.get('summary', {}) or {}).get('language') or result.get('summary_language') or '',
+                        "title": title,
+                        "text": summary,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    self._cache_oneoff_tts(chat_id, message_id, payload)
+            except Exception as e:
+                logging.warning(f"⚠️ Failed to cache one-off TTS payload: {e}")
             
             logging.info(f"Successfully sent {summary_type} summary for {title}")
             
@@ -1084,7 +1449,11 @@ class YouTubeTelegramBot:
                     audio_reply_markup = None
                     report_id = video_info.get('video_id', '')
                     if report_id:
-                        dashboard_url = os.getenv('DASHBOARD_URL', 'https://ytv2-vy9k.onrender.com')
+                        dashboard_url = (
+                            os.getenv('DASHBOARD_URL')
+                            or os.getenv('POSTGRES_DASHBOARD_URL')
+                            or 'https://ytv2-dashboard-postgres.onrender.com'
+                        )
                         if dashboard_url:
                             # Encode report ID for URL safety
                             report_id_encoded = urllib.parse.quote(report_id, safe='')
@@ -1098,13 +1467,16 @@ class YouTubeTelegramBot:
                                 truncated_id = report_id[:max_id_len]
                                 callback_data = f"delete_{truncated_id}"
                             
-                            button_row = [
+                            # Two rows for clarity
+                            row1 = [
                                 InlineKeyboardButton("📊 Dashboard", url=dashboard_url),
-                                InlineKeyboardButton("📄 Open summary", 
-                                                   url=f"{dashboard_url}#report={report_id_encoded}"),
+                                InlineKeyboardButton("📄 Open Summary", url=f"{dashboard_url}#report={report_id_encoded}")
+                            ]
+                            row2 = [
+                                InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
                                 InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data)
                             ]
-                            audio_reply_markup = InlineKeyboardMarkup([button_row])
+                            audio_reply_markup = InlineKeyboardMarkup([row1, row2])
                     
                     with open(audio_filepath, 'rb') as audio_file:
                         await query.message.reply_voice(
@@ -1375,8 +1747,8 @@ class YouTubeTelegramBot:
             # If summary fits in one message, send normally
             if len(safe_summary) <= available_space:
                 full_message = f"{safe_header}\n{safe_summary}"
-                await query.edit_message_text(full_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
-                return
+                msg = await query.edit_message_text(full_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+                return msg
             
             # Summary is too long - split into multiple messages
             print(f"📱 Long summary detected ({len(summary_text):,} chars) - splitting into multiple messages")
@@ -1392,6 +1764,7 @@ class YouTubeTelegramBot:
             await query.edit_message_text(first_message, parse_mode=ParseMode.MARKDOWN)
             
             # Send remaining chunks as follow-up messages
+            last_msg = None
             for i, chunk in enumerate(chunks[1:], 2):
                 chunk_message = f"📄 **Summary (Part {i}/{len(chunks)}):**\n\n{chunk}"
                 
@@ -1407,7 +1780,8 @@ class YouTubeTelegramBot:
                     chunk_reply_markup = reply_markup  # Add buttons to final message
                 
                 # Send as new message (not edit)
-                await query.message.reply_text(chunk_message, parse_mode=ParseMode.MARKDOWN, reply_markup=chunk_reply_markup)
+                last_msg = await query.message.reply_text(chunk_message, parse_mode=ParseMode.MARKDOWN, reply_markup=chunk_reply_markup)
+            return last_msg
                 
         except Exception as e:
             logging.error(f"Error sending long message: {e}")
@@ -1417,11 +1791,13 @@ class YouTubeTelegramBot:
             truncated_summary = safe_summary[:1000] + "..." if len(safe_summary) > 1000 else safe_summary
             fallback_message = f"{safe_header}\n{truncated_summary}\n\n⚠️ *Summary was truncated due to length. View full summary on dashboard.*"
             try:
-                await query.edit_message_text(fallback_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+                msg = await query.edit_message_text(fallback_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+                return msg
             except Exception as fallback_e:
                 logging.error(f"Even fallback message failed: {fallback_e}")
                 # Try without buttons as last resort
-                await query.edit_message_text(fallback_message, parse_mode=ParseMode.MARKDOWN)
+                msg = await query.edit_message_text(fallback_message, parse_mode=ParseMode.MARKDOWN)
+                return msg
     
     def _split_text_into_chunks(self, text: str, max_chunk_size: int) -> List[str]:
         """Split text into chunks that fit within Telegram message limits."""

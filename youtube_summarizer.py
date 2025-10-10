@@ -842,100 +842,78 @@ class YouTubeSummarizer:
             "comprehensive": f"""
             {base_context}
 
-            Create an **executive report** that extracts key insights and strategic implications from this video content.
+            Write a comprehensive summary optimized for quick reading.
 
-            **EXECUTIVE SUMMARY**
-            Write 2–3 concise sentences capturing the video's main purpose, key findings, and strategic takeaway. Frame the final sentence as a "so what" for leadership decision-making. Keep it sharp and high-level — no more than 3 sentences.
+            Output order:
+            1) Overview — 2–3 sentences covering the problem/topic, what’s shown, and the key conclusion.
+            2) Sections — 2–4 short, descriptive headings (2–4 words) followed by 3–5 bullets each:
+               • Use “• ” bullets. Keep bullets ≤ 18 words.
+               • Prefer specifics (data, numbers, names) over generalities.
+               • Avoid meta (don’t say “the host says/this video covers”).
+            3) Bottom line — one sentence starting “Bottom line: …”.
 
-            **KEY INSIGHTS & ANALYSIS**
-            Organise the content into 2–4 natural sections with **short, descriptive headings** (2–5 words maximum). For each section:
-            - Begin with 1–2 sentences establishing the theme and relevance (vary: "Focus", "Scope", "Context", etc.)
-            - Present 3–5 key findings as **uniform, verb-led bullets** (e.g., "Verify version (0.88+) with claude –version", "Switch providers via base URL", "Enable cost tracking...")
-            - Conclude with strategic implications woven naturally into prose (avoid labelling "Implications:")
+            Rules:
+            - Respond in the transcript’s language.
+            - Include [mm:ss] timestamps only if explicitly present in transcript text; otherwise omit.
+            - If a needed fact isn’t available, write “Unknown”.
+            - No code fences, no emojis, no markdown headings.
 
-            **STRATEGIC RECOMMENDATIONS**
-            Provide 3–4 clear, actionable recommendations in **tiered bullets** (headline + supporting details):  
-            - Top-level bullet = decisive headline (*Institutionalise cost governance*, *Adopt hybrid workflows*)  
-                • Supporting bullets = 1–2 specific implementation details  
-
-            **Writing Guidelines:**
-            - Assume audience is senior leadership — write in crisp, consulting-style prose (think McKinsey/BCG)
-            - Emphasise strategic implications over raw facts
-            - Use professional language (British/Canadian spelling)
-            - Include timestamps only when they add clarity
-            - Vary section openings naturally (avoid mechanical repetition)
-            - Create sections that emerge organically from content
-            - Never speculate beyond presented material
-            - Ensure natural flow — reports should feel executive-authored, not AI-generated
-            - **IMPORTANT: Respond in the same language as the original transcript.** Preserve the original language for authentic communication.
+            Length guidance (not strict):
+            - <10 min: 150–220 words; 2 sections.
+            - 10–30 min: 220–350 words; 3 sections.
+            - >30 min: 350–500 words; 3–4 sections.
             """,
 
             "audio": f"""
             {base_context}
 
-            You are writing a script for text-to-speech audio. Create a conversational, flowing summary that sounds natural when spoken aloud. Present the actual findings and insights directly - never describe what the video does or what the reviewer says.
+            Write a natural, text‑to‑speech friendly narration.
 
-            **Script Structure:**
+            Structure:
+            - Opening: 2–3 sentences that jump straight to the substance and high‑level conclusion.
+            - Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”.
+            - Closing: One sentence starting “Bottom line: …”.
 
-            **Opening:** Start with 2-3 sentences that immediately introduce the main topic and key conclusion. No "this video covers" - jump straight into the substance.
-
-            **Main Content:** Analyze the transcript to identify major topics, then present them using smooth conversational transitions between sections. Never use headings or bullet points. Instead, use natural verbal signposts like:
-            - "First, let's look at the performance results..."
-            - "Moving on to build quality..."
-            - "When it comes to pricing..."
-            - "The most important finding was..."
-            - "However, there's an important trade-off..."
-
-            **Conclusion:** End with "So what's the bottom line?" or "In the end..." followed by the main takeaway and practical recommendations. **Crucially, if the video is a review, ensure this final verdict explicitly mentions price, value, and the final cost-benefit analysis, as this is often the most important takeaway for the audience.**
-
-            **Critical Writing Rules:**
-            - Write in flowing paragraphs only - no lists, bullets, or visual formatting
-            - **Keep paragraphs focused and concise:** To maintain listener engagement, ensure each paragraph covers a single main idea. If a topic is complex, break it into multiple shorter paragraphs rather than one long one
-            - Use short, clear sentences that are easy to follow when spoken
-            - Spell out acronyms the first time ("Artificial Intelligence, or A-I")
-            - Include specific details, numbers, model names, and prices
-            - Use natural pauses with commas and periods to guide TTS pacing
-            - Cover all major topics - don't skip important sections like pricing, specifications, or final recommendations
-            - Scale content to match complexity - comprehensive coverage for detailed content, concise for simple topics
-
-            **Avoid Meta-Commentary:**
-            Present findings directly and avoid phrases like "the video explains" or "the reviewer discusses." Only use attribution when it's essential to clarify that a statement is a subjective opinion or conclusion, not an objective fact.
-            - GOOD (Direct Fact): "The vacuum has twenty-two thousand Pascals of suction."
-            - GOOD (Attributed Opinion): "The reviewer concludes the mopping is a generation ahead of the competition."
-            - BAD (Weak Phrasing): "The reviewer then goes on to talk about the suction power."
-
-            Write as if you're explaining the findings to a friend over coffee - professional but conversational, comprehensive but natural to listen to.
-            
-            **IMPORTANT: Respond in the same language as the original transcript.** If the transcript is in French, respond in French. If it's in Spanish, respond in Spanish, etc. This ensures the TTS audio matches the original content language.
+            Rules:
+            - Respond in the transcript’s language.
+            - Keep numbers and names accurate; include specific values where present.
+            - No headings, no bullets, no code fences, no emojis.
+            - Length: ~180–380 words for most videos; shorter for very short clips.
             """,
 
             "bullet-points": f"""
             {base_context}
 
-            Output ONLY this Markdown skeleton, filling in the brackets. Keep each bullet ≤ 18 words.
+            Produce a skim‑ready bullet summary.
 
-            • **Main topic:** [brief]
-            • **Key points:**
-              - [point 1]
-              - [point 2]
-              - [point 3]
-            • **Takeaway:** [single sentence]
-            • **Best for:** [audience]
-            
-            **IMPORTANT: Respond in the same language as the original transcript.**
+            Output:
+            - One‑sentence overview.
+            - 10–16 “• ” bullets capturing concrete facts, results, and named items.
+            - End with “Bottom line: …”.
+
+            Rules:
+            - Respond in the transcript’s language.
+            - Each bullet ≤ 18 words; lead with the fact/action.
+            - Prefer specifics (metrics, model names, versions, dates).
+            - Avoid duplication; merge near‑identical points.
+            - Timestamps only if explicitly present; else omit.
+            - No code fences/emojis/headings.
             """,
 
             "key-insights": f"""
             {base_context}
 
-            Extract actionable insights only. Provide numbered Markdown items, each ≤ 24 words, no fluff:
-            1) **Core message:** [one sentence]
-            2) **Top 3 insights:** [three sub‑bullets]
-            3) **Actions/next steps:** [2–4 sub‑bullets]
-            4) **Why watch:** [one sentence]
+            Extract the key insights and their practical implications.
 
-            Do not speculate; write **Unknown** if the transcript doesn't support a claim.
-            **IMPORTANT: Respond in the same language as the original transcript.**
+            Output:
+            - 5–7 “• ” insights. For each, include “— why it matters” with a concrete rationale.
+            - 2–3 action bullets labeled “Actions:” with clear next steps (tool/version/setting when relevant).
+            - End with “Bottom line: …”.
+
+            Rules:
+            - Respond in the transcript’s language.
+            - No speculation beyond the transcript; use “Unknown” if particulars are missing.
+            - No headings, no code fences/emojis.
             """,
             
             "executive": f"""
@@ -997,37 +975,21 @@ class YouTubeSummarizer:
             "adaptive": f"""
             {base_context}
 
-            You are an expert content analyst. Based on the transcript, silently choose the most effective summary format for this specific video and produce ONLY the summary.
+            Silently choose the best format for this transcript from:
+            - Comprehensive
+            - Key Points
+            - Key Insights
+            - (If clearly procedural) a step‑wise breakdown (6–12 steps, ≤ 12 words/step)
 
-            **Consider (internally, without writing it out):**
-            - Content complexity and technical depth
-            - Educational vs entertainment value
-            - Tutorial/procedural vs discussion/opinion
-            - Information density and duration
-            - Likely audience sophistication implied by the transcript
+            Output only the chosen format. No meta‑explanation.
 
-            **Available formats (choose one, or design a simple custom layout if clearly better):**
-            1) Comprehensive detailed analysis
-            2) Executive brief
-            3) Key insights extraction
-            4) Step-by-step breakdown (for tutorials/procedures)
-            5) Custom adaptive format (only if it's clearly superior)
-
-            **Output rules (must follow):**
-            - Do NOT explain your choice or approach; no meta-commentary
-            - Start directly with the summary content (no prefaces)
-            - Use clear, scannable structure (short headings and/or bullets as appropriate)
-            - British/Canadian spelling; neutral, precise tone by default
-            - Include [mm:ss] timestamps ONLY if they are explicitly present or derivable from the transcript; otherwise omit them
-            - No speculation or external facts; if a needed detail is missing, write **Unknown**
-            - Avoid filler signposting ("In this section…", "We will discuss…"); write the content itself
-            - If the transcript is sparse/inaudible/mostly music, summarise the **available** information and state **Unknown** for specifics
-            - End with a single concise takeaway sentence beginning **Bottom line:** unless the chosen format already has a clear conclusion
-
-            **Length guidance (not a hard limit):**
-            - Short videos / light content: 120–180 words
-            - Dense or technical content: 250–500 words
-            - Tutorials: use a step-wise structure with concise steps (≤ 12 words per step)
+            Global rules:
+            - Respond in the transcript’s language.
+            - Timestamps only if explicitly present; else omit.
+            - “Unknown” when information is missing.
+            - No code fences/emojis.
+            - For Key Points/Insights, use “• ” bullets. For step‑wise, use numbered steps.
+            - Length guidance: short 120–180 words; dense 250–500 words; step‑wise concise.
             """,
         }
         
@@ -1046,7 +1008,7 @@ class YouTubeSummarizer:
         
         # Also generate a quick title/headline (using summary for token efficiency)
         title_prompt = f"""
-        Write a single, specific headline (12–16 words, no emojis) that states subject and concrete value.
+        Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
         **IMPORTANT: Respond in the same language as the content.**
         Source title: {metadata.get('title', '')}
         Summary:
@@ -1786,16 +1748,16 @@ Multiple Categories (when content genuinely spans areas):
             # Generate focused summary for this chunk
             chunk_prompt = f"""
             {chunk_context}
-            
-            Create a comprehensive summary of this transcript segment. Focus on:
-            - Key points and main ideas discussed
-            - Important details and insights
-            - Context and connections between ideas
-            - Actionable information or conclusions
-            
-            This is part {i+1} of {len(chunks)} segments from a longer video. Provide a complete summary of this section without referencing other parts.
-            
-            Format your response as a well-structured summary with clear sections and bullet points where appropriate.
+
+            Summarize this transcript segment for later merging.
+
+            Output:
+            - 5–9 “• ” bullets with concrete facts, names, and numbers.
+            - Avoid intro/outro fluff and repetition.
+            - No headings, no meta; just bullets.
+            - Use the transcript’s language.
+
+            Keep bullets ≤ 18 words. Timestamps only if explicitly present in this segment.
             """
             
             chunk_summary = await self._robust_llm_call([HumanMessage(content=chunk_prompt)], 
@@ -1857,7 +1819,7 @@ Multiple Categories (when content genuinely spans areas):
 
         if primary_text:
             title_prompt = f"""
-            Write a single, specific headline (12–16 words, no emojis) that states subject and concrete value.
+            Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
             **IMPORTANT: Respond in the same language as the content.**
             Source title: {metadata.get('title', '')}
             Summary:
@@ -1910,12 +1872,19 @@ Multiple Categories (when content genuinely spans areas):
     async def _extract_bullet_points(self, summary: str) -> str:
         """Extract key points in bullet format"""
         prompt = f"""
-        Convert this summary into clear, concise bullet points:
-        
+        Convert this summary into a skim‑ready bullet list.
+
         {summary}
-        
-        Create 8-12 bullet points that capture the most important information.
-        Use clear, actionable language and organize by theme where appropriate.
+
+        Output:
+        - One sentence overview.
+        - 10–16 “• ” bullets with concrete facts, results, and proper names.
+        - Finish with “Bottom line: …”.
+
+        Rules:
+        - Each bullet ≤ 18 words; lead with the key fact/action.
+        - Prefer specifics (metrics, versions, dates). Merge near‑duplicates.
+        - No headings, no code fences, no emojis.
         """
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="bullet points extraction")
@@ -1924,18 +1893,18 @@ Multiple Categories (when content genuinely spans areas):
     async def _extract_key_insights(self, summary: str) -> str:
         """Extract key insights and takeaways"""
         prompt = f"""
-        From this summary, identify the 5-7 most important insights or takeaways:
-        
+        From this summary, extract the key insights and their implications.
+
         {summary}
-        
-        Focus on:
-        - Strategic implications
-        - Actionable advice
-        - Important revelations or discoveries
-        - Practical applications
-        - Key learnings
-        
-        Present as numbered insights with brief explanations.
+
+        Output:
+        - 5–7 “• ” insights; for each add “— why it matters” with a concrete rationale.
+        - 2–3 action bullets labeled “Actions:” with clear next steps (tool/version/setting if relevant).
+        - End with “Bottom line: …”.
+
+        Rules:
+        - No speculation; use “Unknown” if the summary lacks the detail.
+        - No headings, no code fences, no emojis.
         """
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="key insights extraction")
@@ -1957,33 +1926,22 @@ Multiple Categories (when content genuinely spans areas):
         prompt = f"""
         {base_context}
 
-        You are writing a script for text-to-speech audio. Create a conversational, flowing summary that sounds natural when spoken aloud. Present the actual findings and insights directly - never describe what the video does or what the reviewer says.
+        Write a natural, text‑to‑speech friendly narration from the transcript.
 
-        **Script Structure:**
+        Structure:
+        - Opening: 2–3 sentences that jump straight to the substance and key conclusion.
+        - Main: Smoothly connect major topics with conversational transitions (no headings/bullets).
+                 Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”.
+        - Closing: One sentence starting “Bottom line: …”.
 
-        **Opening:** Start with 2-3 sentences that immediately introduce the main topic and key conclusion. No "this video covers" - jump straight into the substance.
-
-        **Main Content:** Analyze the transcript to identify major topics, then present them using smooth conversational transitions between sections. Never use headings or bullet points. Instead, use natural verbal signposts like:
-        - "First, let's look at the performance results..."
-        - "Moving on to build quality..."
-        - "When it comes to pricing..."
-        - "The most important finding was..."
-        - "However, there's an important trade-off..."
-
-        **Closing:** End with a clear takeaway or recommendation that synthesizes the key points.
-
-        **Requirements:**
-        - Conversational, natural tone suitable for listening
-        - Smooth transitions between topics without formatting
-        - Present findings directly, not "the video shows..."
-        - Include specific data, numbers, and key details
-        - Maintain engaging pace with varied sentence lengths
+        Requirements:
+        - Flowing paragraphs only; no lists, bullets, headings, code fences, or emojis.
+        - Present findings directly; avoid meta like “the video shows…”.
+        - Keep names/numbers accurate; include specific values where present.
+        - Maintain an engaging pace with varied sentence lengths.
         - **IMPORTANT: Respond in the same language as the original transcript.** 
 
-        **Length guidance (not a hard limit):**
-        - Short videos / light content: 120–180 words
-        - Dense or technical content: 250–500 words
-        - Tutorials: use a step-wise structure with concise steps (≤ 12 words per step)
+        Length guidance (not strict): 180–380 words for most videos; shorter for very short clips.
         """
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="audio summary from transcript")
@@ -1992,17 +1950,16 @@ Multiple Categories (when content genuinely spans areas):
     async def _create_audio_summary(self, summary: str) -> str:
         """Create audio-optimized version of summary"""
         prompt = f"""
-        Create an audio-friendly version of this summary optimized for text-to-speech:
-        
+        Convert this summary into a natural, text‑to‑speech friendly narration.
+
         {summary}
-        
-        Requirements:
-        - Conversational tone suitable for listening
-        - Remove formatting markers and bullet points
-        - Use smooth transitions between topics
-        - Maintain all key information
-        - Structure for easy listening comprehension
-        - Keep engaging and informative
+
+        Rules:
+        - Use flowing paragraphs only (no bullets/headings/code fences/emojis).
+        - Smooth transitions between topics; keep proper nouns/numbers accurate.
+        - Maintain all key information and conclusions.
+        - End with a single sentence beginning “Bottom line: …”.
+        - Length target: 180–350 words (shorter for very short content).
         """
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="audio summary creation")
@@ -2082,8 +2039,9 @@ Multiple Categories (when content genuinely spans areas):
         
         **Structure de sortie:**
         1) {f"Section Vocabulaire/Glosario (si demandée ci-dessus)" if vocab_block_req else ""}
-        2) **Narration principale**: Texte prêt pour la synthèse vocale en {target_language}, adapté au niveau {level_tag}
-        
+        2) **Narration principale**: texte prêt pour la synthèse vocale en {target_language}, adapté au niveau {level_tag},
+           se terminant par une phrase commençant par « Bottom line: … » dans la langue cible.
+
         **Répondez uniquement en {target_language}.**
         """
         

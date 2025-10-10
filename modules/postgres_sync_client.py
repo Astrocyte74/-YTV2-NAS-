@@ -18,6 +18,8 @@ from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
 
+from .summary_variants import format_summary_html, normalize_variant_id, variant_kind
+
 
 def find_audio_for_video(video_id: str) -> Optional[Path]:
     """
@@ -394,47 +396,84 @@ class PostgreSQLSyncClient:
         # Add summary data to match existing PostgreSQL format
         summary_data = content_data.get('summary', {})
 
-        def _format_html(text: str) -> str:
-            from html import escape
-            if not text:
-                return '<p></p>'
-            paragraphs = [escape(block).replace('\n', '<br/>') for block in text.strip().split('\n\n') if block.strip()]
-            if not paragraphs:
-                return '<p></p>'
-            return ''.join(f"<p>{paragraph}</p>" for paragraph in paragraphs)
-
         summary_variants = []
         processed_variants = set()
         chosen_summary_text = ''
         chosen_variant = 'comprehensive'
 
         if isinstance(summary_data, dict):
-            # Direct summary payload (newer pipeline)
+            default_variant = normalize_variant_id(
+                summary_data.get('default_variant') or summary_data.get('summary_type')
+            ) or 'comprehensive'
+
+            variants_field = summary_data.get('variants')
+            if isinstance(variants_field, list):
+                for entry in variants_field:
+                    if not isinstance(entry, dict):
+                        continue
+                    variant_id = normalize_variant_id(
+                        entry.get('variant') or entry.get('summary_type') or entry.get('type')
+                    )
+                    if not variant_id or variant_id in processed_variants:
+                        continue
+                    text_value = entry.get('text') or entry.get('summary') or entry.get('content')
+                    if not isinstance(text_value, str) or not text_value.strip():
+                        continue
+
+                    variant_payload = {
+                        'variant': variant_id,
+                        'text': text_value.strip(),
+                        'html': entry.get('html') or format_summary_html(text_value),
+                        'kind': entry.get('kind') or variant_kind(variant_id)
+                    }
+
+                    if entry.get('headline'):
+                        variant_payload['headline'] = entry['headline']
+                    if entry.get('language'):
+                        variant_payload['language'] = entry['language']
+                    if entry.get('generated_at'):
+                        variant_payload['generated_at'] = entry['generated_at']
+                    if entry.get('proficiency'):
+                        variant_payload['proficiency'] = entry['proficiency']
+                    if entry.get('audio_url'):
+                        variant_payload['audio_url'] = entry['audio_url']
+
+                    summary_variants.append(variant_payload)
+                    processed_variants.add(variant_id)
+
             direct_text = summary_data.get('summary')
+            direct_variant = normalize_variant_id(summary_data.get('summary_type')) or default_variant
             if isinstance(direct_text, str) and direct_text.strip():
                 chosen_summary_text = direct_text.strip()
-                chosen_variant = summary_data.get('summary_type', 'comprehensive')
-                summary_variants.append({
-                    'variant': chosen_variant,
-                    'text': chosen_summary_text,
-                    'html': _format_html(chosen_summary_text)
-                })
-                processed_variants.add(chosen_variant)
+                chosen_variant = direct_variant or 'comprehensive'
+                if chosen_variant not in processed_variants:
+                    summary_variants.append({
+                        'variant': chosen_variant,
+                        'text': chosen_summary_text,
+                        'html': format_summary_html(chosen_summary_text),
+                        'kind': variant_kind(chosen_variant)
+                    })
+                    processed_variants.add(chosen_variant)
 
-            # Multi-format payload from chunked summaries and auxiliary variants
-            variant_priority = [
-                'comprehensive',
-                'key-insights',
-                'key_points',
-                'key-points',
-                'key_insights',
-                'executive',
-                'adaptive',
-                'summary'
-            ]
+            legacy_ignore = {
+                'summary',
+                'headline',
+                'summary_type',
+                'generated_at',
+                'variants',
+                'default_variant',
+                'latest_variant',
+                'language',
+                'proficiency',
+                'proficiency_level',
+                'audio_url',
+                'kind',
+                'html',
+                'text'
+            }
 
             for key, value in summary_data.items():
-                if key in {'summary', 'headline', 'summary_type', 'generated_at'}:
+                if key in legacy_ignore:
                     continue
                 if not isinstance(value, str):
                     continue
@@ -442,34 +481,33 @@ class PostgreSQLSyncClient:
                 if not clean_value:
                     continue
 
-                variant_name = key.replace('_', '-')
+                variant_name = normalize_variant_id(key)
                 if key == 'audio' and summary_data.get('summary_type'):
-                    variant_name = summary_data['summary_type']
+                    variant_name = normalize_variant_id(summary_data['summary_type'])
                 if variant_name in processed_variants:
                     continue
 
                 summary_variants.append({
                     'variant': variant_name,
                     'text': clean_value,
-                    'html': _format_html(clean_value)
+                    'html': format_summary_html(clean_value),
+                    'kind': variant_kind(variant_name)
                 })
                 processed_variants.add(variant_name)
 
-            if summary_variants and not chosen_summary_text:
-                # Choose best variant based on priority order
-                for preferred in variant_priority:
-                    match = next((variant for variant in summary_variants if variant['variant'] == preferred), None)
-                    if match:
-                        chosen_summary_text = match['text']
-                        chosen_variant = match['variant']
-                        break
+            if summary_variants:
+                preferred = normalize_variant_id(summary_data.get('default_variant')) or default_variant
+                match = next((variant for variant in summary_variants if variant['variant'] == preferred), None)
+                if match:
+                    chosen_summary_text = match['text']
+                    chosen_variant = match['variant']
                 else:
                     chosen_summary_text = summary_variants[0]['text']
                     chosen_variant = summary_variants[0]['variant']
 
         if chosen_summary_text:
             payload['summary_text'] = chosen_summary_text
-            payload['summary_html'] = _format_html(chosen_summary_text)
+            payload['summary_html'] = format_summary_html(chosen_summary_text)
             payload['summary_variant'] = chosen_variant
 
         if summary_variants:
