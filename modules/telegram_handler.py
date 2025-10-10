@@ -859,7 +859,8 @@ class YouTubeTelegramBot:
                 if not video_id:
                     await query.answer("Missing video id", show_alert=True)
                     return
-                await query.edit_message_text("🧩 Generating quiz from Key Points…")
+                # Keep the original summary visible; show a toast instead of replacing text
+                await query.answer("Generating quiz…")
 
                 # Find Key Points text, synthesize if needed
                 kp_text = self._resolve_summary_text(video_id, 'bullet-points')
@@ -946,13 +947,13 @@ class YouTubeTelegramBot:
                     [InlineKeyboardButton("▶️ Play in Quizzernator", url=qz)],
                     [InlineKeyboardButton("📂 See in Dashboard", url=f"{dash.rstrip('/')}/api/quiz/{final_name}")]
                 ])
-                await query.edit_message_text(
+                await query.message.reply_text(
                     f"✅ Saved quiz: {final_name}\n\nUse the buttons below to play or view details.",
                     reply_markup=kb
                 )
             except Exception as e:
                 logging.error(f"gen_quiz error: {e}")
-                await query.edit_message_text("❌ Error generating quiz.")
+                await query.message.reply_text("❌ Error generating quiz.")
 
         else:
             await query.edit_message_text("❌ Unknown option selected.")
@@ -1056,26 +1057,60 @@ class YouTubeTelegramBot:
         )
 
     def _validate_quiz_payload(self, data: dict, explanations: bool = True) -> bool:
+        """Validate and lightly normalize quiz JSON for storage.
+        Accepts common type aliases and fixes trivial omissions for TF/YesNo.
+        """
         try:
             if not isinstance(data, dict):
                 return False
             items = data.get('items')
             if not isinstance(items, list) or not items:
                 return False
-            if int(data.get('count', 0)) != len(items):
-                return False
+            # Normalize count
+            try:
+                data['count'] = int(data.get('count') or len(items))
+            except Exception:
+                data['count'] = len(items)
+
+            alias_map = {
+                'multiplechoice': 'multiplechoice', 'multiple-choice': 'multiplechoice', 'multiple choice': 'multiplechoice', 'mcq': 'multiplechoice',
+                'truefalse': 'truefalse', 'true/false': 'truefalse', 'true false': 'truefalse', 'boolean': 'truefalse',
+                'yesno': 'yesno', 'yes/no': 'yesno', 'yes no': 'yesno',
+                'shortanswer': 'shortanswer', 'short answer': 'shortanswer'
+            }
+
+            def norm_type(t: str) -> str:
+                key = re.sub(r'[^a-z/ ]+', '', (t or '').strip().lower())
+                return alias_map.get(key, key)
+
             seen = set()
+            normalized_items = []
             for q in items:
                 if not isinstance(q, dict):
                     return False
-                qtext = re.sub(r'\s+', ' ', (q.get('question') or '').strip().lower())
-                if not qtext or qtext in seen:
+                # Question text unique check
+                qtext = re.sub(r'\s+', ' ', (q.get('question') or '').strip())
+                if not qtext:
                     return False
-                seen.add(qtext)
-                qtype = (q.get('type') or '').lower()
+                qnorm = qtext.lower()
+                if qnorm in seen:
+                    continue  # drop duplicates silently
+                seen.add(qnorm)
+
+                qtype = norm_type(q.get('type'))
                 if qtype in ('multiplechoice', 'truefalse', 'yesno'):
                     opts = q.get('options')
-                    if not isinstance(opts, list) or len(opts) < (3 if qtype == 'multiplechoice' else 2):
+                    # Provide defaults for TF/YesNo if missing
+                    if qtype == 'truefalse' and not isinstance(opts, list):
+                        opts = ["True", "False"]
+                        q['options'] = opts
+                    if qtype == 'yesno' and not isinstance(opts, list):
+                        opts = ["Yes", "No"]
+                        q['options'] = opts
+                    if not isinstance(opts, list):
+                        return False
+                    min_opts = 3 if qtype == 'multiplechoice' else 2
+                    if len(opts) < min_opts:
                         return False
                     ci = q.get('correct')
                     if not isinstance(ci, int) or ci < 0 or ci >= len(opts):
@@ -1086,10 +1121,21 @@ class YouTubeTelegramBot:
                         return False
                 else:
                     return False
+
                 if explanations and not isinstance(q.get('explanation'), str):
-                    return False
+                    q['explanation'] = q.get('explanation') or ""
+
+                q['type'] = qtype  # write back normalized type
+                q['question'] = qtext
+                normalized_items.append(q)
+
+            if not normalized_items:
+                return False
+            data['items'] = normalized_items
+            data['count'] = len(normalized_items)
             return True
-        except Exception:
+        except Exception as e:
+            logging.warning(f"Quiz validation error: {e}")
             return False
 
     def _post_dashboard_json(self, endpoint: str, payload: dict, timeout: int = 30) -> Optional[dict]:
@@ -1545,28 +1591,29 @@ class YouTubeTelegramBot:
 
                     keyboard.append(row1)
 
-                    # Row 2: Listen | Generate Quiz | Add Variant | Delete…
-                    row2: List[InlineKeyboardButton] = []
+                    # Row 2: Listen | Generate Quiz
                     if report_id_encoded:
-                        # Listen to exactly this summary (one-off TTS)
                         base_variant = base_type
                         listen_cb = f"listen_this:{video_id}:{base_variant}"
+                        gen_cb = f"gen_quiz:{video_id}"
+                        row2 = []
                         if len(listen_cb.encode('utf-8')) <= 64:
                             row2.append(InlineKeyboardButton("▶️ Listen", callback_data=listen_cb))
-                        gen_cb = f"gen_quiz:{video_id}"
                         if len(gen_cb.encode('utf-8')) <= 64:
                             row2.append(InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb))
-                        row2.append(InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"))
-                        # Limit callback data to avoid Telegram's 64 byte limit
-                        callback_data = f"delete_{report_id}"
-                        if len(callback_data.encode('utf-8')) > 64:
+                        if row2:
+                            keyboard.append(row2)
+
+                        # Row 3: Add Variant | Delete…
+                        del_cb = f"delete_{report_id}"
+                        if len(del_cb.encode('utf-8')) > 64:
                             max_id_len = 64 - len("delete_")
                             truncated_id = report_id[:max_id_len]
-                            callback_data = f"delete_{truncated_id}"
-                        row2.append(InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data))
-
-                    if row2:
-                        keyboard.append(row2)
+                            del_cb = f"delete_{truncated_id}"
+                        keyboard.append([
+                            InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
+                            InlineKeyboardButton("🗑️ Delete…", callback_data=del_cb)
+                        ])
 
                     reply_markup = InlineKeyboardMarkup(keyboard)
                 else:
