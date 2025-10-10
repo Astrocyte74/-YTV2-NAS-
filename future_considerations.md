@@ -40,6 +40,10 @@ These are intentionally scoped so they can be picked up incrementally without de
 - Guard `/api/reprocess` with an auth token/shared secret before exposing beyond trusted LAN tools.
 - Capture latency timings (ingest duration, TTS walltime) so the metrics snapshot can warn on slowdowns.
 - Build a lightweight dashboard/CLI widget that consumes `/api/metrics` + SSE for NAS-friendly monitoring.
+- Quiz generation options in Telegram (simple expander): count (5/10/15), difficulty (beginner/intermediate/advanced), types (MC/TF/YesNo/Short), explanations on/off.
+- Add basic rate limiting + queue per user/chat for quiz generation and TTS.
+- Reuse existing MP3 on one‑off Listen when an audio variant is present to avoid regenerating.
+- Add validation telemetry: log type alias/normalization and first failing field when a quiz fails validation.
 
 ## 🧪 Verification Log (2025-09-30)
 - Restarted the NAS container (Portainer redeploy) to load updated modules.

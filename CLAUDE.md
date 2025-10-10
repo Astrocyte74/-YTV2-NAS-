@@ -231,3 +231,24 @@ The NAS component syncs with the Postgres dashboard via:
 - **Telemetry**: yt-dlp format warnings are expected; metadata scraping fallback will fill in channel/duration.
 
 **Last Safe State**: PostgreSQL-only sync with Gemini JSON guardrails (September 30, 2025)
+
+## New Capabilities (October 2025)
+
+- Telegram action keyboard (post‑summary) uses a spacious three‑row layout:
+  - Row 1: `📊 Dashboard` | `📄 Open Summary`
+  - Row 2: `▶️ Listen` (one‑off TTS) | `🧩 Generate Quiz`
+  - Row 3: `➕ Add Variant` | `🗑️ Delete…`
+- One‑off `Listen` runs chunked TTS with merge, replies with a voice message, and never ingests/saves audio. A small status line appears during work.
+- `Generate Quiz` (one‑tap) creates a 10‑item quiz from Key Points (or synthesizes minimal Key Points if missing), optionally categorizes via Dashboard, saves, and replies with deep links:
+  - Quizzernator: `https://quizzernator.onrender.com/?quiz=api:<filename>&autoplay=1`
+  - Dashboard: `/api/quiz/<filename>`
+- Variant discovery for checkmarks now queries the Dashboard (POSTGRES_DASHBOARD_URL) in addition to local JSON/ledger, ensuring all past variants are represented.
+
+### Prompt Refinements
+
+- Comprehensive: concise sections + bullets + “Bottom line”.
+- Key Points: 10–16 bullets, ≤ 18 words, concrete facts and names.
+- Key Insights: 5–7 insights with “— why it matters”; plus 2–3 actions.
+- Audio: paragraph‑only narration, “Bottom line”, no headings/bullets/markdown.
+- Chunked transcripts: segment-level bullet prompts; smart combine.
+- Headline rule: 12–16 words, no emojis, no colon.

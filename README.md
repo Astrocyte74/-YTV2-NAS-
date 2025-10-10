@@ -188,6 +188,49 @@ docker-compose down && docker-compose up -d
 - **Sync Status**: Monitor dashboard ingest or build a WebSocket/SSE listener for “report created” events
 - **Diagnostics**: See `tools/README.md` for targeted scripts (API tests, ffprobe, audio upload)
 
+## 🤖 Telegram Bot Actions (Current)
+
+After a summary is generated, the bot presents a three‑row action keyboard designed for clarity on mobile:
+
+- Row 1: `📊 Dashboard` | `📄 Open Summary`
+- Row 2: `▶️ Listen` (one‑off) | `🧩 Generate Quiz`
+- Row 3: `➕ Add Variant` | `🗑️ Delete…`
+
+Notes:
+- “Listen” performs a one‑off TTS of the exact message’s summary, using chunked TTS + merge. It does not ingest or save audio.
+- “Generate Quiz” produces a 10‑item quiz from the Key Points summary (or synthesizes minimal Key Points if missing), optionally categorizes, saves to the Dashboard, and replies with:
+  - `▶️ Play in Quizzernator` (deep link, autoplay)
+  - `📂 See in Dashboard` (raw JSON)
+- The original summary message remains visible; a small status line appears below it while actions are running (⏳/✅).
+
+## 🔌 Dashboard Quiz API dependency
+
+The NAS bot uses these YTV2‑Dashboard endpoints:
+- `POST /api/generate-quiz`
+- `POST /api/categorize-quiz` (optional; requires `OPENAI_API_KEY` on the Dashboard)
+- `POST /api/save-quiz`
+- `GET /api/quiz/:filename`
+
+Environment:
+- Prefer `POSTGRES_DASHBOARD_URL` for the Dashboard base URL (legacy `RENDER_DASHBOARD_URL` still works).
+- Quiz endpoints do not require `INGEST_TOKEN` (that applies only to `/ingest/*`).
+
+## 🧩 Quizzernator Deep Link
+
+Generated quizzes include a deep link that Quizzernator understands:
+- `https://quizzernator.onrender.com/?quiz=api:<filename>&autoplay=1`
+- Also accepted: `?quiz=https://<dashboard>/api/quiz/<filename>.json` (auto‑mapped), or `?quiz=<filename>.json`.
+
+## 📝 Prompt Updates (Summary)
+
+Prompts were refined for better structure and TTS quality:
+- **Comprehensive**: sections + concise bullets + “Bottom line”
+- **Key Points**: 10–16 bullets, ≤ 18 words, concrete facts
+- **Key Insights**: 5–7 insights with “— why it matters”; actions
+- **Audio**: paragraph‑only narration; “Bottom line”; no headings
+- **Chunked** long transcripts: per‑segment bullet summarization
+- **Headline**: 12–16 words, no emojis, no colon
+
 ## 🔒 Security
 
 - **Environment Variables**: Store API keys securely in `.env.nas`
