@@ -36,6 +36,8 @@ from modules.summary_variants import merge_summary_variants, normalize_variant_i
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
 from nas_sync import upload_to_render, dual_sync_upload
+import hashlib
+import unicodedata
 
 
 class YouTubeTelegramBot:
@@ -849,6 +851,104 @@ class YouTubeTelegramBot:
                 logging.error(f"listen_this error: {e}")
                 await query.answer("Error generating audio", show_alert=True)
 
+        elif callback_data.startswith('gen_quiz'):
+            # One-tap quiz generation from Key Points
+            try:
+                parts = callback_data.split(':')
+                video_id = parts[1] if len(parts) >= 2 else (self.last_video_id or '')
+                if not video_id:
+                    await query.answer("Missing video id", show_alert=True)
+                    return
+                await query.edit_message_text("🧩 Generating quiz from Key Points…")
+
+                # Find Key Points text, synthesize if needed
+                kp_text = self._resolve_summary_text(video_id, 'bullet-points')
+                if not kp_text:
+                    # synthesize ephemeral Key Points using available URL
+                    url = self._resolve_video_url(video_id, self.last_video_url)
+                    if not url:
+                        await query.edit_message_text("❌ No source available for quiz generation.")
+                        return
+                    tmp = await self.summarizer.process_video(url, summary_type='bullet-points')
+                    if isinstance(tmp, dict):
+                        sv = tmp.get('summary') or {}
+                        if isinstance(sv, dict):
+                            kp_text = sv.get('bullet_points') or sv.get('summary')
+                    if not kp_text and isinstance(tmp, dict):
+                        s = tmp.get('summary')
+                        if isinstance(s, str):
+                            kp_text = s
+                if not kp_text:
+                    await query.edit_message_text("❌ Could not obtain Key Points for quiz.")
+                    return
+
+                # Get metadata for prompt
+                report = self._load_local_report(video_id) or {}
+                title = (report.get('title') or report.get('video', {}).get('title') or 'Untitled').strip()
+                language = (report.get('summary', {}) or {}).get('language') or report.get('summary_language') or 'en'
+                difficulty = 'beginner'
+                prompt = self._build_quiz_prompt(title=title, keypoints=kp_text, count=10, types=["multiplechoice","truefalse"], difficulty=difficulty, language=language, explanations=True)
+
+                # Generate quiz via Dashboard
+                gen = self._post_dashboard_json('/api/generate-quiz', {
+                    'prompt': prompt,
+                    'model': 'google/gemini-2.5-flash-lite',
+                    'fallback_model': 'deepseek/deepseek-v3.1-terminus',
+                    'max_tokens': 1800,
+                    'temperature': 0.7,
+                })
+                if not gen or (gen.get('success') is False):
+                    await query.edit_message_text("❌ Quiz generation failed. Please try again.")
+                    return
+                raw = gen.get('content')
+                try:
+                    quiz = json.loads(raw) if isinstance(raw, str) else raw
+                except Exception:
+                    await query.edit_message_text("❌ Invalid quiz JSON returned by generator.")
+                    return
+                if not self._validate_quiz_payload(quiz, explanations=True):
+                    await query.edit_message_text("❌ Generated quiz did not pass validation.")
+                    return
+
+                # Optional categorization
+                cat = self._post_dashboard_json('/api/categorize-quiz', {
+                    'topic': title,
+                    'quiz_content': '\n'.join([i.get('question','') for i in quiz.get('items', [])[:3]])
+                })
+                meta = quiz.setdefault('meta', {})
+                meta['topic'] = meta.get('topic') or title
+                meta['difficulty'] = meta.get('difficulty') or difficulty
+                meta['language'] = language
+                if cat and cat.get('success'):
+                    meta['category'] = cat.get('category')
+                    meta['subcategory'] = cat.get('subcategory')
+                    meta['auto_categorized'] = True
+                    if 'confidence' in cat:
+                        meta['categorization_confidence'] = cat['confidence']
+
+                # Save
+                slug = self._slugify(title)
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                clean_vid = video_id.replace('yt:', '')
+                filename = f"{slug}_{clean_vid}_{ts}.json"
+                saved = self._post_dashboard_json('/api/save-quiz', {'filename': filename, 'quiz': quiz})
+                final_name = (saved or {}).get('filename') or filename
+
+                # Reply with links
+                dash = self._get_dashboard_base() or ''
+                qz = f"https://quizzernator.onrender.com/?quiz=api:{final_name}"
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("▶️ Play in Quizzernator", url=qz)],
+                    [InlineKeyboardButton("📂 See in Dashboard", url=f"{dash.rstrip('/')}/api/quiz/{final_name}")]
+                ])
+                await query.edit_message_text(
+                    f"✅ Saved quiz: {final_name}\n\nUse the buttons below to play or view details.",
+                    reply_markup=kb
+                )
+            except Exception as e:
+                logging.error(f"gen_quiz error: {e}")
+                await query.edit_message_text("❌ Error generating quiz.")
+
         else:
             await query.edit_message_text("❌ Unknown option selected.")
     
@@ -920,6 +1020,85 @@ class YouTubeTelegramBot:
             or os.getenv('POSTGRES_DASHBOARD_URL')
             or os.getenv('RENDER_DASHBOARD_URL')
         )
+
+    # ------------------------- Quiz helpers -------------------------
+    def _slugify(self, text: str) -> str:
+        text = (text or '').strip().lower()
+        text = unicodedata.normalize('NFKD', text)
+        text = re.sub(r'[^a-z0-9\-\_\s]+', '', text)
+        text = re.sub(r'\s+', '_', text)
+        text = re.sub(r'_+', '_', text).strip('_')
+        return text or 'quiz'
+
+    def _build_quiz_prompt(self, *, title: str, keypoints: str, count: int = 10,
+                           types: Optional[List[str]] = None, difficulty: str = 'beginner', language: str = 'en', explanations: bool = True) -> str:
+        allowed = types or ["multiplechoice", "truefalse"]
+        type_list = ', '.join(allowed)
+        explain_rule = 'Provide a brief explanation (1–2 sentences) for each item.' if explanations else 'Do not include explanations.'
+        return (
+            f"Create {count} quiz questions in {language}.\n"
+            f"Topic: {title}\n\n"
+            f"Use ONLY these key points (no outside facts):\n{keypoints}\n\n"
+            f"Rules:\n"
+            f"- Allowed types: {type_list}\n"
+            f"- Only one unambiguous correct answer per question\n"
+            f"- {explain_rule}\n"
+            f"- Respond ONLY as a JSON object with this shape (no text outside JSON):\n"
+            '{"count": number, "meta": {"topic": string, "difficulty": "beginner|intermediate|advanced", "language": ' + f'"{language}"' + '}, '
+            '"items": [{"question": string, "type": "multiplechoice|truefalse|yesno|shortanswer", '
+            '"options": [string, ...] (omit for shortanswer), "correct": number (omit for shortanswer), '
+            '"answer": string (only for shortanswer), "explanation": string}]}'
+        )
+
+    def _validate_quiz_payload(self, data: dict, explanations: bool = True) -> bool:
+        try:
+            if not isinstance(data, dict):
+                return False
+            items = data.get('items')
+            if not isinstance(items, list) or not items:
+                return False
+            if int(data.get('count', 0)) != len(items):
+                return False
+            seen = set()
+            for q in items:
+                if not isinstance(q, dict):
+                    return False
+                qtext = re.sub(r'\s+', ' ', (q.get('question') or '').strip().lower())
+                if not qtext or qtext in seen:
+                    return False
+                seen.add(qtext)
+                qtype = (q.get('type') or '').lower()
+                if qtype in ('multiplechoice', 'truefalse', 'yesno'):
+                    opts = q.get('options')
+                    if not isinstance(opts, list) or len(opts) < (3 if qtype == 'multiplechoice' else 2):
+                        return False
+                    ci = q.get('correct')
+                    if not isinstance(ci, int) or ci < 0 or ci >= len(opts):
+                        return False
+                elif qtype == 'shortanswer':
+                    ans = q.get('answer')
+                    if not isinstance(ans, str) or not ans.strip():
+                        return False
+                else:
+                    return False
+                if explanations and not isinstance(q.get('explanation'), str):
+                    return False
+            return True
+        except Exception:
+            return False
+
+    def _post_dashboard_json(self, endpoint: str, payload: dict, timeout: int = 30) -> Optional[dict]:
+        base = self._get_dashboard_base()
+        if not base or requests is None:
+            return None
+        try:
+            url = f"{base.rstrip('/')}{endpoint}"
+            r = requests.post(url, json=payload, timeout=timeout)
+            if r.status_code >= 200 and r.status_code < 300:
+                return r.json()
+        except Exception:
+            return None
+        return None
 
     def _load_local_report(self, video_id: str) -> Optional[Dict[str, Any]]:
         reports_dir = Path('./data/reports')
@@ -1361,7 +1540,7 @@ class YouTubeTelegramBot:
 
                     keyboard.append(row1)
 
-                    # Row 2: Listen | Add Variant | Delete…
+                    # Row 2: Listen | Generate Quiz | Add Variant | Delete…
                     row2: List[InlineKeyboardButton] = []
                     if report_id_encoded:
                         # Listen to exactly this summary (one-off TTS)
@@ -1369,6 +1548,9 @@ class YouTubeTelegramBot:
                         listen_cb = f"listen_this:{video_id}:{base_variant}"
                         if len(listen_cb.encode('utf-8')) <= 64:
                             row2.append(InlineKeyboardButton("▶️ Listen", callback_data=listen_cb))
+                        gen_cb = f"gen_quiz:{video_id}"
+                        if len(gen_cb.encode('utf-8')) <= 64:
+                            row2.append(InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb))
                         row2.append(InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"))
                         # Limit callback data to avoid Telegram's 64 byte limit
                         callback_data = f"delete_{report_id}"
