@@ -919,6 +919,11 @@ class YouTubeTelegramBot:
                 meta['topic'] = meta.get('topic') or title
                 meta['difficulty'] = meta.get('difficulty') or difficulty
                 meta['language'] = language
+                # Include count in meta for convenience (frontend can show without computing)
+                try:
+                    meta['count'] = int(quiz.get('count') or len(quiz.get('items') or []))
+                except Exception:
+                    meta['count'] = len(quiz.get('items') or [])
                 if cat and cat.get('success'):
                     meta['category'] = cat.get('category')
                     meta['subcategory'] = cat.get('subcategory')
@@ -936,7 +941,7 @@ class YouTubeTelegramBot:
 
                 # Reply with links
                 dash = self._get_dashboard_base() or ''
-                qz = f"https://quizzernator.onrender.com/?quiz=api:{final_name}"
+                qz = f"https://quizzernator.onrender.com/?quiz=api:{final_name}&autoplay=1"
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("▶️ Play in Quizzernator", url=qz)],
                     [InlineKeyboardButton("📂 See in Dashboard", url=f"{dash.rstrip('/')}/api/quiz/{final_name}")]
