@@ -37,7 +37,7 @@ These are intentionally scoped so they can be picked up incrementally without de
 - `/api/reprocess` now enforces an `X-Reprocess-Token` header that must match `REPROCESS_AUTH_TOKEN` (set in container env).
 
 ### Next refinements
-- Guard `/api/reprocess` with an auth token/shared secret before exposing beyond trusted LAN tools.
+- Introduce per-user rate limiting and better auditing for `/api/reprocess` now that token enforcement is live.
 - Capture latency timings (ingest duration, TTS walltime) so the metrics snapshot can warn on slowdowns.
 - Build a lightweight dashboard/CLI widget that consumes `/api/metrics` + SSE for NAS-friendly monitoring.
 - Quiz generation options in Telegram (simple expander): count (5/10/15), difficulty (beginner/intermediate/advanced), types (MC/TF/YesNo/Short), explanations on/off.
@@ -75,9 +75,3 @@ These are intentionally scoped so they can be picked up incrementally without de
 - **Structured Monitoring & Alerts**: Metrics endpoint live; alerting/webhook work still pending.
 - **Report Reprocess API**: Implemented, auth-guarded, verified end-to-end.
 - **Realtime Event Expansion**: Core ingest/audio/reprocess events broadcasting; batching/extra event types remain optional future work.
-
-• I'm outlining and implementing the reprocess_video method for YouTubeTelegramBot, including helpers for extracting video URLs, generating TTS audio, updating
-  ledger entries, and syncing reports. I’m also planning a new HTTP handler function handle_reprocess_request to schedule reprocess jobs, deduplicate tasks,
-  respond properly, and integrate metrics for success or failure. This involves carefully adapting existing ledger, dual-sync, and summarizer logic while ensuring
-  good fallback behaviors and error handling. I’ll add static helpers for video ID extraction and JSON report-based URL resolution, plus metrics tracking around
-  audio processing outcomes. The changes touch both telegram_bot.py and modules/telegram_handler.py.

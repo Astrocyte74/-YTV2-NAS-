@@ -61,7 +61,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
    OPENROUTER_API_KEY=your_openrouter_key_here
    
    # Dashboard Sync (Postgres ingest)
-   RENDER_DASHBOARD_URL=your_dashboard_url_here
+   POSTGRES_DASHBOARD_URL=your_dashboard_url_here
    INGEST_TOKEN=your_ingest_token_here
    SYNC_SECRET=your_shared_secret_here
 
@@ -104,7 +104,7 @@ Connect to your YTV2-Dashboard deployment (Postgres ingest endpoints):
 
 ```bash
 # Render deployment (ingest base URL)
-RENDER_DASHBOARD_URL=https://your-dashboard.onrender.com
+POSTGRES_DASHBOARD_URL=https://your-dashboard.onrender.com
 
 # Postgres ingest token (matches server-side `INGEST_TOKEN`)
 INGEST_TOKEN=your_secure_ingest_token_here
@@ -179,7 +179,7 @@ docker-compose down && docker-compose up -d
 - **yt-dlp warnings**: `Requested format is not available` (normal). Metadata falls back to watch-page scraping.
 - **Import Errors**: Ensure all essential files are present (nothing left in `archive_nas/`).
 - **API Key Issues**: Verify your chosen AI provider key is valid and set in `.env.nas`.
-- **Sync Failures**: Confirm `RENDER_DASHBOARD_URL`, `INGEST_TOKEN`, `POSTGRES_ONLY=true`, and `SQLITE_SYNC_ENABLED=false`.
+- **Sync Failures**: Confirm `POSTGRES_DASHBOARD_URL`, `INGEST_TOKEN`, `POSTGRES_ONLY=true`, and `SQLITE_SYNC_ENABLED=false`.
 - **Docker Issues**: Verify environment file and port availability.
 
 ### Log Locations
@@ -212,7 +212,7 @@ The NAS bot uses these YTV2‑Dashboard endpoints:
 - `GET /api/quiz/:filename`
 
 Environment:
-- Prefer `POSTGRES_DASHBOARD_URL` for the Dashboard base URL (legacy `RENDER_DASHBOARD_URL` still works).
+- Use `POSTGRES_DASHBOARD_URL` for the Dashboard base URL (legacy `RENDER_DASHBOARD_URL` is still read for compatibility).
 - Quiz endpoints do not require `INGEST_TOKEN` (that applies only to `/ingest/*`).
 
 ## 🧩 Quizzernator Deep Link

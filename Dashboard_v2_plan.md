@@ -272,7 +272,7 @@ The engine to serve our standardized data quickly.
 ### 2.1 In-Memory Index Architecture
 _**(Runs on Render)**_
 - **Data location on Render:** `REPORTS_DIR` must be available inside the container (e.g., mounted to `/app/data/reports`). If using a sync job, ensure it completes before app start.
-- **Startup Build:** On application start, scan all `complete` JSON files from NAS to build the in-memory index. Derive the `year` facet from `published_at` during this process.
+- **Startup Hydration:** On application start, query Postgres via the ingest client to populate the in-memory index. Derive the `year` facet from `published_at` in the returned records. (The legacy JSON scan flow is retired but can be re-enabled locally if Postgres is unavailable.)
 - **Basic Facet Counts:** Simple facet counts for filtering.
 
 ### 2.2 Core API Endpoints & Shapes

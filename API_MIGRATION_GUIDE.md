@@ -48,7 +48,7 @@ This guide documents the migration from database file sync to API-based synchron
 ### Environment Variables
 ```bash
 # Required for ingest client
-export RENDER_DASHBOARD_URL="https://your-dashboard.onrender.com"
+export POSTGRES_DASHBOARD_URL="https://your-dashboard.onrender.com"
 export INGEST_TOKEN="your-ingest-token"
 export SYNC_SECRET="legacy-shared-secret"   # still used for delete callbacks
 export POSTGRES_ONLY=true

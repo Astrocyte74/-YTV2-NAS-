@@ -158,7 +158,7 @@ ANTHROPIC_API_KEY=your_key_here
 OPENROUTER_API_KEY=your_key_here
 
 # Dashboard Integration (Postgres ingest)
-RENDER_DASHBOARD_URL=https://your-dashboard.onrender.com
+POSTGRES_DASHBOARD_URL=https://your-dashboard.onrender.com
 INGEST_TOKEN=your_ingest_token_here
 SYNC_SECRET=your_shared_secret_here  # legacy webhook/delete actions
 

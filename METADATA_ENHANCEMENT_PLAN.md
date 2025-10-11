@@ -78,13 +78,13 @@ All new fields go under `source_metadata.youtube` to maintain clean universal sc
 **Usage**:
 ```bash
 # Preview what would be deleted
-python cleanup_reports.py --dry-run
+python tools/cleanup_reports.py --dry-run
 
 # Run cleanup with backup
-python cleanup_reports.py --backup-dir ./backups/
+python tools/cleanup_reports.py --backup-dir ./backups/
 
 # Limit to specific count for testing
-python cleanup_reports.py --limit 10 --dry-run
+python tools/cleanup_reports.py --limit 10 --dry-run
 ```
 
 ### ✅ Phase 2: Update YouTube Summarizer (COMPLETED)
@@ -108,16 +108,16 @@ python cleanup_reports.py --limit 10 --dry-run
 **Usage**:
 ```bash
 # Test on 10 files with dry-run
-python backfill_metadata.py --dry-run --limit 10
+python tools/backfill_metadata.py --dry-run --limit 10
 
 # Run on 10 files for real
-python backfill_metadata.py --limit 10
+python tools/backfill_metadata.py --limit 10
 
 # Full run with resume capability
-python backfill_metadata.py --resume
+python tools/backfill_metadata.py --resume
 
 # Force update even recent files
-python backfill_metadata.py --force --resume
+python tools/backfill_metadata.py --force --resume
 ```
 
 ### ⏳ Phase 4: Sync to Render
