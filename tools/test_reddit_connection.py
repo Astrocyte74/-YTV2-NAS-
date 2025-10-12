@@ -61,9 +61,21 @@ def main() -> None:
         print(f"\n⚠️ Unable to load comments: {exc}")
         comments = []
 
-    print("\n🔗 Title:", submission.title)
-    if submission.selftext:
-        print("📝 Body preview:", submission.selftext[:300], "..." if len(submission.selftext) > 300 else "")
+    try:
+        title = submission.title
+        body = submission.selftext
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        print(f"\n⚠️ Unable to load submission body: {exc}")
+        title = None
+        body = ""
+
+    if title:
+        print("\n🔗 Title:", title)
+    else:
+        print("\n🔗 Title: <unavailable>")
+
+    if body:
+        print("📝 Body preview:", body[:300], "..." if len(body) > 300 else "")
     else:
         print("📝 Body preview: <no selftext>")
 
