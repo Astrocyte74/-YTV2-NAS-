@@ -41,10 +41,32 @@ def build_client() -> praw.Reddit:
     )
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        print("Usage: python tools/test_reddit_connection.py <reddit_post_url>")
+def parse_args():
+    """Parse CLI flags."""
+    args = sys.argv[1:]
+    login_only = False
+    url = None
+
+    if "--login-only" in args:
+        login_only = True
+        args.remove("--login-only")
+
+    if args:
+        url = args.pop(0)
+
+    if args:
+        print("Usage: python tools/test_reddit_connection.py [--login-only] <reddit_post_url>")
         sys.exit(1)
+
+    if not login_only and not url:
+        print("Usage: python tools/test_reddit_connection.py [--login-only] <reddit_post_url>")
+        sys.exit(1)
+
+    return login_only, url
+
+
+def main() -> None:
+    login_only, url = parse_args()
 
     ensure_env()
 
@@ -52,7 +74,9 @@ def main() -> None:
     me = reddit.user.me()
     print(f"✅ Authenticated as: {me}")
 
-    url = sys.argv[1]
+    if login_only:
+        return
+
     submission = reddit.submission(url=url)
     try:
         submission.comments.replace_more(limit=0)
