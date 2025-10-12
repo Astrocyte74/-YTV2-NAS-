@@ -18,17 +18,13 @@ import sys
 import praw
 
 
-REDDIT_ENV_VARS = {
-    "REDDIT_CLIENT_ID": None,
-    "REDDIT_CLIENT_SECRET": None,
-    "REDDIT_REFRESH_TOKEN": None,
-    "REDDIT_USER_AGENT": None,
-}
+REDDIT_REQUIRED_VARS = ("REDDIT_CLIENT_ID", "REDDIT_REFRESH_TOKEN", "REDDIT_USER_AGENT")
+REDDIT_OPTIONAL_VARS = ("REDDIT_CLIENT_SECRET",)
 
 
 def ensure_env():
-    """Abort with a clear message if any Reddit env var is missing."""
-    missing = [key for key in REDDIT_ENV_VARS if not os.getenv(key)]
+    """Abort with a clear message if any required Reddit env var is missing."""
+    missing = [key for key in REDDIT_REQUIRED_VARS if not os.getenv(key)]
     if missing:
         for key in missing:
             print(f"❌ Missing environment variable: {key}")
@@ -39,7 +35,7 @@ def build_client() -> praw.Reddit:
     """Instantiate a PRAW client using refresh-token auth."""
     return praw.Reddit(
         client_id=os.environ["REDDIT_CLIENT_ID"],
-        client_secret=os.environ["REDDIT_CLIENT_SECRET"],
+        client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
         refresh_token=os.environ["REDDIT_REFRESH_TOKEN"],
         user_agent=os.environ["REDDIT_USER_AGENT"],
     )
