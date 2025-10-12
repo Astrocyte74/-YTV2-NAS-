@@ -145,6 +145,9 @@ class YouTubeTelegramBot:
         # /r/sub/comments/<id>/...
         if len(parts) >= 4 and parts[0].lower() == "r" and parts[2].lower() == "comments":
             return parts[3]
+        # /r/sub/s/<token> (Reddit share links)
+        if len(parts) >= 3 and parts[-2].lower() == 's':
+            return parts[-1]
         # redd.it/<id>
         if parsed.netloc.endswith("redd.it") and parts:
             return parts[0]
@@ -1488,6 +1491,22 @@ class YouTubeTelegramBot:
                     proficiency_level=proficiency_level
                 )
             
+            if result:
+                result_content_id = result.get('id')
+                if result_content_id and result_content_id != ledger_id:
+                    ledger_id = result_content_id
+                    normalized_id = self._normalize_content_id(result_content_id)
+                    video_id = normalized_id
+                    display_id = f"{source}:{normalized_id}" if source != "youtube" else normalized_id
+                    canonical_url = result.get('canonical_url') or url
+                    url = canonical_url or url
+                    self.current_item = {
+                        "source": source,
+                        "url": url,
+                        "content_id": ledger_id,
+                        "raw_id": result_content_id.split(':', 1)[-1],
+                        "normalized_id": normalized_id,
+                    }
             if not result:
                 await query.edit_message_text("❌ Failed to process content. Please check the URL and try again.")
                 return
