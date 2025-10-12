@@ -54,8 +54,12 @@ def main() -> None:
 
     url = sys.argv[1]
     submission = reddit.submission(url=url)
-    submission.comments.replace_more(limit=0)
-    comments = submission.comments.list()
+    try:
+        submission.comments.replace_more(limit=0)
+        comments = submission.comments.list()
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        print(f"\n⚠️ Unable to load comments: {exc}")
+        comments = []
 
     print("\n🔗 Title:", submission.title)
     if submission.selftext:
