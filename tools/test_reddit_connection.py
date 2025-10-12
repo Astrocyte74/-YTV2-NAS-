@@ -59,8 +59,13 @@ def parse_args():
         sys.exit(1)
 
     if not login_only and not url:
-        print("Usage: python tools/test_reddit_connection.py [--login-only] <reddit_post_url>")
-        sys.exit(1)
+        try:
+            url = input("Reddit post URL: ").strip()
+        except EOFError:
+            url = ""
+        if not url:
+            print("Usage: python tools/test_reddit_connection.py [--login-only] <reddit_post_url>")
+            sys.exit(1)
 
     return login_only, url
 
