@@ -1426,10 +1426,11 @@ class YouTubeTelegramBot:
         
         # Update message to show processing
         # Create user-friendly processing messages
+        noun = "video" if source == "youtube" else "thread"
         processing_messages = {
-            "comprehensive": "📝 Analyzing video and creating comprehensive summary...",
-            "bullet-points": "🎯 Extracting key points from the video...", 
-            "key-insights": "💡 Identifying key insights and takeaways...",
+            "comprehensive": f"📝 Analyzing {noun} and creating comprehensive summary...",
+            "bullet-points": f"🎯 Extracting key points from the {noun}...", 
+            "key-insights": f"💡 Identifying key insights and takeaways from the {noun}...",
             "audio": "🎙️ Creating audio summary with text-to-speech...",
             "audio-fr": "🇫🇷 Translating to French and preparing audio narration...",
             "audio-es": "🇪🇸 Translating to Spanish and preparing audio narration..."
@@ -1443,11 +1444,10 @@ class YouTubeTelegramBot:
         elif base_type.startswith("audio-es"):
             level_suffix = " (with vocabulary help)" if proficiency_level in ["beginner", "intermediate"] else ""
             message = f"🇪🇸 Creating Spanish audio summary{level_suffix}... This may take a moment."
-        elif source == "reddit":
-            message = processing_messages.get(base_type, f"🧵 Processing {summary_type}... This may take a moment.")
         else:
-            message = processing_messages.get(base_type, f"🔄 Processing {summary_type}... This may take a moment.")
-        
+            default_prefix = "🧵" if source == "reddit" else "🔄"
+            message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
+
         await query.edit_message_text(message)
         
         try:
