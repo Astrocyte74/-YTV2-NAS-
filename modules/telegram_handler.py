@@ -63,8 +63,7 @@ class YouTubeTelegramBot:
         self.allowed_user_ids = set(allowed_user_ids)
         self.application = None
         self.summarizer = None
-        self.last_video_url = None
-        self.last_video_id = None
+        self.current_item: Optional[Dict[str, Any]] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         
         # Initialize exporters and ensure directories exist
@@ -106,11 +105,11 @@ class YouTubeTelegramBot:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _normalize_video_id(video_id: str) -> str:
-        video_id = (video_id or '').strip()
-        if video_id.startswith('yt:'):
-            video_id = video_id.split(':', 1)[1]
-        return video_id
+    def _normalize_content_id(content_id: str) -> str:
+        content_id = (content_id or '').strip()
+        if ':' in content_id:
+            content_id = content_id.split(':', 1)[1]
+        return content_id
 
     @staticmethod
     def _extract_video_id(youtube_url: str) -> str:
@@ -129,6 +128,40 @@ class YouTubeTelegramBot:
             return None
         url = match.group(1)
         return url.strip('<>') if url else None
+
+    @staticmethod
+    def _extract_reddit_id(reddit_url: str) -> Optional[str]:
+        """Extract the submission ID from a Reddit URL."""
+        try:
+            parsed = urllib.parse.urlparse(reddit_url)
+        except Exception:
+            return None
+
+        path = (parsed.path or "").strip("/")
+        if not path:
+            return None
+
+        parts = path.split("/")
+        # /r/sub/comments/<id>/...
+        if len(parts) >= 4 and parts[0].lower() == "r" and parts[2].lower() == "comments":
+            return parts[3]
+        # redd.it/<id>
+        if parsed.netloc.endswith("redd.it") and parts:
+            return parts[0]
+        return None
+
+    def _current_source(self) -> str:
+        return (self.current_item or {}).get("source", "youtube")
+
+    def _current_content_id(self) -> Optional[str]:
+        return (self.current_item or {}).get("content_id")
+
+    def _current_normalized_id(self) -> Optional[str]:
+        content_id = self._current_content_id()
+        return self._normalize_content_id(content_id) if content_id else None
+
+    def _current_url(self) -> Optional[str]:
+        return (self.current_item or {}).get("url")
 
     def _friendly_variant_label(self, variant: str) -> str:
         base, _, suffix = variant.partition(':')
@@ -175,8 +208,10 @@ class YouTubeTelegramBot:
 
         return InlineKeyboardMarkup(keyboard)
 
-    def _existing_variants_message(self, video_id: str, variants: List[str]) -> str:
+    def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
         if not variants:
+            if source == "reddit":
+                return "🧵 Processing Reddit thread...\n\nChoose your summary type:"
             return "🎬 Processing YouTube video...\n\nChoose your summary type:"
 
         variants_sorted = sorted(variants)
@@ -186,6 +221,7 @@ class YouTubeTelegramBot:
         return "\n".join(lines)
 
     async def _send_existing_summary_notice(self, query, video_id: str, summary_type: str):
+        source = self._current_source()
         variants = self._discover_summary_types(video_id)
         message_lines = [
             f"✅ {self._friendly_variant_label(summary_type)} is already on the dashboard."
@@ -195,15 +231,19 @@ class YouTubeTelegramBot:
             message_lines.extend(f"• {self._friendly_variant_label(variant)}" for variant in sorted(variants))
         message_lines.append("\nOpen the summary or re-run a variant below.")
 
-        reply_markup = self._build_summary_keyboard(variants, video_id)
-        await query.edit_message_text("\n".join(message_lines), reply_markup=reply_markup)
+        normalized_id = self._normalize_content_id(video_id)
+        reply_markup = self._build_summary_keyboard(variants, normalized_id)
+        await query.edit_message_text(
+            "\n".join(message_lines),
+            reply_markup=reply_markup
+        )
 
     def _discover_summary_types(self, video_id: str) -> List[str]:
         """Infer summary types available for a video from reports or ledger."""
         if not video_id:
             return []
 
-        video_id = self._normalize_video_id(video_id)
+        video_id = self._normalize_content_id(video_id)
         summary_types: set[str] = set()
         reports_dir = Path('./data/reports')
 
@@ -242,10 +282,10 @@ class YouTubeTelegramBot:
         ledger_data = ledger.list_all()
         for key in ledger_data.keys():
             try:
-                ledger_video, summary_type = key.split(':', 1)
+                ledger_video, summary_type = key.rsplit(':', 1)
             except ValueError:
                 continue
-            if ledger_video == video_id:
+            if self._normalize_content_id(ledger_video) == video_id:
                 normalized = normalize_variant_id(summary_type)
                 if normalized:
                     summary_types.add(normalized)
@@ -299,7 +339,7 @@ class YouTubeTelegramBot:
         if provided_url:
             return provided_url
 
-        video_id = self._normalize_video_id(video_id)
+        video_id = self._normalize_content_id(video_id)
         reports_dir = Path('./data/reports')
 
         for path in reports_dir.glob(f'*{video_id}*.json'):
@@ -469,7 +509,7 @@ class YouTubeTelegramBot:
                 ledger_entry['mp3'] = audio_path
             if targets:
                 ledger_entry['sync_targets'] = targets
-            ledger.upsert(video_id, summary_type, ledger_entry)
+            ledger.upsert(ledger_id, summary_type, ledger_entry)
 
             emit_report_event(
                 'reprocess-complete',
@@ -507,7 +547,7 @@ class YouTubeTelegramBot:
     ) -> Dict[str, Any]:
         """Public entry point to reprocess summaries for an existing video."""
 
-        normalized_id = self._normalize_video_id(video_id)
+        normalized_id = self._normalize_content_id(video_id)
         summary_types = summary_types or self._discover_summary_types(normalized_id)
 
         if not summary_types:
@@ -680,14 +720,20 @@ class YouTubeTelegramBot:
                 await update.message.reply_text("❌ Could not extract a valid YouTube URL from your message.")
                 return
 
-            # Store context for follow-up actions
-            self.last_video_url = video_url
             raw_video_id = self._extract_video_id(video_url)
-            self.last_video_id = self._normalize_video_id(raw_video_id)
+            normalized_id = self._normalize_content_id(raw_video_id)
 
-            existing_variants = self._discover_summary_types(self.last_video_id)
-            reply_markup = self._build_summary_keyboard(existing_variants, self.last_video_id)
-            message_text = self._existing_variants_message(self.last_video_id, existing_variants)
+            self.current_item = {
+                "source": "youtube",
+                "url": video_url,
+                "content_id": normalized_id,
+                "raw_id": raw_video_id,
+                "normalized_id": normalized_id,
+            }
+
+            existing_variants = self._discover_summary_types(normalized_id)
+            reply_markup = self._build_summary_keyboard(existing_variants, normalized_id)
+            message_text = self._existing_variants_message(normalized_id, existing_variants, source="youtube")
 
             await update.message.reply_text(
                 message_text,
@@ -698,7 +744,29 @@ class YouTubeTelegramBot:
         # Check for Reddit submission URLs
         reddit_url = self._extract_reddit_url(message_text)
         if reddit_url:
-            await self._process_reddit_submission(update, reddit_url.strip())
+            reddit_url = reddit_url.strip()
+            reddit_id = self._extract_reddit_id(reddit_url)
+            if not reddit_id:
+                await update.message.reply_text("❌ Could not determine Reddit thread ID from that link.")
+                return
+
+            content_id = f"reddit:{reddit_id}"
+            self.current_item = {
+                "source": "reddit",
+                "url": reddit_url,
+                "content_id": content_id,
+                "raw_id": reddit_id,
+                "normalized_id": reddit_id,
+            }
+
+            existing_variants = self._discover_summary_types(content_id)
+            reply_markup = self._build_summary_keyboard(existing_variants, content_id)
+            message_text = self._existing_variants_message(content_id, existing_variants, source="reddit")
+
+            await update.message.reply_text(
+                message_text,
+                reply_markup=reply_markup
+            )
             return
 
         await update.message.reply_text(
@@ -745,7 +813,7 @@ class YouTubeTelegramBot:
                 return
             
             # Process with proficiency level (None for regular summaries)
-            await self._process_video_summary(query, summary_type, user_name, proficiency_level)
+            await self._process_content_summary(query, summary_type, user_name, proficiency_level)
         
         # Handle delete requests
         elif callback_data.startswith('delete_'):
@@ -829,7 +897,7 @@ class YouTubeTelegramBot:
             # One-off TTS for the exact summary on this message
             try:
                 parts = callback_data.split(':')
-                video_id = parts[1] if len(parts) >= 3 else (self.last_video_id or '')
+                video_id = parts[1] if len(parts) >= 3 else (self._current_normalized_id() or '')
                 variant = parts[2] if len(parts) >= 3 else ''
 
                 chat_id = query.message.chat.id
@@ -892,7 +960,7 @@ class YouTubeTelegramBot:
             # One-tap quiz generation from Key Points
             try:
                 parts = callback_data.split(':')
-                video_id = parts[1] if len(parts) >= 2 else (self.last_video_id or '')
+                video_id = parts[1] if len(parts) >= 2 else (self._current_normalized_id() or '')
                 if not video_id:
                     await query.answer("Missing video id", show_alert=True)
                     return
@@ -909,7 +977,7 @@ class YouTubeTelegramBot:
                 kp_text = self._resolve_summary_text(video_id, 'bullet-points')
                 if not kp_text:
                     # synthesize ephemeral Key Points using available URL
-                    url = self._resolve_video_url(video_id, self.last_video_url)
+                    url = self._resolve_video_url(video_id, self._current_url())
                     if not url:
                         await query.edit_message_text("❌ No source available for quiz generation.")
                         return
@@ -1017,9 +1085,11 @@ class YouTubeTelegramBot:
     
     async def _show_main_summary_options(self, query):
         """Show the main summary type selection buttons"""
-        variants = self._discover_summary_types(self.last_video_id) if self.last_video_id else []
-        reply_markup = self._build_summary_keyboard(variants, self.last_video_id)
-        message = self._existing_variants_message(self.last_video_id or '', variants)
+        content_id = (self.current_item or {}).get("content_id")
+        source = (self.current_item or {}).get("source", "youtube")
+        variants = self._discover_summary_types(content_id) if content_id else []
+        reply_markup = self._build_summary_keyboard(variants, content_id)
+        message = self._existing_variants_message(content_id or '', variants, source=source)
         await query.edit_message_text(
             message,
             reply_markup=reply_markup
@@ -1329,110 +1399,22 @@ class YouTubeTelegramBot:
             await query.edit_message_text("🇪🇸 **Elige tu nivel de español:**", 
                                         parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     
-    async def _process_reddit_submission(self, update: Update, reddit_url: str):
-        """Fetch, summarize, and sync a Reddit thread."""
-        user_name = update.effective_user.first_name or "Unknown"
-        logging.info(f"🧵 Reddit request from {user_name}: {reddit_url}")
+    async def _process_content_summary(self, query, summary_type: str, user_name: str, proficiency_level: str = None):
+        """Process summarization for the currently selected content item."""
+        item = self.current_item or {}
+        content_id = item.get("content_id")
+        source = item.get("source", "youtube")
+        url = item.get("url")
 
-        if not self.summarizer:
-            await update.message.reply_text("❌ Summarizer not available. Please try again later.")
+        if not content_id:
+            await query.edit_message_text("❌ No content in context. Please send a link first.")
             return
 
-        status_message = await update.message.reply_text("🧵 Fetching Reddit thread and generating summary...")
+        if not url:
+            url = self._resolve_video_url(content_id)
 
-        try:
-            result = await self.summarizer.process_reddit_thread(reddit_url)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logging.exception(f"Reddit processing error for {reddit_url}: {exc}")
-            await status_message.edit_text("❌ Failed to process Reddit thread. Check logs for details.")
-            return
-
-        if not result:
-            await status_message.edit_text("❌ Reddit processing returned no result.")
-            return
-
-        if result.get("error"):
-            await status_message.edit_text(f"❌ Reddit processing error: {result['error']}")
-            return
-
-        # Export report
-        try:
-            report_dict = create_report_from_youtube_summarizer(result)
-            json_path = Path(self.json_exporter.save_report(report_dict))
-        except Exception as export_exc:
-            logging.exception(f"Failed to export Reddit report: {export_exc}")
-            await status_message.edit_text("⚠️ Summary generated but failed to write JSON report.")
-            return
-
-        content_id = result.get("id") or json_path.stem
-        summary_type = "comprehensive"
-        ledger_entry = {
-            "stem": json_path.stem,
-            "json": str(json_path),
-            "mp3": None,
-            "synced": False,
-            "created_at": datetime.now().isoformat(),
-            "source": "reddit",
-        }
-        ledger.upsert(content_id, summary_type, ledger_entry)
-
-        sync_targets: List[str] = []
-        try:
-            sync_results = dual_sync_upload(json_path)
-            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-            if sqlite_ok:
-                sync_targets.append("sqlite")
-            if postgres_ok:
-                sync_targets.append("postgres")
-            if sync_targets:
-                ledger_entry.update({
-                    "synced": True,
-                    "last_synced": datetime.now().isoformat(),
-                    "sync_targets": sync_targets,
-                })
-                ledger.upsert(content_id, summary_type, ledger_entry)
-        except Exception as sync_exc:
-            logging.warning(f"Dual-sync error for Reddit content {content_id}: {sync_exc}")
-
-        await status_message.edit_text("✅ Reddit thread processed! Sending summary...")
-
-        summary_text = self._extract_summary_text(result.get("summary"))
-        title = result.get("title", "Reddit thread")
-        source_url = result.get("canonical_url") or reddit_url
-        source_meta = result.get("source_metadata", {}).get("reddit", {})
-        subreddit = source_meta.get("subreddit") or result.get("metadata", {}).get("subreddit")
-
-        header_lines = [
-            "✅ Reddit Thread Summary",
-            f"Title: {title}",
-            f"Subreddit: r/{subreddit}" if subreddit else "",
-            f"Source: {source_url}",
-        ]
-        header = "\n".join(line for line in header_lines if line).strip()
-
-        footer_lines = [
-            "",
-            f"Stored report: {json_path.name}",
-        ]
-        if sync_targets:
-            footer_lines.append(f"Synced to: {', '.join(sync_targets)}")
-        else:
-            footer_lines.append("Sync pending – will retry automatically.")
-        footer = "\n".join(footer_lines)
-
-        body = summary_text or "Summary text unavailable."
-        full_message = f"{header}\n\n{body}\n{footer}"
-
-        chunks = self._split_text_into_chunks(full_message, self.MAX_MESSAGE_LENGTH - 50)
-        for i, chunk in enumerate(chunks, 1):
-            prefix = f"(Part {i}/{len(chunks)})\n" if len(chunks) > 1 else ""
-            await update.message.reply_text(prefix + chunk)
-
-    async def _process_video_summary(self, query, summary_type: str, user_name: str, proficiency_level: str = None):
-        """Process video summarization request."""
-        if not self.last_video_url:
-            await query.edit_message_text("❌ No YouTube URL found. Please send a URL first.")
+        if not url:
+            await query.edit_message_text("❌ Could not resolve the source URL. Please resend the link.")
             return
         
         if not self.summarizer:
@@ -1458,22 +1440,27 @@ class YouTubeTelegramBot:
         elif base_type.startswith("audio-es"):
             level_suffix = " (with vocabulary help)" if proficiency_level in ["beginner", "intermediate"] else ""
             message = f"🇪🇸 Creating Spanish audio summary{level_suffix}... This may take a moment."
+        elif source == "reddit":
+            message = processing_messages.get(base_type, f"🧵 Processing {summary_type}... This may take a moment.")
         else:
             message = processing_messages.get(base_type, f"🔄 Processing {summary_type}... This may take a moment.")
         
         await query.edit_message_text(message)
         
         try:
-            # Extract video ID
-            video_id = self.last_video_id or self._normalize_video_id(self._extract_video_id(self.last_video_url))
-            
+            # Determine ledger/content identifiers
+            normalized_id = self._normalize_content_id(content_id)
+            video_id = normalized_id
+            ledger_id = content_id
+            display_id = f"{source}:{normalized_id}" if source != "youtube" else normalized_id
+
             # Check ledger before processing
-            entry = ledger.get(video_id, summary_type)
+            entry = ledger.get(ledger_id, summary_type)
             if entry:
-                logging.info(f"📄 Found existing entry for {video_id}:{summary_type}")
+                logging.info(f"📄 Found existing entry for {display_id}:{summary_type}")
                 if render_probe.render_has(entry.get("stem")):
-                    await self._send_existing_summary_notice(query, video_id, summary_type)
-                    logging.info(f"♻️ SKIPPED: {video_id} already on dashboard")
+                    await self._send_existing_summary_notice(query, ledger_id, summary_type)
+                    logging.info(f"♻️ SKIPPED: {display_id} already on dashboard")
                     return
                 else:
                     # Content exists in DB but not Dashboard - proceed with fresh processing
@@ -1482,26 +1469,39 @@ class YouTubeTelegramBot:
             
             # Process the video (new processing)
             logging.info(
-                f"🎬 PROCESSING: {video_id} | {summary_type} | user: {user_name} | URL: {self.last_video_url}"
+                f"🎬 PROCESSING: {display_id} | {summary_type} | user: {user_name} | URL: {url}"
             )
             logging.info(
                 f"🧠 LLM: {self.summarizer.llm_provider}/{self.summarizer.model}"
             )
             
-            result = await self.summarizer.process_video(
-                self.last_video_url,
-                summary_type=summary_type,
-                proficiency_level=proficiency_level
-            )
+            if source == "reddit":
+                result = await self.summarizer.process_reddit_thread(
+                    url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency_level
+                )
+            else:
+                result = await self.summarizer.process_video(
+                    url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency_level
+                )
             
             if not result:
-                await query.edit_message_text("❌ Failed to process video. Please check the URL and try again.")
+                await query.edit_message_text("❌ Failed to process content. Please check the URL and try again.")
                 return
-                
-            # Check for transcript extraction errors - abort to prevent empty dashboard cards
-            if result.get('error') and 'No transcript available' in result.get('error', ''):
-                await query.edit_message_text(f"⚠️ {result.get('error')}\n\nSkipping this video to prevent empty dashboard entries.")
-                logging.info(f"❌ ABORTED: {result.get('error')}")
+
+            error_message = result.get('error') if isinstance(result, dict) else None
+            if error_message:
+                if 'No transcript available' in error_message:
+                    await query.edit_message_text(
+                        f"⚠️ {error_message}\n\nSkipping this item to prevent empty dashboard entries."
+                    )
+                    logging.info(f"❌ ABORTED: {error_message}")
+                else:
+                    await query.edit_message_text(f"❌ {error_message}")
+                    logging.info(f"❌ Processing error: {error_message}")
                 return
             
             # Export to JSON for dashboard (skip HTML to avoid duplicates)
@@ -1549,8 +1549,8 @@ class YouTubeTelegramBot:
                         if proficiency_level in proficiency_badges:
                             ledger_entry["proficiency_badge"] = proficiency_badges[proficiency_level][lang_code]
                 
-                ledger.upsert(video_id, summary_type, ledger_entry)
-                logging.info(f"📊 Added to ledger: {video_id}:{summary_type}")
+                ledger.upsert(ledger_id, summary_type, ledger_entry)
+                logging.info(f"📊 Added to ledger: {display_id}:{summary_type}")
                 
                 # Sync to Render dashboard (hybrid architecture)
                 # For audio summaries, delay sync until after TTS generation to include MP3 metadata
@@ -1567,8 +1567,7 @@ class YouTubeTelegramBot:
 
                         # Extract video ID for logging
                         video_metadata = result.get('metadata', {})
-                        video_id = video_metadata.get('video_id', '')
-                        content_id = f"yt:{video_id}" if video_id else stem
+                        result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
 
                         # Use dual-sync with JSON report path
                         report_path = Path(f"/app/data/reports/{stem}.json")
@@ -1583,15 +1582,15 @@ class YouTubeTelegramBot:
                             targets = []
                             if sqlite_ok: targets.append("SQLite")
                             if postgres_ok: targets.append("PostgreSQL")
-                            logging.info(f"✅ DUAL-SYNC SUCCESS: 📊 → {content_id} (targets: {', '.join(targets)})")
+                            logging.info(f"✅ DUAL-SYNC SUCCESS: 📊 → {result_content_id} (targets: {', '.join(targets)})")
 
                             # Update ledger and mark as synced
-                            entry = ledger.get(video_id, summary_type)
+                            entry = ledger.get(ledger_id, summary_type)
                             if entry:
                                 entry["synced"] = True
                                 entry["last_synced"] = datetime.now().isoformat()
                                 entry["sync_targets"] = targets  # Track which targets succeeded
-                                ledger.upsert(video_id, summary_type, entry)
+                                ledger.upsert(ledger_id, summary_type, entry)
                                 logging.info(f"📊 Updated ledger: synced=True, targets={targets}")
                         else:
                             logging.error(f"❌ DUAL-SYNC FAILED: All targets failed for {stem}")
@@ -1607,10 +1606,9 @@ class YouTubeTelegramBot:
 
                         # Extract video ID for logging
                         video_metadata = result.get('metadata', {})
-                        video_id = video_metadata.get('video_id', '')
-                        content_id = f"yt:{video_id}" if video_id else stem
+                        result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
 
-                        logging.info(f"📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for {content_id}")
+                        logging.info(f"📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for {result_content_id}")
 
                         # Use dual-sync with JSON report path (content only, audio comes later)
                         report_path = json_path_obj  # Use the actual JSON file path instead of reconstructing
@@ -1636,16 +1634,16 @@ class YouTubeTelegramBot:
                                 targets = []
                                 if sqlite_ok: targets.append("SQLite")
                                 if postgres_ok: targets.append("PostgreSQL")
-                                logging.info(f"✅ DUAL-SYNC CONTENT: 📊 → {content_id} (targets: {', '.join(targets)})")
+                                logging.info(f"✅ DUAL-SYNC CONTENT: 📊 → {result_content_id} (targets: {', '.join(targets)})")
                                 logging.info(f"⏳ Audio sync will happen after TTS generation")
 
                                 # Update ledger and mark as synced
-                                entry = ledger.get(video_id, summary_type)
+                                entry = ledger.get(ledger_id, summary_type)
                                 if entry:
                                     entry["synced"] = True
                                     entry["last_synced"] = datetime.now().isoformat()
                                     entry["sync_targets"] = targets  # Track which targets succeeded
-                                    ledger.upsert(video_id, summary_type, entry)
+                                    ledger.upsert(ledger_id, summary_type, entry)
                                     logging.info(f"📊 Updated ledger: synced=True, targets={targets}")
                             else:
                                 logging.error(f"❌ DUAL-SYNC CONTENT FAILED: All targets failed for {stem}")
@@ -1666,19 +1664,23 @@ class YouTubeTelegramBot:
             await self._send_formatted_response(query, result, summary_type, export_info)
             
         except Exception as e:
-            logging.error(f"Error processing video {self.last_video_url}: {e}")
-            await query.edit_message_text(f"❌ Error processing video: {str(e)[:100]}...")
+            logging.error(f"Error processing content {url}: {e}")
+            await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
     
     async def _send_formatted_response(self, query, result: Dict[str, Any], summary_type: str, export_info: Dict = None):
         """Send formatted summary response."""
         try:
-            # Get video metadata
+            # Get base metadata
             video_info = result.get('metadata', {})
-            title = video_info.get('title', 'Unknown Title')
-            channel = video_info.get('uploader') or video_info.get('channel') or 'Unknown Channel'
+            source = result.get('content_source') or self._current_source()
+            title = result.get('title') or video_info.get('title') or 'Untitled content'
+            channel = (video_info.get('uploader') or video_info.get('channel') or video_info.get('author')
+                      or video_info.get('subreddit') or 'Unknown source')
             duration_info = self._format_duration_and_savings(video_info)
+
             # Base identifiers used by action buttons and caching
-            video_id = video_info.get('video_id', '')
+            universal_id = result.get('id') or video_info.get('video_id') or self._current_content_id() or ''
+            video_id = self._normalize_content_id(universal_id)
             base_type = (summary_type or '').split(':', 1)[0]
             
             # Get summary content - handle both old and new summary structures
@@ -1724,9 +1726,11 @@ class YouTubeTelegramBot:
             # (For audio summaries, TTS will be generated separately below)
             
             # Format response header (without summary content)
+            source_icon = '🧵' if source == 'reddit' else '🎬'
+            channel_icon = '👤' if source == 'reddit' else '📺'
             header_parts = [
-                f"🎬 **{self._escape_markdown(title)}**",
-                f"📺 {self._escape_markdown(channel)}",
+                f"{source_icon} **{self._escape_markdown(title)}**",
+                f"{channel_icon} {self._escape_markdown(channel)}",
                 duration_info,
                 "",
                 f"📝 **{summary_type.replace('-', ' ').title()} Summary:**"
@@ -1906,12 +1910,12 @@ class YouTubeTelegramBot:
                             logging.info(f"🗄️ SYNC: Syncing SQLite database (contains new record + audio metadata)...")
                             
                             # Update ledger with audio path 
-                            entry = ledger.get(video_id, summary_type)
+                            entry = ledger.get(ledger_id, summary_type)
                             if entry:
                                 entry["mp3"] = str(audio_filepath)
                                 entry["synced"] = True
                                 entry["last_synced"] = datetime.now().isoformat()
-                                ledger.upsert(video_id, summary_type, entry)
+                                ledger.upsert(ledger_id, summary_type, entry)
                                 logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
                             
                             # Dual-sync content + audio to configured targets (T-Y020A)
