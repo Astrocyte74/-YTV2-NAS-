@@ -262,6 +262,11 @@ class JSONReportGenerator:
         if not self.sqlite_db:
             return
         
+        if report.get('content_source') and report.get('content_source') != 'youtube':
+            # SQLite schema is tuned for YouTube ingest; skip other sources.
+            print("ℹ️ Skipping SQLite save for non-YouTube content")
+            return
+        
         try:
             # Extract data for SQLite using same structure as our manual script
             video_id = report.get('id', '')
@@ -717,10 +722,13 @@ class JSONReportGenerator:
     def _generate_filename(self, report: Dict[str, Any]) -> str:
         """Generate a clean filename for the report."""
         # Handle both universal schema and legacy schema
-        if 'content_source' in report and report.get('content_source') == 'youtube':
-            # Universal schema format
-            title = report.get("title", "unknown_video")
-            video_id = report.get('source_metadata', {}).get('youtube', {}).get('video_id', '')
+        if 'content_source' in report:
+            title = report.get("title", "unknown_content")
+            content_id = report.get("id", "")
+            if report.get('content_source') == 'youtube':
+                video_id = report.get('source_metadata', {}).get('youtube', {}).get('video_id', '')
+            else:
+                video_id = content_id.split(':', 1)[-1] if content_id else ''
         else:
             # Legacy schema format
             video_info = report.get("video", {})
@@ -778,7 +786,7 @@ def create_report_from_youtube_summarizer(summarizer_result: Dict[str, Any],
         Generated report dictionary in universal schema format
     """
     # Check if summarizer_result already has universal schema structure
-    if 'content_source' in summarizer_result and summarizer_result.get('content_source') == 'youtube':
+    if 'content_source' in summarizer_result:
         # Modern universal schema format - pass through directly with minimal processing
         # Just ensure we have the required metadata structure
         if 'metadata' not in summarizer_result:

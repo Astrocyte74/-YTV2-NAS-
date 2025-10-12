@@ -26,6 +26,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **🎵 Audio Generation**: Multi-language TTS with vocabulary scaffolding (FR/ES variants)
 - **📊 Structured Reports**: JSON + HTML summaries with language metadata and key topics
 - **🌐 Dashboard Sync**: Postgres ingest via dual-sync coordinator (`POSTGRES_ONLY=true`)
+- **🧵 Reddit Thread Support**: Fetch saved Reddit submissions and summarize them alongside YouTube videos
 - **⚠️ Resilient Metadata**: Falls back to YouTube watch-page parsing when yt-dlp formats are blocked
 - **⚙️ Multi-AI Support**: OpenRouter (Gemini Flash Lite), OpenAI, Anthropic
 - **🔧 Docker Ready**: Easy NAS deployment via Portainer
@@ -59,6 +60,12 @@ YTV2 uses a **hybrid architecture** with separated concerns:
    ANTHROPIC_API_KEY=your_anthropic_key_here
    # OR  
    OPENROUTER_API_KEY=your_openrouter_key_here
+
+   # Optional Reddit integration (non-YouTube sources)
+   REDDIT_CLIENT_ID=your_reddit_client_id
+   REDDIT_CLIENT_SECRET=
+   REDDIT_REFRESH_TOKEN=your_reddit_refresh_token
+   REDDIT_USER_AGENT="Summarizer by u/your_username"
    
    # Dashboard Sync (Postgres ingest)
    POSTGRES_DASHBOARD_URL=your_dashboard_url_here
@@ -117,6 +124,25 @@ POSTGRES_ONLY=true
 SQLITE_SYNC_ENABLED=false
 ```
 
+### Reddit Integration (Optional)
+
+Enable Reddit thread ingestion by supplying OAuth credentials from a Reddit "installed app":
+
+```bash
+# Required for Reddit fetcher
+REDDIT_CLIENT_ID=your_reddit_client_id
+REDDIT_CLIENT_SECRET=         # leave blank for installed apps
+REDDIT_REFRESH_TOKEN=your_refresh_token
+REDDIT_USER_AGENT="Summarizer by u/your_username"
+```
+
+To generate these values:
+- Create an "installed app" at https://www.reddit.com/prefs/apps
+- Copy the `client_id` (the 14-character string under the app name)
+- Leave the client secret empty
+- Run the OAuth flow once to obtain a long-lived refresh token
+- Use a descriptive user agent (Reddit recommends `app-name by u/<username>`)
+
 ## 📁 Project Structure
 
 ### Essential Files
@@ -165,8 +191,8 @@ docker-compose down && docker-compose up -d
 
 ## 🔄 Usage Workflow
 
-1. **Send YouTube URL** to your Telegram bot
-2. **Bot processes** video (download → transcribe → summarize)
+1. **Send YouTube or Reddit URL** to your Telegram bot
+2. **Bot processes** video/thread (download/fetch → transcribe/aggregate → summarize)
 3. **Reports generated** in `data/reports/` as JSON
 4. **Audio exported** to `exports/` directory  
 5. **Auto-sync** uploads to Dashboard

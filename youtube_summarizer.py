@@ -12,9 +12,9 @@ import re
 import subprocess
 import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import yt_dlp
 
@@ -45,6 +45,14 @@ import requests
 # Import LLM configuration manager
 from llm_config import llm_config
 
+try:
+    from modules.sources import RedditFetcher, RedditFetcherError
+except ImportError:  # pragma: no cover - optional dependency
+    RedditFetcher = None
+
+    class RedditFetcherError(Exception):
+        """Placeholder error used when Reddit dependencies are unavailable."""
+
 class YouTubeSummarizer:
     def __init__(self, llm_provider: str = None, model: str = None, ollama_base_url: str = None):
         """Initialize the YouTube Summarizer with mkpy LLM integration
@@ -69,6 +77,9 @@ class YouTubeSummarizer:
         
         # Initialize LLM based on determined configuration
         self._initialize_llm(api_key)
+        
+        # Lazy-initialized Reddit fetcher
+        self._reddit_fetcher: Optional["RedditFetcher"] = None
     
     def _initialize_llm(self, api_key: str):
         """Initialize the LLM based on provider and model"""
@@ -100,6 +111,195 @@ class YouTubeSummarizer:
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
+
+    def _get_reddit_fetcher(self):
+        """Lazily construct and memoize the Reddit fetcher."""
+        if RedditFetcher is None:
+            raise RedditFetcherError("Reddit support is unavailable – install PRAW and configure credentials.")
+        if self._reddit_fetcher is None:
+            self._reddit_fetcher = RedditFetcher()
+        return self._reddit_fetcher
+
+    async def process_text_content(
+        self,
+        *,
+        content_id: str,
+        text: str,
+        metadata: Dict[str, Any],
+        summary_type: str = "comprehensive",
+        proficiency_level: Optional[str] = None,
+        source: str = "web",
+        source_metadata: Optional[Dict[str, Any]] = None,
+        assume_has_audio: bool = False,
+    ) -> Dict[str, Any]:
+        """Universal text processing pipeline used by non-YouTube sources."""
+
+        transcript = (text or "").strip()
+        if len(transcript) < 50:
+            return {
+                "error": "No usable content available for summarization.",
+                "metadata": metadata,
+                "processed_at": datetime.now().isoformat(),
+                "content_source": source,
+                "id": content_id,
+            }
+
+        safe_metadata = dict(metadata or {})
+        safe_metadata.setdefault("title", "Untitled content")
+        safe_metadata.setdefault("uploader", safe_metadata.get("author") or "Unknown author")
+        safe_metadata.setdefault("upload_date", datetime.utcnow().strftime("%Y%m%d"))
+        safe_metadata.setdefault("duration", safe_metadata.get("duration") or 0)
+        safe_metadata.setdefault("url", safe_metadata.get("url") or "")
+        safe_metadata.setdefault("language", safe_metadata.get("language") or "en")
+        safe_metadata.setdefault("published_at", safe_metadata.get("published_at") or datetime.utcnow().isoformat())
+
+        transcript_language = safe_metadata.get("language", "en")
+
+        summary_data = await self.generate_summary(transcript, safe_metadata, summary_type, proficiency_level)
+
+        summary_language = None
+        if isinstance(summary_data, dict):
+            summary_language = summary_data.get("language")
+            if "summary" not in summary_data and isinstance(summary_data.get("audio"), str):
+                summary_data["summary"] = summary_data["audio"]
+
+        if isinstance(summary_data, str) and not summary_language:
+            summary_language = transcript_language
+
+        print("Analyzing content...")
+        if isinstance(summary_data, dict):
+            summary_text = summary_data.get("summary", "") or ""
+            if not summary_text:
+                for key in ("comprehensive", "key_insights", "bullet_points", "audio"):
+                    candidate = summary_data.get(key)
+                    if isinstance(candidate, str) and candidate.strip():
+                        summary_text = candidate.strip()
+                        break
+        else:
+            summary_text = str(summary_data)
+
+        if not summary_text.strip():
+            print("⚠️ Summary text unavailable for analysis. Falling back to content excerpt.")
+            summary_text = transcript[:6000]
+
+        analysis_data = await self.analyze_content(summary_text, safe_metadata)
+        if summary_language:
+            analysis_data["language"] = summary_language
+        else:
+            summary_language = analysis_data.get("language", transcript_language)
+
+        media = {
+            "has_audio": bool(assume_has_audio),
+            "audio_duration_seconds": safe_metadata.get("duration", 0) if assume_has_audio else 0,
+            "has_transcript": bool(transcript),
+            "transcript_chars": len(transcript),
+        }
+
+        result = {
+            "id": content_id,
+            "content_source": source,
+            "title": safe_metadata.get("title", "")[:300],
+            "canonical_url": safe_metadata.get("url", ""),
+            "thumbnail_url": safe_metadata.get("thumbnail", ""),
+            "published_at": safe_metadata.get("published_at"),
+            "duration_seconds": safe_metadata.get("duration", 0),
+            "word_count": len(transcript.split()) if transcript else 0,
+            "media": media,
+            "source_metadata": {source: source_metadata or {}},
+            "analysis": analysis_data,
+            "original_language": transcript_language,
+            "summary_language": summary_language,
+            "audio_language": summary_language if assume_has_audio else None,
+            "url": safe_metadata.get("url", ""),
+            "metadata": safe_metadata,
+            "transcript": transcript,
+            "summary": summary_data,
+            "processed_at": datetime.now().isoformat(),
+            "processor_info": {
+                "llm_provider": self.llm_provider,
+                "model": getattr(self.llm, "model_name", getattr(self.llm, "model", self.model)),
+            },
+        }
+
+        return result
+
+    async def process_reddit_thread(
+        self,
+        reddit_url: str,
+        summary_type: str = "comprehensive",
+        proficiency_level: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fetch a Reddit submission and run it through the summarization pipeline."""
+        try:
+            fetcher = self._get_reddit_fetcher()
+        except RedditFetcherError as exc:
+            return {
+                "error": str(exc),
+                "url": reddit_url,
+                "processed_at": datetime.now().isoformat(),
+                "content_source": "reddit",
+            }
+
+        try:
+            fetched = fetcher.fetch(reddit_url)
+        except RedditFetcherError as exc:
+            return {
+                "error": str(exc),
+                "url": reddit_url,
+                "processed_at": datetime.now().isoformat(),
+                "content_source": "reddit",
+            }
+
+        data = fetched.to_dict()
+        content_text = data["combined_text"]
+        content_id = f"reddit:{data['id']}"
+
+        created_dt = datetime.fromtimestamp(data["created_utc"], tz=timezone.utc)
+        upload_date = created_dt.strftime("%Y%m%d")
+
+        metadata = {
+            "title": data["title"],
+            "uploader": f"u/{data['author']}",
+            "author": data["author"],
+            "channel": f"r/{data['subreddit']}",
+            "channel_id": data["subreddit"],
+            "upload_date": upload_date,
+            "duration": 0,
+            "url": data["canonical_url"],
+            "language": data.get("language") or "en",
+            "published_at": data["created_at_iso"],
+            "thumbnail": data.get("thumbnail"),
+            "subreddit": data["subreddit"],
+            "score": data["score"],
+            "upvote_ratio": data["upvote_ratio"],
+            "num_comments": data["num_comments"],
+            "flair": data.get("flair"),
+            "comment_snippets": data.get("comment_snippets", []),
+        }
+
+        source_metadata = {
+            "submission_id": data["id"],
+            "subreddit": data["subreddit"],
+            "author": data["author"],
+            "score": data["score"],
+            "upvote_ratio": data["upvote_ratio"],
+            "num_comments": data["num_comments"],
+            "flair": data.get("flair"),
+            "permalink": data["canonical_url"],
+            "comment_samples": data.get("comment_snippets", []),
+            "selftext_length": len(data.get("selftext", "")),
+        }
+
+        return await self.process_text_content(
+            content_id=content_id,
+            text=content_text,
+            metadata=metadata,
+            summary_type=summary_type,
+            proficiency_level=proficiency_level,
+            source="reddit",
+            source_metadata=source_metadata,
+            assume_has_audio=False,
+        )
     
     def _extract_with_robust_ytdlp(self, youtube_url: str, ydl_opts: dict, attempt: int = 1) -> Optional[dict]:
         """Extract info using yt-dlp with robust error handling and retries"""

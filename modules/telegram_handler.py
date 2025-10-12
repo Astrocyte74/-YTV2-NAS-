@@ -81,6 +81,10 @@ class YouTubeTelegramBot:
         self.youtube_url_pattern = re.compile(
             r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})'
         )
+        self.reddit_url_pattern = re.compile(
+            r'(https?://(?:www\.)?(?:reddit\.com|redd\.it)/[^\s]+)',
+            re.IGNORECASE,
+        )
         
         # Telegram message length limit
         self.MAX_MESSAGE_LENGTH = 4096
@@ -115,6 +119,16 @@ class YouTubeTelegramBot:
         if 'v=' in youtube_url:
             return youtube_url.split('v=', 1)[1].split('&')[0]
         return youtube_url.rstrip('/').split('/')[-1]
+
+    def _extract_reddit_url(self, text: str) -> Optional[str]:
+        """Extract the first Reddit URL from the provided text."""
+        if not text:
+            return None
+        match = self.reddit_url_pattern.search(text)
+        if not match:
+            return None
+        url = match.group(1)
+        return url.strip('<>') if url else None
 
     def _friendly_variant_label(self, variant: str) -> str:
         base, _, suffix = variant.partition(':')
@@ -658,37 +672,44 @@ class YouTubeTelegramBot:
         message_text = update.message.text.strip()
         logging.info(f"Received message from {user_name} ({user_id}): {message_text[:100]}...")
         
-        # Check if message contains YouTube URL
+        # Check for YouTube links first (primary flow)
         youtube_match = self.youtube_url_pattern.search(message_text)
-        
-        if not youtube_match:
+        if youtube_match:
+            video_url = self._extract_youtube_url(message_text)
+            if not video_url:
+                await update.message.reply_text("❌ Could not extract a valid YouTube URL from your message.")
+                return
+
+            # Store context for follow-up actions
+            self.last_video_url = video_url
+            raw_video_id = self._extract_video_id(video_url)
+            self.last_video_id = self._normalize_video_id(raw_video_id)
+
+            existing_variants = self._discover_summary_types(self.last_video_id)
+            reply_markup = self._build_summary_keyboard(existing_variants, self.last_video_id)
+            message_text = self._existing_variants_message(self.last_video_id, existing_variants)
+
             await update.message.reply_text(
-                "🔍 Please send a YouTube URL to get started.\n\n"
-                "Supported formats:\n"
-                "• https://youtube.com/watch?v=...\n"
-                "• https://youtu.be/...\n"
-                "• https://m.youtube.com/watch?v=..."
+                message_text,
+                reply_markup=reply_markup
             )
             return
-        
-        # Extract and clean URL
-        video_url = self._extract_youtube_url(message_text)
-        if not video_url:
-            await update.message.reply_text("❌ Could not extract a valid YouTube URL from your message.")
-            return
-        
-        # Store context for follow-up actions
-        self.last_video_url = video_url
-        raw_video_id = self._extract_video_id(video_url)
-        self.last_video_id = self._normalize_video_id(raw_video_id)
 
-        existing_variants = self._discover_summary_types(self.last_video_id)
-        reply_markup = self._build_summary_keyboard(existing_variants, self.last_video_id)
-        message_text = self._existing_variants_message(self.last_video_id, existing_variants)
+        # Check for Reddit submission URLs
+        reddit_url = self._extract_reddit_url(message_text)
+        if reddit_url:
+            await self._process_reddit_submission(update, reddit_url.strip())
+            return
 
         await update.message.reply_text(
-            message_text,
-            reply_markup=reply_markup
+            "🔍 Please send a YouTube or Reddit URL to get started.\n\n"
+            "Supported YouTube formats:\n"
+            "• https://youtube.com/watch?v=...\n"
+            "• https://youtu.be/...\n"
+            "• https://m.youtube.com/watch?v=...\n\n"
+            "Supported Reddit formats:\n"
+            "• https://www.reddit.com/r/<sub>/comments/<id>/...\n"
+            "• https://redd.it/<id>"
         )
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1229,6 +1250,26 @@ class YouTubeTelegramBot:
                             return txt
         return None
 
+    @staticmethod
+    def _extract_summary_text(summary_payload: Any) -> str:
+        """Normalize various summary payload shapes into plain text."""
+        if isinstance(summary_payload, dict):
+            for key in ("summary", "text", "comprehensive", "audio", "content"):
+                value = summary_payload.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            # Check nested variants list
+            variants = summary_payload.get("variants")
+            if isinstance(variants, list):
+                for entry in variants:
+                    if isinstance(entry, dict):
+                        text = entry.get("text") or entry.get("summary") or entry.get("content")
+                        if isinstance(text, str) and text.strip():
+                            return text.strip()
+        elif isinstance(summary_payload, str):
+            return summary_payload.strip()
+        return ""
+
     def _fetch_report_from_dashboard(self, video_id: str) -> Optional[Dict[str, Any]]:
         base = self._get_dashboard_base()
         if not base or not requests:
@@ -1288,6 +1329,106 @@ class YouTubeTelegramBot:
             await query.edit_message_text("🇪🇸 **Elige tu nivel de español:**", 
                                         parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     
+    async def _process_reddit_submission(self, update: Update, reddit_url: str):
+        """Fetch, summarize, and sync a Reddit thread."""
+        user_name = update.effective_user.first_name or "Unknown"
+        logging.info(f"🧵 Reddit request from {user_name}: {reddit_url}")
+
+        if not self.summarizer:
+            await update.message.reply_text("❌ Summarizer not available. Please try again later.")
+            return
+
+        status_message = await update.message.reply_text("🧵 Fetching Reddit thread and generating summary...")
+
+        try:
+            result = await self.summarizer.process_reddit_thread(reddit_url)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logging.exception(f"Reddit processing error for {reddit_url}: {exc}")
+            await status_message.edit_text("❌ Failed to process Reddit thread. Check logs for details.")
+            return
+
+        if not result:
+            await status_message.edit_text("❌ Reddit processing returned no result.")
+            return
+
+        if result.get("error"):
+            await status_message.edit_text(f"❌ Reddit processing error: {result['error']}")
+            return
+
+        # Export report
+        try:
+            report_dict = create_report_from_youtube_summarizer(result)
+            json_path = Path(self.json_exporter.save_report(report_dict))
+        except Exception as export_exc:
+            logging.exception(f"Failed to export Reddit report: {export_exc}")
+            await status_message.edit_text("⚠️ Summary generated but failed to write JSON report.")
+            return
+
+        content_id = result.get("id") or json_path.stem
+        summary_type = "comprehensive"
+        ledger_entry = {
+            "stem": json_path.stem,
+            "json": str(json_path),
+            "mp3": None,
+            "synced": False,
+            "created_at": datetime.now().isoformat(),
+            "source": "reddit",
+        }
+        ledger.upsert(content_id, summary_type, ledger_entry)
+
+        sync_targets: List[str] = []
+        try:
+            sync_results = dual_sync_upload(json_path)
+            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+            if sqlite_ok:
+                sync_targets.append("sqlite")
+            if postgres_ok:
+                sync_targets.append("postgres")
+            if sync_targets:
+                ledger_entry.update({
+                    "synced": True,
+                    "last_synced": datetime.now().isoformat(),
+                    "sync_targets": sync_targets,
+                })
+                ledger.upsert(content_id, summary_type, ledger_entry)
+        except Exception as sync_exc:
+            logging.warning(f"Dual-sync error for Reddit content {content_id}: {sync_exc}")
+
+        await status_message.edit_text("✅ Reddit thread processed! Sending summary...")
+
+        summary_text = self._extract_summary_text(result.get("summary"))
+        title = result.get("title", "Reddit thread")
+        source_url = result.get("canonical_url") or reddit_url
+        source_meta = result.get("source_metadata", {}).get("reddit", {})
+        subreddit = source_meta.get("subreddit") or result.get("metadata", {}).get("subreddit")
+
+        header_lines = [
+            "✅ Reddit Thread Summary",
+            f"Title: {title}",
+            f"Subreddit: r/{subreddit}" if subreddit else "",
+            f"Source: {source_url}",
+        ]
+        header = "\n".join(line for line in header_lines if line).strip()
+
+        footer_lines = [
+            "",
+            f"Stored report: {json_path.name}",
+        ]
+        if sync_targets:
+            footer_lines.append(f"Synced to: {', '.join(sync_targets)}")
+        else:
+            footer_lines.append("Sync pending – will retry automatically.")
+        footer = "\n".join(footer_lines)
+
+        body = summary_text or "Summary text unavailable."
+        full_message = f"{header}\n\n{body}\n{footer}"
+
+        chunks = self._split_text_into_chunks(full_message, self.MAX_MESSAGE_LENGTH - 50)
+        for i, chunk in enumerate(chunks, 1):
+            prefix = f"(Part {i}/{len(chunks)})\n" if len(chunks) > 1 else ""
+            await update.message.reply_text(prefix + chunk)
+
     async def _process_video_summary(self, query, summary_type: str, user_name: str, proficiency_level: str = None):
         """Process video summarization request."""
         if not self.last_video_url:
