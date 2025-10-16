@@ -9,7 +9,7 @@ Utility scripts to assist with operations, testing, and migration tasks. Run the
 - `analyze_json_data.py`, `backfill_*`, `cleanup_reports.py`, etc. – Historical scripts used for data backfills or maintenance. Consult the source before running.
 
 Planned replacements (DB-first):
-- `tools/test_postgres_connect.py` – Connectivity and role permission smoke test (to be added).
-- `tools/test_upsert_content.py` – Inserts one `content` row and a couple of summary variants, then verifies latest selection (to be added).
+- `tools/test_postgres_connect.py` – Connectivity and role permission smoke test.
+- `tools/test_upsert_content.py` – Inserts one `content` row and a couple of summary variants.
 
 > Note: The dashboard is Postgres-only. Write rows directly to the database; do not use HTTP ingest endpoints.

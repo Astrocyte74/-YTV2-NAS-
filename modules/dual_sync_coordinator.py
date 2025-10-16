@@ -22,7 +22,7 @@ from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
 from .render_api_client import create_client_from_env as create_sqlite_client
-from .postgres_sync_client import create_postgres_client_from_env
+from .postgres_writer import create_postgres_writer_from_env
 from .metrics import metrics
 from .event_stream import emit_report_event
 
@@ -85,8 +85,8 @@ class DualSyncCoordinator:
         # PostgreSQL client (if dual-sync or postgres-only, and not disabled)
         if (self.dual_sync_enabled or self.postgres_only) and self.pg_ingest_enabled:
             try:
-                self.postgres_client = create_postgres_client_from_env()
-                logger.info("✅ PostgreSQL client initialized")
+                self.postgres_client = create_postgres_writer_from_env()
+                logger.info("✅ PostgreSQL writer initialized")
             except Exception as e:
                 logger.error(f"❌ Failed to initialize PostgreSQL client: {e}")
                 logger.warning("⚠️  PostgreSQL sync will be skipped")
