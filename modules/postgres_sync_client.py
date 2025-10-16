@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-PostgreSQL Sync Client for YTV2 NAS
-Handles communication with PostgreSQL ingest endpoints on the dashboard.
+DEPRECATED: HTTP ingest client
 
-This client sends content and audio to the new /ingest/* endpoints
-that were implemented in T-Y020C.
+This module targeted dashboard /ingest/* endpoints which have been removed.
+The system is Postgres-only now. Use modules.postgres_writer.PostgresWriter
+for direct database writes. This file is retained temporarily for reference.
 """
 
 import os

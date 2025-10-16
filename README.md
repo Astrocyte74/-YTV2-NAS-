@@ -71,6 +71,11 @@ YTV2 uses a **hybrid architecture** with separated concerns:
    # Prefer a least-privileged role; SSL required on Render
    DATABASE_URL=postgresql://ytv2_ingest:password@host:5432/ytv2?sslmode=require
 
+   # Optional: public base URL for audio files (to build audio variant links)
+   # Example: https://your-host
+   # Result URL becomes: ${AUDIO_PUBLIC_BASE}/exports/<filename>.mp3
+   AUDIO_PUBLIC_BASE=
+
    # Feature flags
    POSTGRES_ONLY=true
    SQLITE_SYNC_ENABLED=false
