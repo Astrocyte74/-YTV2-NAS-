@@ -59,9 +59,8 @@ All new fields go under `source_metadata.youtube` to maintain clean universal sc
 - Main extractor: `/Volumes/Docker/YTV2/youtube_summarizer.py`
 
 ### Render Dashboard (Display Only)
-- Reports: `/data/reports/` (synced from NAS)
-- Audio: `/exports/` (synced from NAS)
 - Dashboard: `https://ytv2.onrender.com`
+- Postgres-backed: reads from database tables only; no JSON sync or refresh endpoint.
 
 ## 🔄 Implementation Phases
 
@@ -120,11 +119,11 @@ python tools/backfill_metadata.py --resume
 python tools/backfill_metadata.py --force --resume
 ```
 
-### ⏳ Phase 4: Sync to Render
-1. Run cleanup on NAS
-2. Run backfill on NAS
-3. Sync JSONs to Render: `rsync -av /Volumes/Docker/YTV2/data/reports/ render:/data/reports/`
-4. Trigger index refresh: `curl https://ytv2.onrender.com/api/refresh`
+### ⏳ Phase 4: Write to Postgres
+1. Run cleanup/backfill on NAS (optional, local JSON)
+2. Upsert `content` and `summaries` rows directly to Postgres
+3. Ensure at least one HTML-bearing summary variant per video
+4. Verify dashboard cards appear via DB query
 
 ## 🧪 Testing Checklist
 

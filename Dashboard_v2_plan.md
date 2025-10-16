@@ -1,8 +1,10 @@
+> Update (2025-10): The dashboard is Postgres-only. Any references to scanning JSON files or REST-based report ingestion are historical. The server queries Postgres directly for cards/filters. Keep JSON as local debugging/backfill only.
+
 ## 📋 At-a-Glance Checklist
 
 **1. Schema & Pipeline (NAS):** Finalize universal schema, enrich pipeline to populate analysis fields for better organization.
-**2. Backfill Script (NAS):** Build simple script to update existing JSON files to the new schema.
-**3. Index + API (Render):** Implement in-memory index and basic API endpoints with filtering and sorting.
+**2. Backfill Script (NAS):** Build simple script to update existing JSON files to the new schema (local-only).
+**3. Index + API (Render):** Query Postgres directly (no JSON scanning). Provide filters backed by SQL.
 **4. Dashboard V2 (Render):** Create clean, responsive dashboard UI with Tailwind and essential filtering.
 **5. Basic Rollout (Render):** Deploy V2 dashboard with simple feature flag, then make it default.
 
@@ -22,7 +24,7 @@ Create a beautiful, responsive dashboard that makes it easy to find and organize
 
 ---
 
-### Architecture Note: NAS vs Render Responsibilities
+### Architecture Note: NAS vs Render Responsibilities (Postgres-only)
 
 The YTV2 platform is architected with a clear division of responsibilities between two main components:
 
@@ -32,9 +34,8 @@ The YTV2 platform is architected with a clear division of responsibilities betwe
     - Backfill and processing scripts (e.g., `tools/backfill_analysis.py`) execute on NAS.
 
 - **Render (API & Dashboard Server)**
-    - Hosts the API, in-memory index, dashboard UI.
-    - On startup, scans processed JSON files from NAS to build the in-memory index.
-    - Serves API endpoints (`/api/filters`, `/api/reports`) and renders the dashboard UI.
+    - Hosts the dashboard UI and Postgres-backed APIs.
+    - Queries Postgres for cards/filters; does not scan JSON or accept uploads.
     - All user-facing interactions and filtering are handled on Render.
 
 This separation ensures clean architecture: NAS focuses on data processing, while Render provides fast, responsive UI.
@@ -87,7 +88,7 @@ REPORTS_DIR=${DATA_ROOT}/reports
 EXPORTS_DIR=${EXPORTS_ROOT}
 ```
 
-**Render expects** `REPORTS_DIR` to be readable and populated by the NAS pipeline or a sync job. See *Phase 2 (Render)* for how the index scans `REPORTS_DIR` at startup.
+Render does not require `REPORTS_DIR`. It queries Postgres on startup and at request time.
 
 ## 🏛️ Phase 1 (NAS): The Universal Data Backbone ✅ COMPLETED
 

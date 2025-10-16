@@ -1,5 +1,7 @@
 # CLAUDE.md - YTV2-NAS Processing Engine
 
+Important note (2025-10): The dashboard is Postgres-only. Do not call `/ingest/*` HTTP endpoints; write directly to Postgres. Ensure at least one summary variant per video has non-null HTML for card eligibility, and set `content.language` for language filters.
+
 This is the **processing component** of the YTV2 hybrid architecture. It now runs in **Postgres-only mode** (no dual SQLite writes) and handles YouTube video processing, AI summarization (Gemini Flash Lite by default), and content generation on your NAS.
 
 ## Project Architecture
@@ -76,10 +78,10 @@ This is the **processing engine** of the YTV2 hybrid architecture:
 - Error handling for various video types and restrictions
 
 #### `nas_sync.py` - Dashboard Synchronization
-- Uploads JSON reports + audio to Postgres ingest endpoints
-- Coordinates retries and health checks via `DualSyncCoordinator`
+- Writes directly to Postgres (no upload endpoints)
+- Coordinates retries and health checks
 - Honors feature flags (`POSTGRES_ONLY`, `SQLITE_SYNC_ENABLED`)
-- Converts legacy JSON reports when re-syncing
+- Converts legacy JSON reports when re-syncing (local-only)
 
 #### `export_utils.py` - Content Export
 - Multi-format export: JSON, Markdown, HTML, PDF
@@ -188,12 +190,11 @@ This component is designed for **NAS deployment** using Docker:
 
 ### Integration with Dashboard
 
-The NAS component syncs with the Postgres dashboard via:
+The NAS component syncs with the Postgres dashboard via direct database writes:
 
-- **HTTP ingest API** (`/ingest/report`, `/ingest/audio`) secured by `INGEST_TOKEN`
-- **DualSyncCoordinator** orchestrating retries and health checks
-- **JSON payloads** containing summary variants (`audio-fr`, etc.) and languages
-- **Optional SSE/WebSocket** on the dashboard for real-time refreshes when new reports arrive
+- UPSERTs into `content` and `summaries` (backing `v_latest_summaries`)
+- Ensure one HTML-bearing variant so cards render
+- Language written to `content.language` (can also mirror in `analysis_json`)
 
 ## PostgreSQL Migration & Legacy Cleanup
 

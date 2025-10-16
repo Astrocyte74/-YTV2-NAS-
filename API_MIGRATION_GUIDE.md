@@ -1,27 +1,26 @@
-# YTV2 API Migration Guide
+# YTV2 API Migration Guide (Deprecated)
 
-This guide documents the migration from database file sync to API-based synchronization between NAS and Render.
+This document describes an intermediate, now-deprecated HTTP ingest phase. The dashboard is Postgres-only and no longer exposes `/ingest/*` endpoints. See `POSTGRES_UPSERT_GUIDE.md` for the current direct-to-Postgres approach.
 
 ## Overview
 
 **Before**: NAS uploaded SQLite database files to Render
-**After**: NAS sends individual content records via Postgres ingest (`/ingest/report`, `/ingest/audio`) using UPSERT logic
+**After (final)**: NAS writes directly to Postgres using UPSERT logic; no HTTP ingest endpoints.
 
 ## Key Changes
 
-### 1. New API Endpoints (Render Side)
+### 1. New API Endpoints (Removed)
 
-- `POST /ingest/report` - Create or update content (UPSERT)
-- `POST /ingest/audio`  - Upload MP3 files and link to content
+Endpoints such as `/ingest/report` and `/ingest/audio` were removed. Use direct database writes instead.
 
-### 2. NAS Components (2025)
+### 2. NAS Components (superseded)
 
 - `modules/postgres_sync_client.py` - Ingest client for Postgres dashboard
 - `modules/dual_sync_coordinator.py` - Coordinates report/audio uploads and health checks
 - Updated `nas_sync.py` - High-level sync entry points (full sync, per-report dual sync)
 - `modules/report_generator.py` - Generates reports; writes to SQLite only when explicitly enabled
 
-### 3. Obsolete Components (already removed)
+### 3. Obsolete Components
 
 - `sync_sqlite_db.py`, `tools/bulk_sync_to_render.py`, `test_database_sync.py`
 - Legacy dashboard endpoints `/api/upload-database` and `/api/upload-report`
@@ -43,9 +42,9 @@ This guide documents the migration from database file sync to API-based synchron
 - ✅ Selective sync (only changed records)
 - ✅ Bandwidth optimization
 
-## Usage
+## Usage (Superseded)
 
-### Environment Variables
+### Environment Variables (legacy)
 ```bash
 # Required for ingest client
 export POSTGRES_DASHBOARD_URL="https://your-dashboard.onrender.com"
@@ -55,7 +54,7 @@ export POSTGRES_ONLY=true
 export SQLITE_SYNC_ENABLED=false
 ```
 
-### New Sync Functions
+### Sync Functions (legacy)
 
 **Full ingest sync (reports + audio):**
 ```python
@@ -76,7 +75,7 @@ The migration maintains limited backward compatibility:
 - `upload_to_render()` converts legacy reports to universal schema before invoking the ingest client
 - `SYNC_SECRET` is still honored for delete callbacks, but ingest auth relies on `INGEST_TOKEN`
 
-## Testing
+## Testing (legacy)
 
 Run the comprehensive test suite:
 ```bash
@@ -88,11 +87,11 @@ Tests verify:
 - Database sync via API  
 - Legacy upload compatibility
 
-## Cleanup
+## Cleanup (legacy)
 
 Legacy cleanup helpers were deprecated; obsolete SQLite scripts have already been removed from `main`.
 
-## Rollback Plan
+## Rollback Plan (legacy)
 
 If issues arise, rollback is possible:
 
@@ -102,7 +101,7 @@ If issues arise, rollback is possible:
 
 The API endpoints support both old and new sync methods during transition.
 
-## Monitoring
+## Monitoring (legacy)
 
 Monitor the new API sync:
 
@@ -137,6 +136,4 @@ Monitor the new API sync:
 
 ---
 
-**Migration completed**: ✅ API-based sync system operational  
-**Legacy system**: ⚠️ Available for rollback if needed  
-**Cleanup**: 🧹 Run cleanup script when confident in new system
+Deprecated in favor of direct Postgres writes. Refer to `POSTGRES_UPSERT_GUIDE.md`.

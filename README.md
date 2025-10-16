@@ -9,14 +9,14 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **🔧 NAS Component** (This project): YouTube processing + Telegram bot
 - **🌐 Dashboard Component**: Web interface + audio playback (deployed to Render)
 
-### How It Works (Postgres-first)
+### How It Works (Postgres-only)
 
 1. **📱 Telegram Bot** receives YouTube URLs from users
 2. **🤖 AI Processing** downloads, transcribes, and summarizes videos (Gemini Flash Lite by default)  
 3. **📊 JSON Reports** generated with structured metadata and language-aware summaries
 4. **🎵 Audio Export** produces TTS audio (single or multi-language) with vocabulary overlays
-5. **🔄 Auto-Sync** uploads reports and audio to the Postgres dashboard ingest endpoints
-6. **🌐 Web Access** users view summaries, filter variants (e.g. `audio-fr`), and play audio via the dashboard
+5. **🗄️ Direct DB Writes** upsert to Postgres (`content` + `summaries` backing `v_latest_summaries`)
+6. **🌐 Web Access** users view summaries; cards appear when at least one variant has HTML
 
 ## ✨ Features
 
@@ -25,7 +25,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **🔄 Duplicate Prevention**: JSON ledger system prevents reprocessing videos
 - **🎵 Audio Generation**: Multi-language TTS with vocabulary scaffolding (FR/ES variants)
 - **📊 Structured Reports**: JSON + HTML summaries with language metadata and key topics
-- **🌐 Dashboard Sync**: Postgres ingest via dual-sync coordinator (`POSTGRES_ONLY=true`)
+- **🗄️ Direct Postgres Writes**: No dashboard upload endpoints; writes happen via UPSERTs
 - **🧵 Reddit Thread Support**: Fetch saved Reddit submissions and summarize them alongside YouTube videos
 - **⚠️ Resilient Metadata**: Falls back to YouTube watch-page parsing when yt-dlp formats are blocked
 - **⚙️ Multi-AI Support**: OpenRouter (Gemini Flash Lite), OpenAI, Anthropic
@@ -38,7 +38,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **Docker** environment (Portainer recommended)
 - **API Keys**: OpenAI, Anthropic, or OpenRouter
 - **Telegram Bot**: Token from @BotFather
-- **Dashboard URL**: Your YTV2-Dashboard Render deployment
+- **Postgres Access**: `DATABASE_URL` or `PGHOST/PGPORT/PGUSER/PGPASSWORD/PGDATABASE/PGSSLMODE`
 
 ### Installation
 
@@ -67,10 +67,9 @@ YTV2 uses a **hybrid architecture** with separated concerns:
    REDDIT_REFRESH_TOKEN=your_reddit_refresh_token
    REDDIT_USER_AGENT="Summarizer by u/your_username"
    
-   # Dashboard Sync (Postgres ingest)
-   POSTGRES_DASHBOARD_URL=your_dashboard_url_here
-   INGEST_TOKEN=your_ingest_token_here
-   SYNC_SECRET=your_shared_secret_here
+   # Direct Postgres connection (dashboard DB)
+   # Prefer a least-privileged role; SSL required on Render
+   DATABASE_URL=postgresql://ytv2_ingest:password@host:5432/ytv2?sslmode=require
 
    # Feature flags
    POSTGRES_ONLY=true
@@ -105,24 +104,15 @@ LLM_MODEL=anthropic/claude-3-sonnet
 OPENROUTER_API_KEY=your_key_here
 ```
 
-### Dashboard Integration
+### Dashboard Integration (Postgres-only)
 
-Connect to your YTV2-Dashboard deployment (Postgres ingest endpoints):
+The dashboard no longer accepts uploads. NAS writes directly to Postgres using UPSERTs into `content` and `summaries` (latest per `(video_id, variant)`).
 
-```bash
-# Render deployment (ingest base URL)
-POSTGRES_DASHBOARD_URL=https://your-dashboard.onrender.com
+Requirements for cards to show:
+- At least one summary variant must have non-null `html`
+- `language` on `content` is used for language filtering
 
-# Postgres ingest token (matches server-side `INGEST_TOKEN`)
-INGEST_TOKEN=your_secure_ingest_token_here
-
-# Shared secret for legacy API/webhooks (still used for certain callbacks)
-SYNC_SECRET=your_secure_secret_here
-
-# Feature flags (recommended defaults)
-POSTGRES_ONLY=true
-SQLITE_SYNC_ENABLED=false
-```
+See `POSTGRES_UPSERT_GUIDE.md` for DDL, indexes, role grants, and UPSERT examples.
 
 ### Reddit Integration (Optional)
 
@@ -193,10 +183,10 @@ docker-compose down && docker-compose up -d
 
 1. **Send YouTube or Reddit URL** to your Telegram bot
 2. **Bot processes** video/thread (download/fetch → transcribe/aggregate → summarize)
-3. **Reports generated** in `data/reports/` as JSON
-4. **Audio exported** to `exports/` directory  
-5. **Auto-sync** uploads to Dashboard
-6. **Access via Dashboard** URL for web viewing
+3. **Optional** JSON report saved to `data/reports/` (local/backfill)
+4. **Optional** audio exported to `exports/`
+5. **Database upsert** to `content` + `summaries` (latest variant logic)
+6. **Access via Dashboard**; cards appear when a variant has HTML
 
 ## 🛠️ Troubleshooting
 
@@ -205,14 +195,14 @@ docker-compose down && docker-compose up -d
 - **yt-dlp warnings**: `Requested format is not available` (normal). Metadata falls back to watch-page scraping.
 - **Import Errors**: Ensure all essential files are present (nothing left in `archive_nas/`).
 - **API Key Issues**: Verify your chosen AI provider key is valid and set in `.env.nas`.
-- **Sync Failures**: Confirm `POSTGRES_DASHBOARD_URL`, `INGEST_TOKEN`, `POSTGRES_ONLY=true`, and `SQLITE_SYNC_ENABLED=false`.
+- **DB Write Failures**: Confirm `DATABASE_URL` (or `PG*` vars), role grants (INSERT/UPDATE on `content`, `summaries`), and SSL settings.
 - **Docker Issues**: Verify environment file and port availability.
 
 ### Log Locations
 - **Container Logs**: `docker-compose logs telegram-bot`
 - **Bot Activity**: Check Telegram bot responses (multi-part summaries noted)
 - **Sync Status**: Monitor dashboard ingest or build a WebSocket/SSE listener for “report created” events
-- **Diagnostics**: See `tools/README.md` for targeted scripts (API tests, ffprobe, audio upload)
+- **Diagnostics**: See `tools/README.md` for targeted scripts (DB tests, ffprobe)
 
 ## 🤖 Telegram Bot Actions (Current)
 
@@ -238,8 +228,7 @@ The NAS bot uses these YTV2‑Dashboard endpoints:
 - `GET /api/quiz/:filename`
 
 Environment:
-- Use `POSTGRES_DASHBOARD_URL` for the Dashboard base URL (legacy `RENDER_DASHBOARD_URL` is still read for compatibility).
-- Quiz endpoints do not require `INGEST_TOKEN` (that applies only to `/ingest/*`).
+- Use `POSTGRES_DASHBOARD_URL` (or `DASHBOARD_BASE_URL`) for Dashboard base URL used by quiz endpoints.
 
 ## 🧩 Quizzernator Deep Link
 
