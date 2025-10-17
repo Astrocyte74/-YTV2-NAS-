@@ -36,6 +36,7 @@ from modules.summary_variants import merge_summary_variants, normalize_variant_i
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
 from nas_sync import upload_to_render, dual_sync_upload
+from modules.render_api_client import create_client_from_env as create_render_client
 import hashlib
 import unicodedata
 
@@ -65,6 +66,7 @@ class YouTubeTelegramBot:
         self.summarizer = None
         self.current_item: Optional[Dict[str, Any]] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self._render_client = None
         
         # Initialize exporters and ensure directories exist
         Path("./data/reports").mkdir(parents=True, exist_ok=True)
@@ -1858,6 +1860,20 @@ class YouTubeTelegramBot:
             video_info = result.get('metadata', {})
             title = video_info.get('title', 'Unknown Title')
             
+            # Determine ledger/content identifiers for follow-up sync
+            ledger_id = (
+                result.get('id')
+                or video_info.get('content_id')
+                or (self.current_item or {}).get('content_id')
+            )
+
+            normalized_video_id = video_info.get('video_id')
+            if not normalized_video_id and ledger_id:
+                normalized_video_id = self._normalize_content_id(ledger_id)
+
+            if not ledger_id and normalized_video_id:
+                ledger_id = f"yt:{normalized_video_id}"
+
             # Generate TTS audio
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             video_id = video_info.get('video_id', 'unknown')
@@ -1875,43 +1891,27 @@ class YouTubeTelegramBot:
                 lambda: asyncio.run(self.summarizer.generate_tts_audio(summary_text, audio_filename, json_filepath))
             )
             
+            base_variant = (summary_type or "").split(":", 1)[0]
+
             if audio_filepath and Path(audio_filepath).exists():
                 metrics.record_tts(True)
-                # Send the audio as a voice message
+                audio_path_obj = Path(audio_filepath)
+                normalized_id = normalized_video_id or video_id
+
+                self._sync_audio_to_targets(
+                    normalized_id,
+                    audio_path_obj,
+                    ledger_id,
+                    summary_type,
+                )
+                self._upload_audio_to_render(normalized_id, audio_path_obj)
+
                 try:
-                    # Create buttons for the audio message too
-                    audio_reply_markup = None
-                    report_id = video_info.get('video_id', '')
-                    if report_id:
-                        dashboard_url = (
-                            os.getenv('DASHBOARD_URL')
-                            or os.getenv('POSTGRES_DASHBOARD_URL')
-                            or 'https://ytv2-dashboard-postgres.onrender.com'
-                        )
-                        if dashboard_url:
-                            # Encode report ID for URL safety
-                            report_id_encoded = urllib.parse.quote(report_id, safe='')
-                            
-                            # Create button row with all three buttons
-                            # Limit callback data to avoid Telegram's 64 byte limit
-                            callback_data = f"delete_{report_id}"
-                            if len(callback_data.encode('utf-8')) > 64:
-                                # Truncate report_id if too long
-                                max_id_len = 64 - len("delete_")
-                                truncated_id = report_id[:max_id_len]
-                                callback_data = f"delete_{truncated_id}"
-                            
-                            # Two rows for clarity
-                            row1 = [
-                                InlineKeyboardButton("📊 Dashboard", url=dashboard_url),
-                                InlineKeyboardButton("📄 Open Summary", url=f"{dashboard_url}#report={report_id_encoded}")
-                            ]
-                            row2 = [
-                                InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
-                                InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data)
-                            ]
-                            audio_reply_markup = InlineKeyboardMarkup([row1, row2])
-                    
+                    audio_reply_markup = self._build_audio_inline_keyboard(
+                        normalized_id,
+                        base_variant,
+                        video_info.get('video_id', '')
+                    )
                     with open(audio_filepath, 'rb') as audio_file:
                         await query.message.reply_voice(
                             voice=audio_file,
@@ -1921,105 +1921,6 @@ class YouTubeTelegramBot:
                             reply_markup=audio_reply_markup
                         )
                     logging.info(f"✅ Successfully sent audio summary for: {title}")
-                    
-                    # Sync SQLite database to Render (SQLite-only workflow)
-                    try:
-                        video_id = video_info.get('video_id', '')
-                        if video_id and audio_filepath and Path(audio_filepath).exists():
-                            logging.info(f"🗄️ SYNC: Syncing SQLite database (contains new record + audio metadata)...")
-                            
-                            # Update ledger with audio path 
-                            entry = ledger.get(ledger_id, summary_type)
-                            if entry:
-                                entry["mp3"] = str(audio_filepath)
-                                entry["synced"] = True
-                                entry["last_synced"] = datetime.now().isoformat()
-                                ledger.upsert(ledger_id, summary_type, entry)
-                                logging.info(f"📊 Updated ledger: synced=True, mp3={Path(audio_filepath).name}")
-                            
-                            # Dual-sync content + audio to configured targets (T-Y020A)
-                            try:
-                                content_id = f"yt:{video_id}"
-                                logging.info(f"📡 Dual-syncing content+audio: {content_id}")
-
-                                # Find the JSON report for this content
-                                reports_dir = Path("/app/data/reports")
-                                report_pattern = f"*{video_id}*.json"
-
-                                # Debug: list what files exist
-                                all_reports = list(reports_dir.glob("*.json"))
-                                logging.info(f"🔍 Looking for pattern '{report_pattern}' in {reports_dir}")
-                                logging.info(f"🔍 Found {len(all_reports)} JSON files in reports dir")
-
-                                # Find exact match by video_id (improved matching)
-                                # Look for files that end with video_id.json or contain _video_id pattern
-                                report_files = []
-                                logging.info(f"🔍 Searching for video_id: '{video_id}' (length: {len(video_id)})")
-
-                                for f in all_reports:
-                                    fname = f.name
-                                    logging.debug(f"🔍 Checking file: {fname}")
-
-                                    # Match patterns: video_id.json, *_video_id.json, or *video_id*.json (but prefer exact endings)
-                                    if fname == f"{video_id}.json":
-                                        report_files.append(f)
-                                        logging.info(f"🔍 Exact match (pattern 1): {fname}")
-                                    elif fname.endswith(f"_{video_id}.json"):
-                                        report_files.append(f)
-                                        logging.info(f"🔍 Exact match (pattern 2): {fname}")
-                                    elif f"_{video_id}_" in fname:
-                                        report_files.append(f)
-                                        logging.info(f"🔍 Exact match (pattern 3): {fname}")
-                                    elif video_id in fname and len(video_id) >= 8:  # Only for long video IDs to avoid false matches
-                                        report_files.append(f)
-                                        logging.info(f"🔍 Substring match: {fname}")
-
-                                logging.info(f"🔍 Pattern matching complete. Found {len(report_files)} matches.")
-
-                                if report_files:
-                                    # Sort by modification time, use most recent
-                                    report_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                                    logging.info(f"🔍 Found {len(report_files)} files matching video_id {video_id}")
-                                    for rf in report_files[:3]:  # Show top 3
-                                        logging.info(f"🔍   - {rf.name}")
-                                else:
-                                    logging.info(f"🔍 No files found containing video_id {video_id}")
-                                    if all_reports:
-                                        # Show some recent files for debugging
-                                        recent_reports = sorted(all_reports, key=lambda p: p.stat().st_mtime, reverse=True)[:3]
-                                        logging.info(f"🔍 Recent files: {[f.name for f in recent_reports]}")
-
-                                if report_files:
-                                    report_path = report_files[0]  # Use most recent
-                                    logging.info(f"✅ Using report: {report_path.name}")
-
-                                    # Dual-sync with both content and audio
-                                    audio_path = Path(audio_filepath) if audio_filepath else None
-                                    sync_results = dual_sync_upload(report_path, audio_path)
-
-                                    # Check results
-                                    sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-                                    postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-
-                                    if sqlite_ok or postgres_ok:
-                                        targets = []
-                                        if sqlite_ok: targets.append("SQLite")
-                                        if postgres_ok: targets.append("PostgreSQL")
-                                        logging.info(f"✅ CONTENT+AUDIO SYNCED: 📊+🎵 → {content_id} (targets: {', '.join(targets)})")
-                                    else:
-                                        logging.warning(f"⚠️ Content+audio sync failed for {content_id}")
-                                else:
-                                    logging.error(f"❌ Could not find JSON report for video_id {video_id}")
-                                    logging.error(f"   Expected file patterns: {video_id}.json, *_{video_id}.json, *{video_id}*.json")
-                                    logging.error(f"   Will skip dual-sync for this video to avoid syncing wrong content")
-
-                            except Exception as db_sync_error:
-                                logging.error(f"❌ Dual-sync error: {db_sync_error}")
-                        else:
-                            logging.warning("⚠️ Missing video_id or audio file for sync")
-                    except Exception as sync_e:
-                        logging.error(f"❌ Audio sync error: {sync_e}")
-                    
                 except Exception as e:
                     logging.error(f"❌ Failed to send voice message: {e}")
             else:
@@ -2164,7 +2065,151 @@ class YouTubeTelegramBot:
         except Exception as e:
             logging.error(f"Error handling audio summary: {e}")
             await query.edit_message_text(f"❌ Error generating audio summary: {str(e)[:100]}...")
-    
+
+    def _build_audio_inline_keyboard(self, video_id: str, base_variant: str, report_id: str):
+        if not report_id:
+            return None
+
+        dashboard_url = (
+            os.getenv('DASHBOARD_URL')
+            or os.getenv('POSTGRES_DASHBOARD_URL')
+            or 'https://ytv2-dashboard-postgres.onrender.com'
+        )
+
+        if not dashboard_url:
+            logging.warning("⚠️ No DASHBOARD_URL set - skipping audio link buttons")
+            return None
+
+        report_id_encoded = urllib.parse.quote(report_id, safe='')
+        callback_data = f"delete_{report_id}"
+        if len(callback_data.encode('utf-8')) > 64:
+            max_id_len = 64 - len("delete_")
+            truncated_id = report_id[:max_id_len]
+            callback_data = f"delete_{truncated_id}"
+
+        listen_cb = f"listen_this:{video_id}:{base_variant}"
+        gen_cb = f"gen_quiz:{video_id}"
+
+        keyboard = [
+            [
+                InlineKeyboardButton("📊 Dashboard", url=dashboard_url),
+                InlineKeyboardButton("📄 Open Summary", url=f"{dashboard_url}#report={report_id_encoded}")
+            ],
+            [
+                InlineKeyboardButton("▶️ Listen", callback_data=listen_cb) if len(listen_cb.encode('utf-8')) <= 64 else None,
+                InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb) if len(gen_cb.encode('utf-8')) <= 64 else None,
+            ],
+            [
+                InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
+                InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data)
+            ]
+        ]
+
+        # Filter out None entries in second row
+        keyboard[1] = [btn for btn in keyboard[1] if btn is not None]
+        keyboard = [row for row in keyboard if row]
+
+        return InlineKeyboardMarkup(keyboard) if keyboard else None
+
+    def _get_render_client(self):
+        if self._render_client:
+            return self._render_client
+        try:
+            client = create_render_client()
+            self._render_client = client
+            return client
+        except Exception as exc:
+            logging.debug(f"Render client not available: {exc}")
+            return None
+
+    def _upload_audio_to_render(self, video_id: str, audio_path: Path) -> None:
+        client = self._get_render_client()
+        if not client:
+            return
+
+        if not audio_path.exists():
+            logging.warning(f"⚠️ Render upload skipped; audio file missing: {audio_path}")
+            return
+
+        content_id = f"yt:{video_id}" if not video_id.startswith("yt:") else video_id
+        try:
+            client.upload_audio_file(audio_path, content_id)
+            logging.info(f"✅ Uploaded audio to Render for {content_id}")
+        except Exception as exc:
+            logging.warning(f"⚠️ Render audio upload failed for {content_id}: {exc}")
+
+    def _sync_audio_to_targets(self, video_id: str, audio_path: Path, ledger_id: Optional[str], summary_type: str) -> None:
+        try:
+            if not video_id:
+                logging.warning("⚠️ Missing video_id for audio sync")
+                return
+            if not audio_path.exists():
+                logging.warning(f"⚠️ Audio file missing for sync: {audio_path}")
+                return
+
+            logging.info("🗄️ SYNC: Syncing SQLite database (contains new record + audio metadata)...")
+
+            if ledger_id:
+                entry = ledger.get(ledger_id, summary_type)
+                if entry:
+                    entry["mp3"] = str(audio_path)
+                    entry["synced"] = True
+                    entry["last_synced"] = datetime.now().isoformat()
+                    ledger.upsert(ledger_id, summary_type, entry)
+                    logging.info(f"📊 Updated ledger: synced=True, mp3={audio_path.name}")
+            else:
+                logging.warning("⚠️ ledger_id unknown; skipping ledger mp3 update")
+
+            content_id = f"yt:{video_id}"
+            reports_dir = Path("/app/data/reports")
+            all_reports = list(reports_dir.glob("*.json"))
+            logging.info(f"🔍 Looking for pattern '*{video_id}*.json' in {reports_dir}")
+            logging.info(f"🔍 Found {len(all_reports)} JSON files in reports dir")
+
+            report_files = []
+            for file_path in all_reports:
+                fname = file_path.name
+                if (
+                    fname == f"{video_id}.json"
+                    or fname.endswith(f"_{video_id}.json")
+                    or f"_{video_id}_" in fname
+                    or (video_id in fname and len(video_id) >= 8)
+                ):
+                    report_files.append(file_path)
+
+            logging.info(f"🔍 Pattern matching complete. Found {len(report_files)} matches.")
+
+            if not report_files:
+                logging.error(f"❌ Could not find JSON report for video_id {video_id}")
+                logging.error(f"   Expected file patterns: {video_id}.json, *_{video_id}.json, *{video_id}*.json")
+                logging.error("   Will skip dual-sync for this video to avoid syncing wrong content")
+                return
+
+            report_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            logging.info(f"🔍 Found {len(report_files)} files matching video_id {video_id}")
+            for rf in report_files[:3]:
+                logging.info(f"🔍   - {rf.name}")
+
+            report_path = report_files[0]
+            logging.info(f"✅ Using report: {report_path.name}")
+
+            sync_results = dual_sync_upload(report_path, audio_path)
+            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+
+            if sqlite_ok or postgres_ok:
+                targets = []
+                if sqlite_ok:
+                    targets.append("SQLite")
+                if postgres_ok:
+                    targets.append("PostgreSQL")
+                logging.info(f"✅ CONTENT+AUDIO SYNCED: 📊+🎵 → {content_id} (targets: {', '.join(targets)})")
+            else:
+                logging.warning(f"⚠️ Content+audio sync failed for {content_id}")
+
+        except Exception as sync_e:
+            logging.error(f"❌ Audio sync error: {sync_e}")
+
     async def _send_long_message(self, query, header_text: str, summary_text: str, reply_markup=None):
         """Send long messages by splitting into multiple Telegram messages if needed."""
         try:

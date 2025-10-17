@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    import psycopg
-except Exception:  # pragma: no cover
+    import psycopg  # type: ignore
+except Exception:
     psycopg = None  # type: ignore
 
 from .summary_variants import normalize_variant_id, variant_kind, format_summary_html
@@ -65,10 +65,16 @@ class PostgresWriter:
     """Direct Postgres writer with minimal, safe UPSERTs."""
 
     def __init__(self, dsn: Optional[str] = None):
+        # Lazy-import psycopg in case it was installed after process start
+        global psycopg
         if psycopg is None:
-            raise RuntimeError(
-                "psycopg is not installed. Please add 'psycopg[binary]>=3.1' to requirements.txt and rebuild."
-            )
+            try:
+                import importlib
+                psycopg = importlib.import_module('psycopg')
+            except Exception as e:
+                raise RuntimeError(
+                    "psycopg is not installed. Please add 'psycopg[binary]>=3.1' to requirements.txt and rebuild."
+                ) from e
         self.dsn = dsn or _env_dsn()
         self._columns_cache: Optional[DBColumns] = None
         self.audio_public_base = os.getenv("AUDIO_PUBLIC_BASE") or os.getenv("POSTGRES_DASHBOARD_URL")
@@ -427,4 +433,3 @@ def create_postgres_writer_from_env() -> PostgresWriter:
 
 
 __all__ = ["PostgresWriter", "create_postgres_writer_from_env"]
-

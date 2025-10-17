@@ -177,39 +177,51 @@ class DualSyncCoordinator:
 
         return result
 
+    @staticmethod
+    def _normalize_video_id(video_id: str) -> str:
+        """Normalize IDs for Postgres (strip yt: prefix when present)."""
+        if not video_id:
+            return video_id
+        if isinstance(video_id, str) and video_id.startswith("yt:"):
+            return video_id.split(":", 1)[-1]
+        return video_id
+
     def _sync_to_postgres(self, content_data: Dict[str, Any], audio_path: Optional[Path], video_id: str) -> Dict[str, Any]:
         """Sync to PostgreSQL target with proper ordering."""
         result = {'report': None, 'audio': None}
 
+        raw_video_id = video_id or ""
+        db_video_id = self._normalize_video_id(raw_video_id)
+
         try:
             # Health gate before writing (per OpenAI recommendation)
             if not self.postgres_client.health_check():
-                logger.warning(f"[SYNC] target=postgres video_id={video_id} status=skip reason=health_check_failed")
+                logger.warning(f"[SYNC] target=postgres video_id={raw_video_id} status=skip reason=health_check_failed")
                 return result
 
             # Content sync FIRST (establishes metadata)
-            logger.info(f"[SYNC] target=postgres video_id={video_id} op=report status=attempting")
+            logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=report status=attempting")
             report_result = self.postgres_client.upload_content(content_data)
 
             if report_result:
                 result['report'] = report_result
                 self.stats['postgres']['report_success'] += 1
-                metrics.record_ingest(True, video_id)
+                metrics.record_ingest(True, db_video_id)
                 emit_report_event(
                     'report-synced',
                     {
-                        'video_id': video_id,
-                        'content_id': content_data.get('id') or f"yt:{video_id}",
+                        'video_id': db_video_id,
+                        'content_id': content_data.get('id') or f"yt:{db_video_id}",
                         'summary_type': (content_data.get('summary') or {}).get('summary_type'),
                         'targets': ['postgres'],
                     },
                 )
-                logger.info(f"[SYNC] target=postgres video_id={video_id} op=report status=ok upserted={report_result.get('upserted')}")
+                logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=report status=ok upserted={report_result.get('upserted')}")
 
                 # Audio sync SECOND (sets has_audio flag after metadata exists)
                 if audio_path and audio_path.is_file():
-                    logger.info(f"[SYNC] target=postgres video_id={video_id} op=audio status=attempting")
-                    audio_result = self.postgres_client.upload_audio(video_id, audio_path)
+                    logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=attempting")
+                    audio_result = self.postgres_client.upload_audio(db_video_id, audio_path)
 
                     if audio_result:
                         result['audio'] = audio_result
@@ -218,47 +230,47 @@ class DualSyncCoordinator:
                         emit_report_event(
                             'audio-synced',
                             {
-                                'video_id': video_id,
-                                'content_id': content_data.get('id') or f"yt:{video_id}",
+                                'video_id': db_video_id,
+                                'content_id': content_data.get('id') or f"yt:{db_video_id}",
                                 'audio_path': str(audio_path),
                                 'targets': ['postgres'],
                             },
                         )
-                        logger.info(f"[SYNC] target=postgres video_id={video_id} op=audio status=ok url={audio_result.get('public_url')}")
+                        logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=ok url={audio_result.get('public_url')}")
                     else:
                         self.stats['postgres']['audio_fail'] += 1
                         metrics.record_audio(False)
                         emit_report_event(
                             'audio-sync-failed',
                             {
-                                'video_id': video_id,
-                                'content_id': content_data.get('id') or f"yt:{video_id}",
+                                'video_id': db_video_id,
+                                'content_id': content_data.get('id') or f"yt:{db_video_id}",
                                 'audio_path': str(audio_path),
                             },
                         )
-                        logger.error(f"[SYNC] target=postgres video_id={video_id} op=audio status=fail")
+                        logger.error(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=fail")
             else:
                 self.stats['postgres']['report_fail'] += 1
-                metrics.record_ingest(False, video_id)
+                metrics.record_ingest(False, db_video_id)
                 emit_report_event(
                     'report-sync-failed',
                     {
-                        'video_id': video_id,
-                        'content_id': content_data.get('id') or f"yt:{video_id}",
+                        'video_id': db_video_id,
+                        'content_id': content_data.get('id') or f"yt:{db_video_id}",
                     },
                 )
-                logger.error(f"[SYNC] target=postgres video_id={video_id} op=report status=fail")
+                logger.error(f"[SYNC] target=postgres video_id={raw_video_id} op=report status=fail")
 
         except Exception as e:
             error_msg = str(e)[:100]  # Truncate for logging
-            logger.error(f"[SYNC] target=postgres video_id={video_id} op=report/audio status=fail error={error_msg}")
+            logger.error(f"[SYNC] target=postgres video_id={raw_video_id} op=report/audio status=fail error={error_msg}")
             self.stats['postgres']['report_fail'] += 1
-            metrics.record_ingest(False, video_id)
+            metrics.record_ingest(False, db_video_id)
             emit_report_event(
                 'report-sync-error',
                 {
-                    'video_id': video_id,
-                    'content_id': content_data.get('id') or f"yt:{video_id}",
+                    'video_id': db_video_id,
+                    'content_id': content_data.get('id') or f"yt:{db_video_id}",
                     'error': error_msg,
                 },
             )
@@ -268,8 +280,8 @@ class DualSyncCoordinator:
                 emit_report_event(
                     'audio-sync-error',
                     {
-                        'video_id': video_id,
-                        'content_id': content_data.get('id') or f"yt:{video_id}",
+                        'video_id': db_video_id,
+                        'content_id': content_data.get('id') or f"yt:{db_video_id}",
                         'audio_path': str(audio_path),
                         'error': error_msg,
                     },

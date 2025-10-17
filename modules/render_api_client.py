@@ -27,12 +27,12 @@ class RenderAPIClient:
             base_url: Base URL for the Render API (e.g., https://ytv2-dashboard.onrender.com)
             auth_token: Bearer token for authentication
         """
-        self.base_url = base_url or os.getenv('RENDER_API_URL', '')
+        self.base_url = base_url or os.getenv('RENDER_API_URL') or os.getenv('RENDER_DASHBOARD_URL', '')
         self.auth_token = auth_token or os.getenv('SYNC_SECRET', '')
         self.session = requests.Session()
-        
+
         if not self.base_url:
-            raise ValueError("RENDER_API_URL environment variable is required")
+            raise ValueError("Set RENDER_API_URL or RENDER_DASHBOARD_URL for Render uploads")
         if not self.auth_token:
             raise ValueError("SYNC_SECRET environment variable is required")
             
