@@ -1,15 +1,25 @@
 # Tools & Diagnostics
 
-Utility scripts to assist with operations, testing, and migration tasks. Run these from the repository root with the virtual environment active unless otherwise noted.
+Utility scripts to assist with operations, testing, and migration tasks. Run these inside the NAS container unless otherwise noted.
 
-- DEPRECATED: `test_api_sync.py` – Render ingest API is removed; dashboard is Postgres-only. Keep for reference; do not use in production.
-- DEPRECATED: `test_audio_upload.py` – Audio upload endpoints are gone. Use audio variants written to Postgres instead.
-- `test_ffprobe.py` – Verifies that `ffprobe` can extract duration metadata from generated audio files.
-- `force_render_refresh.py` – Legacy; dashboard no longer scans JSON or provides refresh endpoints.
-- `analyze_json_data.py`, `backfill_*`, `cleanup_reports.py`, etc. – Historical scripts used for data backfills or maintenance. Consult the source before running.
+## Core DB Utilities
 
-Planned replacements (DB-first):
-- `tools/test_postgres_connect.py` – Connectivity and role permission smoke test.
-- `tools/test_upsert_content.py` – Inserts one `content` row and a couple of summary variants.
+- `setup_postgres_schema.py` – Creates/patches tables, view, indexes, and grants.
+- `test_postgres_connect.py` – Connectivity and role permission smoke test.
+- `test_upsert_content.py` – Inserts one `content` row and summary variants; verifies Listen eligibility.
+- `delete_postgres_video.py` – Removes test rows from `content`/`summaries` by `video_id`.
 
-> Note: The dashboard is Postgres-only. Write rows directly to the database; do not use HTTP ingest endpoints.
+## Backfill & Diagnostics
+
+- `backfill_postgres_from_reports.py --resume --audio` – Replays JSON reports into Postgres (resume-safe; optional audio insert).
+- `debug_audio_variant.py` – Prints `content.has_audio` and `<audio>` HTML for a given `video_id`.
+- `list_audio_rows.py` – Lists summary rows matching a `video_id` substring (useful for debugging legacy prefixes).
+- `strip_yt_prefix_in_summaries.py` – Cleans older `yt:`-prefixed `video_id` rows.
+- `backfill_metadata.py`, `backfill_analysis.py`, `cleanup_reports.py` – Historical JSON maintenance scripts. Review source before use.
+
+## Deprecated / Legacy
+
+- `test_api_sync.py`, `test_audio_upload.py`, `force_render_refresh.py` – Relics from the HTTP ingest era. Keep for reference; do not run against the Postgres-only stack.
+- `analyze_json_data.py`, other ad-hoc scripts – Useful for forensic work but not part of the live ingest path.
+
+> Dashboard is Postgres-only. Avoid HTTP ingest endpoints; rely on `PostgresWriter` + the tools above.

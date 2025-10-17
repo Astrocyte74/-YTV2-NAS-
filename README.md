@@ -86,6 +86,22 @@ YTV2 uses a **hybrid architecture** with separated concerns:
    docker-compose up -d
    ```
 
+### First Run Checklist
+
+1. **Provision schema and grants**  
+   `python tools/setup_postgres_schema.py`
+
+2. **Verify connectivity and permissions**  
+   `python tools/test_postgres_connect.py`
+
+3. **Smoke-test inserts**  
+   `python tools/test_upsert_content.py TEST1234567`  
+   Clean up with `python tools/delete_postgres_video.py TEST1234567`.
+
+4. **Confirm audio uploads**  
+   Set `RENDER_DASHBOARD_URL` and `SYNC_SECRET` on the NAS, use the same secret on Render.  
+   Each TTS run then pushes MP3s to Postgres (for Listen chips) and to `/app/data/exports/audio/` on Render.
+
 ## 🔧 Configuration
 
 ### AI Provider Setup
@@ -118,6 +134,18 @@ Requirements for cards to show:
 - `language` on `content` is used for language filtering
 
 See `POSTGRES_UPSERT_GUIDE.md` for DDL, indexes, role grants, and UPSERT examples.
+
+### Backfill & Recovery Tools
+
+| Purpose | Command |
+| --- | --- |
+| Bootstrap schema | `python tools/setup_postgres_schema.py` |
+| Connectivity test | `python tools/test_postgres_connect.py` |
+| Insert smoke test | `python tools/test_upsert_content.py <video_id>` |
+| Resume-safe report ingest | `python tools/backfill_postgres_from_reports.py --resume --audio` |
+| Inspect Postgres state | `python tools/debug_audio_variant.py <video_id>` |
+| Clean legacy prefixes | `python tools/strip_yt_prefix_in_summaries.py` |
+| Remove test data | `python tools/delete_postgres_video.py <video_id>` |
 
 ### Reddit Integration (Optional)
 
@@ -193,6 +221,14 @@ docker-compose down && docker-compose up -d
 5. **Database upsert** to `content` + `summaries` (latest variant logic)
 6. **Access via Dashboard**; cards appear when a variant has HTML
 
+## 🎵 Audio Delivery Path
+
+1. NAS generates `exports/audio_<video_id>_<timestamp>.mp3` after TTS.
+2. `PostgresWriter.upload_content(...)` upserts metadata and HTML-bearing variants.
+3. `PostgresWriter.upload_audio(...)` sets `content.has_audio=true` and stores an `<audio>` tag referencing `/exports/audio/<file>.mp3`.
+4. NAS uploads the MP3 to Render via `/api/upload-audio` (requires matching `SYNC_SECRET`).
+5. Render serves the file via `/exports/by_video/<video_id>.mp3`; dashboard Listen chips stream it instantly.
+
 ## 🛠️ Troubleshooting
 
 ### Common Issues
@@ -209,6 +245,30 @@ docker-compose down && docker-compose up -d
 - **Sync Status**: Monitor dashboard ingest or build a WebSocket/SSE listener for “report created” events
 - **Diagnostics**: See `tools/README.md` for targeted scripts (DB tests, ffprobe)
 
+## 🔐 Codex CLI Authentication (Headless NAS)
+
+Use this flow whenever the Codex CLI requires OAuth on a machine without a local browser (e.g., the NAS). Substitute your own host/IP and SSH port.
+
+1. **Open an SSH tunnel from your Mac**
+   ```bash
+   ssh -p 1515 -L 1455:localhost:1455 mcdarby2024@24.66.251.193
+   ```
+   If 1455 is already in use locally, pick another free port (e.g., `1456:localhost:1455`) and adjust the callback in step 3.
+
+2. **Run Codex on the NAS (inside the tunneled session)**
+   ```bash
+   codex
+   ```
+   Choose “Sign in with ChatGPT” when prompted. Codex prints a long OAuth URL.
+
+3. **Authenticate in your Mac browser**
+   Copy the URL from the NAS terminal, paste it into your Mac’s browser, and sign in to OpenAI. If you used a different local port, replace `localhost:1455` with `localhost:<port>` in the URL before visiting it.
+
+4. **Confirm success**
+   The NAS terminal shows `✔ Signed in successfully ...`. Test with `codex hello`.
+
+Repeat the tunnel + login steps any time Codex needs to reauthenticate.
+
 ## 🤖 Telegram Bot Actions (Current)
 
 After a summary is generated, the bot presents a three‑row action keyboard designed for clarity on mobile:
@@ -218,7 +278,7 @@ After a summary is generated, the bot presents a three‑row action keyboard des
 - Row 3: `➕ Add Variant` | `🗑️ Delete…`
 
 Notes:
-- “Listen” performs a one‑off TTS of the exact message’s summary, using chunked TTS + merge. It does not ingest or save audio.
+- “Listen” streams the stored MP3 (generated on the NAS, hosted via `/exports/by_video/<video_id>.mp3`). One‑off TTS remains available through the card actions, but dashboard playback uses the saved variant.
 - “Generate Quiz” produces a 10‑item quiz from the Key Points summary (or synthesizes minimal Key Points if missing), optionally categorizes, saves to the Dashboard, and replies with:
   - `▶️ Play in Quizzernator` (deep link, autoplay)
   - `📂 See in Dashboard` (raw JSON)

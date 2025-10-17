@@ -4,7 +4,7 @@
 - Unified pipeline supports both YouTube videos and Reddit threads.
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
-- Audio variants remain available for Reddit because the summarizer operates on the combined thread text.
+- Audio variants are generated on the NAS, upserted to Postgres (`content.has_audio=true`), and uploaded to Render via `/api/upload-audio` so Listen chips stream immediately.
 
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
@@ -12,10 +12,17 @@
 - JSON reports include `content_source="reddit"`, subreddit metadata, and comment snippets for context.
 
 ## Deployment & Container Tips
-- PRAW is installed via `requirements.txt`; rebuild the NAS image (`docker build -t ytv2-with-ffmpeg .`) when dependencies change.
+- Python dependencies (PRAW, psycopg, etc.) are installed via `requirements.txt`. Any time the file changes, rebuild the NAS image so the packages are baked in:
+  1. From the repo root, run `docker build -t ytv2-nas:latest .`
+  2. In Portainer: **Containers → youtube-summarizer-bot → Duplicate/Edit → Replace existing container**, set Image to `ytv2-nas:latest`, confirm env vars, then deploy.
+  3. After the new container starts, run `python tools/test_postgres_connect.py` from the console to confirm psycopg is available.
 - Portainer: Use **Recreate** with _Re-pull image_ **off** to pick up code changes from the bind-mounted repo.
 - After updating `.env.nas` (e.g., new Reddit refresh token), recreate the container so env vars reload.
-- Helper scripts (`tools/test_reddit_connection.py`, `tools/debug_reddit_env.py`) can be copied into the container for quick verification.
+- Helper scripts:
+  - `tools/setup_postgres_schema.py` — schema/grants bootstrapping
+  - `tools/backfill_postgres_from_reports.py --resume --audio` — resume-safe ingest from JSON
+  - `tools/debug_audio_variant.py` — inspect `content.has_audio` and `<audio>` HTML
+  - `tools/test_reddit_connection.py`, `tools/debug_reddit_env.py` — Reddit diagnostics
 
 ## Dashboard Notes (Postgres-only)
 - Dashboard reads from Postgres only; it does not scan JSON or accept upload endpoints.
