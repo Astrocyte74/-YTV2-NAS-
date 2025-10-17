@@ -86,6 +86,7 @@ class YouTubeTelegramBot:
             r'(https?://(?:www\.)?(?:reddit\.com|redd\.it)/[^\s]+)',
             re.IGNORECASE,
         )
+        self.web_url_pattern = re.compile(r'(https?://[^\s<>]+)', re.IGNORECASE)
         
         # Telegram message length limit
         self.MAX_MESSAGE_LENGTH = 4096
@@ -155,6 +156,38 @@ class YouTubeTelegramBot:
             return parts[0]
         return None
 
+    def _extract_web_url(self, text: str) -> Optional[str]:
+        """Extract the first supported generic web URL from the text."""
+        if not text:
+            return None
+        for match in self.web_url_pattern.finditer(text):
+            candidate = match.group(1)
+            candidate = candidate.strip('<>') if candidate else None
+            if candidate and self._is_supported_web_domain(candidate):
+                return candidate
+        return None
+
+    @staticmethod
+    def _is_supported_web_domain(url: str) -> bool:
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception:
+            return False
+        host = (parsed.netloc or "").lower()
+        if not host:
+            return False
+        blocked_domains = (
+            "youtube.com",
+            "www.youtube.com",
+            "m.youtube.com",
+            "youtu.be",
+            "reddit.com",
+            "www.reddit.com",
+            "old.reddit.com",
+            "redd.it",
+        )
+        return host not in blocked_domains
+
     def _current_source(self) -> str:
         return (self.current_item or {}).get("source", "youtube")
 
@@ -215,12 +248,20 @@ class YouTubeTelegramBot:
 
     def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
         if not variants:
-            if source == "reddit":
-                return "🧵 Processing Reddit thread...\n\nChoose your summary type:"
-            return "🎬 Processing YouTube video...\n\nChoose your summary type:"
+            prompts = {
+                "youtube": "🎬 Processing YouTube video...\n\nChoose your summary type:",
+                "reddit": "🧵 Processing Reddit thread...\n\nChoose your summary type:",
+                "web": "📰 Processing web article...\n\nChoose your summary type:",
+            }
+            return prompts.get(source, prompts["youtube"])
 
         variants_sorted = sorted(variants)
-        lines = ["✅ Existing summaries for this video:"]
+        noun = {
+            "youtube": "video",
+            "reddit": "thread",
+            "web": "article",
+        }.get(source, "item")
+        lines = [f"✅ Existing summaries for this {noun}:"]
         lines.extend(f"• {self._friendly_variant_label(variant)}" for variant in variants_sorted)
         lines.append("\nRe-run a variant below or open the summary card.")
         return "\n".join(lines)
@@ -774,6 +815,30 @@ class YouTubeTelegramBot:
             )
             return
 
+        # Check for generic web URLs
+        web_url = self._extract_web_url(message_text)
+        if web_url:
+            web_url = web_url.strip()
+            hashed = hashlib.sha256(web_url.encode('utf-8')).hexdigest()[:24]
+            content_id = f"web:{hashed}"
+            self.current_item = {
+                "source": "web",
+                "url": web_url,
+                "content_id": content_id,
+                "raw_id": hashed,
+                "normalized_id": hashed,
+            }
+
+            existing_variants = self._discover_summary_types(content_id)
+            reply_markup = self._build_summary_keyboard(existing_variants, hashed)
+            message_text = self._existing_variants_message(content_id, existing_variants, source="web")
+
+            await update.message.reply_text(
+                message_text,
+                reply_markup=reply_markup
+            )
+            return
+
         await update.message.reply_text(
             "🔍 Please send a YouTube or Reddit URL to get started.\n\n"
             "Supported YouTube formats:\n"
@@ -782,7 +847,9 @@ class YouTubeTelegramBot:
             "• https://m.youtube.com/watch?v=...\n\n"
             "Supported Reddit formats:\n"
             "• https://www.reddit.com/r/<sub>/comments/<id>/...\n"
-            "• https://redd.it/<id>"
+            "• https://redd.it/<id>\n\n"
+            "Supported Web articles:\n"
+            "• Any https:// link (except YouTube/Reddit)"
         )
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1428,10 +1495,15 @@ class YouTubeTelegramBot:
         
         # Update message to show processing
         # Create user-friendly processing messages
-        noun = "video" if source == "youtube" else "thread"
+        noun_map = {
+            "youtube": "video",
+            "reddit": "thread",
+            "web": "article",
+        }
+        noun = noun_map.get(source, "item")
         processing_messages = {
             "comprehensive": f"📝 Analyzing {noun} and creating comprehensive summary...",
-            "bullet-points": f"🎯 Extracting key points from the {noun}...", 
+            "bullet-points": f"🎯 Extracting key points from the {noun}...",
             "key-insights": f"💡 Identifying key insights and takeaways from the {noun}...",
             "audio": "🎙️ Creating audio summary with text-to-speech...",
             "audio-fr": "🇫🇷 Translating to French and preparing audio narration...",
@@ -1447,7 +1519,12 @@ class YouTubeTelegramBot:
             level_suffix = " (with vocabulary help)" if proficiency_level in ["beginner", "intermediate"] else ""
             message = f"🇪🇸 Creating Spanish audio summary{level_suffix}... This may take a moment."
         else:
-            default_prefix = "🧵" if source == "reddit" else "🔄"
+            prefix_map = {
+                "youtube": "🔄",
+                "reddit": "🧵",
+                "web": "📰",
+            }
+            default_prefix = prefix_map.get(source, "🔄")
             message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
 
         await query.edit_message_text(message)
@@ -1482,6 +1559,12 @@ class YouTubeTelegramBot:
             
             if source == "reddit":
                 result = await self.summarizer.process_reddit_thread(
+                    url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency_level
+                )
+            elif source == "web":
+                result = await self.summarizer.process_web_page(
                     url,
                     summary_type=summary_type,
                     proficiency_level=proficiency_level
@@ -1747,7 +1830,11 @@ class YouTubeTelegramBot:
             # (For audio summaries, TTS will be generated separately below)
             
             # Format response header (without summary content)
-            source_icon = '🧵' if source == 'reddit' else '🎬'
+            source_icon = {
+                'youtube': '🎬',
+                'reddit': '🧵',
+                'web': '📰',
+            }.get(source, '🎬')
             channel_icon = '👤' if source == 'reddit' else '📺'
             header_parts = [
                 f"{source_icon} **{self._escape_markdown(title)}**",
@@ -1897,6 +1984,14 @@ class YouTubeTelegramBot:
                 metrics.record_tts(True)
                 audio_path_obj = Path(audio_filepath)
                 normalized_id = normalized_video_id or video_id
+                content_identifier = (
+                    result.get('id')
+                    or video_info.get('content_id')
+                    or ledger_id
+                    or normalized_id
+                )
+                if content_identifier and ":" not in content_identifier:
+                    content_identifier = f"yt:{content_identifier}"
 
                 self._sync_audio_to_targets(
                     normalized_id,
@@ -1904,7 +1999,8 @@ class YouTubeTelegramBot:
                     ledger_id,
                     summary_type,
                 )
-                self._upload_audio_to_render(normalized_id, audio_path_obj)
+                if content_identifier:
+                    self._upload_audio_to_render(content_identifier, audio_path_obj)
 
                 try:
                     audio_reply_markup = self._build_audio_inline_keyboard(
@@ -2122,7 +2218,7 @@ class YouTubeTelegramBot:
             logging.debug(f"Render client not available: {exc}")
             return None
 
-    def _upload_audio_to_render(self, video_id: str, audio_path: Path) -> None:
+    def _upload_audio_to_render(self, content_id: str, audio_path: Path) -> None:
         client = self._get_render_client()
         if not client:
             return
@@ -2131,7 +2227,6 @@ class YouTubeTelegramBot:
             logging.warning(f"⚠️ Render upload skipped; audio file missing: {audio_path}")
             return
 
-        content_id = f"yt:{video_id}" if not video_id.startswith("yt:") else video_id
         try:
             client.upload_audio_file(audio_path, content_id)
             logging.info(f"✅ Uploaded audio to Render for {content_id}")

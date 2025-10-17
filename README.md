@@ -27,6 +27,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **📊 Structured Reports**: JSON + HTML summaries with language metadata and key topics
 - **🗄️ Direct Postgres Writes**: No dashboard upload endpoints; writes happen via UPSERTs
 - **🧵 Reddit Thread Support**: Fetch saved Reddit submissions and summarize them alongside YouTube videos
+- **📰 Web Article Support**: Layered extractor cleans arbitrary https links (Readability + Trafilatura fallbacks)
 - **⚠️ Resilient Metadata**: Falls back to YouTube watch-page parsing when yt-dlp formats are blocked
 - **⚙️ Multi-AI Support**: OpenRouter (Gemini Flash Lite), OpenAI, Anthropic
 - **🔧 Docker Ready**: Easy NAS deployment via Portainer

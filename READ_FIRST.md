@@ -1,6 +1,6 @@
 # READ FIRST
 
-YTV2-NAS is the processing side of the YTV2 hybrid system. It downloads YouTube/Reddit content, generates summaries + TTS audio, and writes everything directly into the dashboard’s Postgres database.
+YTV2-NAS is the processing side of the YTV2 hybrid system. It downloads YouTube/Reddit content, cleans general web articles, generates summaries + TTS audio, and writes everything directly into the dashboard’s Postgres database.
 
 To get oriented quickly:
 

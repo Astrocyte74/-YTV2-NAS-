@@ -126,12 +126,17 @@ class PostgresWriter:
         thumbnail_url, duration_seconds, indexed_at (datetime), has_audio, language,
         analysis_json, subcategories_json, topics_json, summary_variants (list).
         """
+        source_metadata = content_data.get("source_metadata", {}) or {}
+        youtube_meta = source_metadata.get("youtube", {}) or {}
+        reddit_meta = source_metadata.get("reddit", {}) or {}
+        web_meta = source_metadata.get("web", {}) or {}
+
         # video_id
         video_id = (
             content_data.get("video_id")
             or (content_data.get("id", "").split(":", 1)[-1] if content_data.get("id") else None)
-            or content_data.get("source_metadata", {}).get("youtube", {}).get("video_id")
-            or content_data.get("source_metadata", {}).get("reddit", {}).get("id")
+            or youtube_meta.get("video_id")
+            or reddit_meta.get("id")
         )
         if not video_id:
             raise ValueError("video_id is required to upsert content")
@@ -140,26 +145,33 @@ class PostgresWriter:
         # simple fields with fallbacks
         title = (
             content_data.get("title")
-            or content_data.get("source_metadata", {}).get("youtube", {}).get("title")
+            or youtube_meta.get("title")
+            or web_meta.get("title")
             or content_data.get("summary", {}).get("headline")
             or f"Content {video_id}"
         )
         channel_name = (
             content_data.get("channel_name")
-            or content_data.get("source_metadata", {}).get("youtube", {}).get("channel_name")
+            or youtube_meta.get("channel_name")
+            or web_meta.get("site_name")
             or content_data.get("uploader")
         )
-        canonical_url = content_data.get("canonical_url") or content_data.get("source_metadata", {}).get("youtube", {}).get("canonical_url")
+        canonical_url = (
+            content_data.get("canonical_url")
+            or youtube_meta.get("canonical_url")
+            or web_meta.get("canonical_url")
+        )
         if not canonical_url and video_id:
             canonical_url = f"https://www.youtube.com/watch?v={video_id}"
         thumbnail_url = (
             content_data.get("thumbnail_url")
-            or content_data.get("source_metadata", {}).get("youtube", {}).get("thumbnail_url")
+            or youtube_meta.get("thumbnail_url")
+            or web_meta.get("top_image")
         )
         duration_seconds = (
             content_data.get("duration_seconds")
             or content_data.get("media_info", {}).get("audio_duration_seconds")
-            or content_data.get("source_metadata", {}).get("youtube", {}).get("duration_seconds")
+            or youtube_meta.get("duration_seconds")
             or 0
         )
 

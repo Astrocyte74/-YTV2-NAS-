@@ -1,7 +1,7 @@
 # YTV2-NAS Operational Notes
 
 ## Telegram Bot Content Flow
-- Unified pipeline supports both YouTube videos and Reddit threads.
+- Unified pipeline supports YouTube videos, Reddit threads, and generic web articles (layered extractor with Readability/Trafilatura fallbacks).
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
 - Audio variants are generated on the NAS, upserted to Postgres (`content.has_audio=true`), and uploaded to Render via `/api/upload-audio` so Listen chips stream immediately.

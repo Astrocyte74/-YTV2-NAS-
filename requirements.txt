@@ -14,6 +14,8 @@ reportlab>=4.4.3  # For PDF export
 markdown>=3.4.4   # For HTML export
 requests>=2.31.0
 beautifulsoup4>=4.12.0  # For fallback metadata extraction
+readability-lxml>=0.8.4  # Web article extraction fallback
+trafilatura>=2.0.0  # High-quality HTML-to-text extraction
 praw>=7.7.1  # Reddit API client for non-YouTube sources
 psycopg[binary]>=3.1  # Direct Postgres writes
 

@@ -46,12 +46,21 @@ import requests
 from llm_config import llm_config
 
 try:
-    from modules.sources import RedditFetcher, RedditFetcherError
+    from modules.sources import (
+        RedditFetcher,
+        RedditFetcherError,
+        WebPageFetcher,
+        WebFetcherError,
+    )
 except ImportError:  # pragma: no cover - optional dependency
     RedditFetcher = None
+    WebPageFetcher = None
 
     class RedditFetcherError(Exception):
         """Placeholder error used when Reddit dependencies are unavailable."""
+
+    class WebFetcherError(Exception):
+        """Placeholder error used when web dependencies are unavailable."""
 
 class YouTubeSummarizer:
     def __init__(self, llm_provider: str = None, model: str = None, ollama_base_url: str = None):
@@ -80,6 +89,8 @@ class YouTubeSummarizer:
         
         # Lazy-initialized Reddit fetcher
         self._reddit_fetcher: Optional["RedditFetcher"] = None
+        # Lazy-initialized web page fetcher
+        self._web_fetcher: Optional["WebPageFetcher"] = None
     
     def _initialize_llm(self, api_key: str):
         """Initialize the LLM based on provider and model"""
@@ -119,6 +130,16 @@ class YouTubeSummarizer:
         if self._reddit_fetcher is None:
             self._reddit_fetcher = RedditFetcher()
         return self._reddit_fetcher
+
+    def _get_web_fetcher(self):
+        """Lazily construct and memoize the web page fetcher."""
+        if WebPageFetcher is None:
+            raise WebFetcherError(
+                "Web summarization support is unavailable – install BeautifulSoup4/readability/trafilatura."
+            )
+        if self._web_fetcher is None:
+            self._web_fetcher = WebPageFetcher()
+        return self._web_fetcher
 
     async def process_text_content(
         self,
@@ -297,6 +318,80 @@ class YouTubeSummarizer:
             summary_type=summary_type,
             proficiency_level=proficiency_level,
             source="reddit",
+            source_metadata=source_metadata,
+            assume_has_audio=False,
+        )
+
+    async def process_web_page(
+        self,
+        web_url: str,
+        summary_type: str = "comprehensive",
+        proficiency_level: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Fetch a web article and run it through the summarization pipeline."""
+
+        try:
+            fetcher = self._get_web_fetcher()
+        except WebFetcherError as exc:
+            return {
+                "error": str(exc),
+                "url": web_url,
+                "processed_at": datetime.now().isoformat(),
+                "content_source": "web",
+            }
+
+        try:
+            fetched = fetcher.fetch(web_url)
+        except WebFetcherError as exc:
+            return {
+                "error": str(exc),
+                "url": web_url,
+                "processed_at": datetime.now().isoformat(),
+                "content_source": "web",
+            }
+
+        content = fetched.content
+        text = fetched.text
+        content_id = content.id
+        normalized_id = content_id.split(":", 1)[-1]
+
+        metadata = {
+            "title": content.title or "Untitled article",
+            "uploader": content.site_name or content.author or "Unknown source",
+            "author": content.author,
+            "channel": content.site_name or content.author or "Web article",
+            "channel_id": content.site_name or "",
+            "duration": 0,
+            "url": content.canonical_url or web_url,
+            "language": content.language or "en",
+            "published_at": content.published_at,
+            "thumbnail": content.top_image,
+            "video_id": normalized_id,
+            "content_id": content_id,
+        }
+
+        source_metadata = {
+            "web": {
+                "id": content.id,
+                "canonical_url": content.canonical_url,
+                "site_name": content.site_name,
+                "title": content.title,
+                "language": content.language,
+                "author": content.author,
+                "published_at": content.published_at,
+                "top_image": content.top_image,
+                "video_id": normalized_id,
+                "extractor_notes": content.extractor_notes,
+            }
+        }
+
+        return await self.process_text_content(
+            content_id=content_id,
+            text=text,
+            metadata=metadata,
+            summary_type=summary_type,
+            proficiency_level=proficiency_level,
+            source="web",
             source_metadata=source_metadata,
             assume_has_audio=False,
         )
