@@ -1893,10 +1893,18 @@ class YouTubeTelegramBot:
                     try:
                         catalog = await client.fetch_catalog()
                         session['catalog'] = catalog
+                        # Populate favorites: prefer tag=telegram, fall back to global
                         if not favorites:
-                            favorites = await client.fetch_favorites(tag="telegram")
-                            if favorites:
-                                session['favorites'] = favorites
+                            try:
+                                favorites = await client.fetch_favorites(tag="telegram")
+                            except Exception:
+                                favorites = []
+                            if not favorites:
+                                try:
+                                    favorites = await client.fetch_favorites()
+                                except Exception:
+                                    favorites = []
+                            session['favorites'] = favorites or []
                     except Exception as exc:
                         await self._handle_local_unavailable(query, session, message=str(exc))
                         return
@@ -1905,6 +1913,7 @@ class YouTubeTelegramBot:
                     return
                 if favorites is None and session.get('favorites') is None:
                     session['favorites'] = []
+                # Default to favorites when available
                 session['voice_mode'] = session.get('voice_mode') or ('favorites' if session.get('favorites') else 'all')
                 self._store_tts_session(query.message.chat_id, query.message.message_id, session)
                 await self._refresh_tts_catalog(query, session)
