@@ -150,10 +150,15 @@ class PostgresWriter:
             or content_data.get("summary", {}).get("headline")
             or f"Content {video_id}"
         )
+        metadata_block = content_data.get("metadata") or {}
+
         channel_name = (
             content_data.get("channel_name")
             or youtube_meta.get("channel_name")
+            or web_meta.get("site_label")
             or web_meta.get("site_name")
+            or metadata_block.get("channel")
+            or metadata_block.get("uploader")
             or content_data.get("uploader")
         )
         canonical_url = (

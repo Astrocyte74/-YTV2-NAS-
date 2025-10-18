@@ -15,6 +15,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 
 import yt_dlp
 
@@ -355,14 +356,40 @@ class YouTubeSummarizer:
         content_id = content.id
         normalized_id = content_id.split(":", 1)[-1]
 
+        canonical_url = content.canonical_url or web_url
+        parsed_url = urlparse(canonical_url or web_url or "")
+        hostname = (parsed_url.hostname or parsed_url.netloc or "").lower()
+        if hostname.startswith("www."):
+            hostname = hostname[4:]
+        if ":" in hostname:
+            hostname = hostname.split(":", 1)[0]
+
+        def _humanize_hostname(host: str) -> str:
+            if not host:
+                return ""
+            tokens = host.replace("_", "-").split(".")
+            filtered = [t for t in tokens if t and t not in {"www", "com", "org", "net", "co"}]
+            if not filtered:
+                filtered = [t for t in tokens if t]
+            label = " ".join(part.replace("-", " ") for part in filtered).strip()
+            return label.title() if label else host
+
+        site_label = (content.site_name or "").strip()
+        if not site_label:
+            site_label = _humanize_hostname(hostname)
+
+        author = (content.author or "").strip()
+        channel_display = site_label or author or "Web article"
+        uploader_display = author or site_label or "Web article"
+
         metadata = {
             "title": content.title or "Untitled article",
-            "uploader": content.site_name or content.author or "Unknown source",
-            "author": content.author,
-            "channel": content.site_name or content.author or "Web article",
-            "channel_id": content.site_name or "",
+            "uploader": uploader_display,
+            "author": author,
+            "channel": channel_display,
+            "channel_id": hostname or channel_display,
             "duration": 0,
-            "url": content.canonical_url or web_url,
+            "url": canonical_url or web_url,
             "language": content.language or "en",
             "published_at": content.published_at,
             "thumbnail": content.top_image,
@@ -371,18 +398,18 @@ class YouTubeSummarizer:
         }
 
         source_metadata = {
-            "web": {
-                "id": content.id,
-                "canonical_url": content.canonical_url,
-                "site_name": content.site_name,
-                "title": content.title,
-                "language": content.language,
-                "author": content.author,
-                "published_at": content.published_at,
-                "top_image": content.top_image,
-                "video_id": normalized_id,
-                "extractor_notes": content.extractor_notes,
-            }
+            "id": content.id,
+            "canonical_url": content.canonical_url,
+            "site_name": content.site_name,
+            "title": content.title,
+            "language": content.language,
+            "author": content.author,
+            "published_at": content.published_at,
+            "top_image": content.top_image,
+            "video_id": normalized_id,
+            "site_hostname": hostname,
+            "site_label": site_label or channel_display,
+            "extractor_notes": content.extractor_notes,
         }
 
         return await self.process_text_content(

@@ -6,6 +6,7 @@ It handles all Telegram bot interactions without embedded HTML generation.
 """
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -77,6 +78,8 @@ class YouTubeTelegramBot:
         self.json_exporter = JSONReportGenerator("./data/reports")
         # In-memory cache for one-off TTS playback keyed by (chat_id, message_id)
         self.tts_cache: Dict[tuple, Dict[str, Any]] = {}
+        # Interactive TTS sessions keyed by (chat_id, message_id)
+        self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
         
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
@@ -662,6 +665,7 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("tts", self.tts_command))
         
         # Message handlers
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -886,6 +890,9 @@ class YouTubeTelegramBot:
             
             # Process with proficiency level (None for regular summaries)
             await self._process_content_summary(query, summary_type, user_name, proficiency_level)
+        
+        elif callback_data.startswith("tts_voice:") or callback_data == "tts_cancel":
+            await self._handle_tts_callback(query, callback_data)
         
         # Handle delete requests
         elif callback_data.startswith('delete_'):
@@ -1218,6 +1225,230 @@ class YouTubeTelegramBot:
         s = '\n'.join(out)
         s = _re.sub(r'\n{3,}', '\n\n', s)
         return s.strip()
+
+    # ------------------------- External TTS hub helpers -------------------------
+    def _get_tts_base_url(self) -> Optional[str]:
+        base = os.getenv('TTSHUB_API_BASE')
+        if not base:
+            return None
+        return base.rstrip('/')
+
+    @staticmethod
+    def _tts_audio_base(base_url: str) -> str:
+        base = base_url.rstrip('/') if base_url else ''
+        if base.endswith('/api'):
+            base = base[:-4]
+        return base or base_url
+
+    async def _fetch_tts_favorites(self, base_url: str) -> List[Dict[str, Any]]:
+        if requests is None:
+            raise RuntimeError("requests library is not available for HTTP calls.")
+
+        async_loop = asyncio.get_running_loop()
+        url = f"{base_url}/favorites"
+
+        def _call():
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            profiles = data.get('profiles') or []
+            return [profile for profile in profiles if isinstance(profile, dict)]
+
+        return await async_loop.run_in_executor(None, _call)
+
+    def _tts_session_key(self, chat_id: int, message_id: int) -> tuple:
+        return (chat_id, message_id)
+
+    def _store_tts_session(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
+        self.tts_sessions[self._tts_session_key(chat_id, message_id)] = payload
+
+    def _get_tts_session(self, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        return self.tts_sessions.get(self._tts_session_key(chat_id, message_id))
+
+    def _remove_tts_session(self, chat_id: int, message_id: int) -> None:
+        self.tts_sessions.pop(self._tts_session_key(chat_id, message_id), None)
+
+    def _build_tts_keyboard(self, favorites: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+        buttons: List[List[InlineKeyboardButton]] = []
+        row: List[InlineKeyboardButton] = []
+        max_per_row = 3
+
+        for profile in favorites:
+            slug = profile.get('slug') or profile.get('voiceId')
+            if not slug:
+                continue
+            label = profile.get('label') or profile.get('voiceId') or slug
+            if label.startswith("Favorite ·"):
+                label = label.split("·", 1)[1].strip() or label
+            if len(label) > 28:
+                label = f"{label[:25]}…"
+            row.append(InlineKeyboardButton(f"🎤 {label}", callback_data=f"tts_voice:{slug}"))
+            if len(row) == max_per_row:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
+        return InlineKeyboardMarkup(buttons)
+
+    def _tts_prompt_text(self, text: str, last_voice: Optional[str] = None) -> str:
+        snippet = (text or "").strip()
+        if len(snippet) > 280:
+            snippet = snippet[:277].rstrip() + "…"
+        lines = []
+        # Width-keeper line to force Telegram to expand the bubble
+        lines.append("──────────────────────────────")
+        if last_voice:
+            lines.append(f"✅ Last voice: {last_voice}")
+        lines.append("🗣️ Ready to synthesize speech for:")
+        lines.append(f"“{snippet or '…'}”")
+        lines.append("Select a voice below or cancel.")
+        lines.append("──────────────────────────────")
+        return "\n".join(lines)
+
+    async def _tts_synthesise(self, base_url: str, slug: str, text: str) -> Dict[str, Any]:
+        if requests is None:
+            raise RuntimeError("requests library is not available for HTTP calls.")
+
+        async_loop = asyncio.get_running_loop()
+        synth_url = f"{base_url}/synthesise"
+        audio_base = self._tts_audio_base(base_url)
+
+        def _call():
+            payload = {"favoriteSlug": slug, "text": text}
+            resp = requests.post(synth_url, json=payload, timeout=30)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            audio_path = data.get('path')
+            if not audio_path:
+                raise ValueError("TTS hub response missing audio path.")
+            audio_url = urllib.parse.urljoin(audio_base.rstrip('/') + '/', audio_path.lstrip('/'))
+            audio_resp = requests.get(audio_url, timeout=60)
+            audio_resp.raise_for_status()
+            data['audio_bytes'] = audio_resp.content
+            data['audio_url'] = audio_url
+            return data
+
+        return await async_loop.run_in_executor(None, _call)
+
+    def _tts_voice_label(self, favorites: List[Dict[str, Any]], slug: str) -> str:
+        for profile in favorites:
+            profile_slug = profile.get('slug') or profile.get('voiceId')
+            if profile_slug == slug:
+                raw_label = profile.get('label') or profile.get('voiceId') or slug
+                if raw_label.startswith("Favorite ·"):
+                    return raw_label.split("·", 1)[1].strip() or slug
+                return raw_label
+        return slug
+
+    # ------------------------- Telegram command: /tts -------------------------
+    async def tts_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
+            return
+
+        base_url = self._get_tts_base_url()
+        if not base_url:
+            await update.message.reply_text("⚠️ TTS hub is not configured. Set TTSHUB_API_BASE and try again.")
+            return
+
+        full_text = (update.message.text or "").split(" ", 1)
+        speak_text = full_text[1].strip() if len(full_text) > 1 else ""
+        if not speak_text:
+            await update.message.reply_text("🗣️ Usage: /tts Your message here")
+            return
+
+        try:
+            favorites = await self._fetch_tts_favorites(base_url)
+        except Exception as e:
+            logging.error(f"Failed to fetch TTS favorites: {e}")
+            await update.message.reply_text("❌ Could not reach the TTS hub. Please try again later.")
+            return
+
+        if not favorites:
+            await update.message.reply_text("⚠️ No favorite voices available on the TTS hub.")
+            return
+
+        prompt = self._tts_prompt_text(speak_text)
+        keyboard = self._build_tts_keyboard(favorites)
+        prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)
+
+        session_payload = {
+            "text": speak_text,
+            "favorites": favorites,
+            "base": base_url,
+            "last_voice": None,
+        }
+        self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
+
+    async def _handle_tts_callback(self, query, callback_data: str):
+        message = query.message
+        if not message:
+            return
+        chat_id = message.chat_id
+        message_id = message.message_id
+        session = self._get_tts_session(chat_id, message_id)
+
+        if not session:
+            await query.answer("Session expired", show_alert=True)
+            try:
+                await query.edit_message_text("⚠️ This TTS session has expired. Send /tts again.")
+            except Exception:
+                pass
+            return
+
+        if callback_data == "tts_cancel":
+            self._remove_tts_session(chat_id, message_id)
+            await query.answer("Cancelled")
+            try:
+                await query.edit_message_text("❌ TTS session cancelled.")
+            except Exception:
+                pass
+            return
+
+        if not callback_data.startswith("tts_voice:"):
+            return
+
+        slug = callback_data.split(":", 1)[1]
+        favorites = session.get("favorites", [])
+        label = self._tts_voice_label(favorites, slug)
+        text = session.get("text", "")
+        base_url = session.get("base")
+
+        await query.answer(f"Generating {label}…")
+
+        try:
+            result = await self._tts_synthesise(base_url, slug, text)
+        except Exception as e:
+            logging.error(f"TTS synthesis failed: {e}")
+            await query.answer("❌ TTS failed", show_alert=True)
+            return
+
+        audio_bytes = result.get("audio_bytes")
+        filename = result.get("filename") or f"{slug}.wav"
+        if not audio_bytes:
+            await query.answer("❌ No audio received", show_alert=True)
+            return
+
+        bio = io.BytesIO(audio_bytes)
+        bio.name = filename
+
+        try:
+            await query.message.reply_audio(audio=bio, caption=f"🎤 {label}")
+        except Exception as send_error:
+            logging.error(f"Failed to send TTS audio: {send_error}")
+            await query.answer("❌ Failed to send audio", show_alert=True)
+            return
+
+        session["last_voice"] = label
+        prompt = self._tts_prompt_text(text, last_voice=label)
+        keyboard = self._build_tts_keyboard(favorites)
+        try:
+            await query.edit_message_text(prompt, reply_markup=keyboard)
+        except Exception:
+            # If editing fails, keep session alive so user can continue
+            pass
 
     def _get_dashboard_base(self) -> Optional[str]:
         return (
