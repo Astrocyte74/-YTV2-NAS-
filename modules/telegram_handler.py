@@ -45,6 +45,13 @@ from modules.tts_hub import (
     filter_catalog_voices,
 )
 from modules.tts_queue import enqueue as enqueue_tts_job
+from modules import render_probe
+from modules.ollama_client import (
+    OllamaClientError,
+    get_models as ollama_get_models,
+    chat as ollama_chat,
+    pull as ollama_pull,
+)
 import hashlib
 import unicodedata
 
@@ -88,6 +95,8 @@ class YouTubeTelegramBot:
         self.tts_client: Optional[TTSHubClient] = None
         # Interactive TTS sessions keyed by (chat_id, message_id)
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Ollama chat sessions keyed by chat_id
+        self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
         
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
@@ -674,6 +683,8 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("tts", self.tts_command))
+        self.application.add_handler(CommandHandler("ollama", self.ollama_command))
+        self.application.add_handler(CommandHandler("ollama_stop", self.ollama_stop_command))
         
         # Message handlers
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -768,6 +779,13 @@ class YouTubeTelegramBot:
             return
         
         message_text = update.message.text.strip()
+        # If Ollama chat session active for this chat, route text to chat (unless it's a command)
+        if message_text and not message_text.startswith("/"):
+            chat_id = update.effective_chat.id
+            session = self.ollama_sessions.get(chat_id)
+            if session and session.get("active"):
+                await self._ollama_handle_user_text(update, session, message_text)
+                return
         logging.info(f"Received message from {user_name} ({user_id}): {message_text[:100]}...")
         
         # Check for YouTube links first (primary flow)
@@ -863,6 +881,170 @@ class YouTubeTelegramBot:
             "Supported Web articles:\n"
             "• Any https:// link (except YouTube/Reddit)"
         )
+
+    # ------------------------- Ollama chat integration -------------------------
+    def _ollama_models_list(self, raw: Dict[str, Any]) -> List[str]:
+        models = []
+        if isinstance(raw, dict):
+            items = raw.get("models") or raw.get("data") or raw.get("items") or []
+            for m in items:
+                if isinstance(m, dict):
+                    name = m.get("name") or m.get("model") or m.get("id")
+                    if name:
+                        models.append(name)
+        return models
+
+    def _build_ollama_models_keyboard(self, models: List[str], page: int = 0, page_size: int = 9) -> InlineKeyboardMarkup:
+        start = page * page_size
+        end = start + page_size
+        subset = models[start:end]
+        rows: List[List[InlineKeyboardButton]] = []
+        row: List[InlineKeyboardButton] = []
+        for name in subset:
+            label = name
+            if len(label) > 28:
+                label = f"{label[:25]}…"
+            row.append(InlineKeyboardButton(label, callback_data=f"ollama_model:{name}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        nav: List[InlineKeyboardButton] = []
+        if end < len(models):
+            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more:{page+1}"))
+        if page > 0:
+            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page-1}"))
+        if nav:
+            rows.append(nav)
+        rows.append([InlineKeyboardButton("⚙️ Options", callback_data="ollama_options"), InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
+        return InlineKeyboardMarkup(rows)
+
+    async def ollama_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
+            return
+        try:
+            raw = ollama_get_models()
+            models = self._ollama_models_list(raw)
+            if not models:
+                await update.message.reply_text("⚠️ No models available on the hub.")
+                return
+            kb = self._build_ollama_models_keyboard(models, 0)
+            await update.message.reply_text("🤖 Select an Ollama model to chat with:", reply_markup=kb)
+            # Store browse session context
+            self.ollama_sessions[update.effective_chat.id] = {
+                "active": False,
+                "models": models,
+                "page": 0,
+                "mode": "ai-human",
+                "stream": False,
+                "history": [],
+            }
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Ollama hub error: {exc}")
+
+    async def ollama_stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        self.ollama_sessions.pop(chat_id, None)
+        await update.message.reply_text("🛑 Closed Ollama chat session.")
+
+    async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
+        chat_id = update.effective_chat.id
+        model = session.get("model")
+        if not model:
+            await update.message.reply_text("⚠️ No model selected. Send /ollama to choose one.")
+            return
+        # Build non-stream chat payload
+        history = session.get("history") or []
+        messages = history + [{"role": "user", "content": text}]
+        loop = asyncio.get_running_loop()
+
+        def _call():
+            try:
+                return ollama_chat(messages, model, stream=False)  # returns dict
+            except Exception as e:
+                return {"error": str(e)}
+
+        await update.message.chat.send_action(action="typing")
+        resp = await loop.run_in_executor(None, _call)
+        if isinstance(resp, dict) and resp.get("error"):
+            await update.message.reply_text(f"❌ Ollama error: {resp['error'][:200]}")
+            return
+        # Extract reply text
+        reply_text = None
+        if isinstance(resp, dict):
+            reply_text = resp.get("response") or resp.get("message")
+            if isinstance(reply_text, dict):
+                reply_text = reply_text.get("content")
+        if not reply_text:
+            reply_text = "(No response)"
+        await update.message.reply_text(reply_text)
+        # Update conversation history (keep it short)
+        session["history"] = (messages + [{"role": "assistant", "content": reply_text}])[-16:]
+        self.ollama_sessions[chat_id] = session
+
+    async def _handle_ollama_callback(self, query, callback_data: str):
+        chat_id = query.message.chat_id
+        session = self.ollama_sessions.get(chat_id) or {}
+        if callback_data.startswith("ollama_more:"):
+            try:
+                page = int(callback_data.split(":", 1)[1])
+            except Exception:
+                page = 0
+            session["page"] = max(0, page)
+            models = session.get("models") or []
+            kb = self._build_ollama_models_keyboard(models, session["page"])
+            await query.edit_message_text("🤖 Select an Ollama model to chat with:", reply_markup=kb)
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Page updated")
+            return
+        if callback_data.startswith("ollama_model:"):
+            model = callback_data.split(":", 1)[1]
+            session["model"] = model
+            session["active"] = True
+            self.ollama_sessions[chat_id] = session
+            await query.edit_message_text(f"💬 Chat started with `{model}`. Send a message.", parse_mode=ParseMode.MARKDOWN)
+            await query.answer("Model selected")
+            return
+        if callback_data == "ollama_options":
+            # Scaffold options UI (mode/stream toggles)
+            mode = session.get("mode") or "ai-human"
+            stream = bool(session.get("stream"))
+            mark_ai = "✅" if mode == "ai-human" else "⬜"
+            mark_ai2ai = "✅" if mode == "ai-ai" else "⬜"
+            mark_stream = "✅" if stream else "⬜"
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
+                [InlineKeyboardButton(f"{mark_stream} Streaming (later)", callback_data="ollama_toggle:stream")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")]
+            ])
+            await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
+            await query.answer("Options")
+            return
+        if callback_data.startswith("ollama_mode:"):
+            value = callback_data.split(":", 1)[1]
+            if value in ("ai-human", "ai-ai"):
+                session["mode"] = value
+                self.ollama_sessions[chat_id] = session
+                await query.answer(f"Mode: {value}")
+            return
+        if callback_data.startswith("ollama_toggle:"):
+            flag = callback_data.split(":", 1)[1]
+            if flag == "stream":
+                session["stream"] = not bool(session.get("stream"))
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Toggled stream (not yet)\nStreaming will be added next.")
+            return
+        if callback_data == "ollama_cancel":
+            self.ollama_sessions.pop(chat_id, None)
+            await query.answer("Closed")
+            try:
+                await query.edit_message_text("❌ Closed Ollama picker")
+            except Exception:
+                pass
+            return
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
