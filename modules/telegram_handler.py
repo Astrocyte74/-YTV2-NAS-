@@ -50,6 +50,7 @@ from modules.ollama_client import (
     OllamaClientError,
     get_models as ollama_get_models,
     chat as ollama_chat,
+    chat_stream as ollama_chat_stream,
     pull as ollama_pull,
 )
 import hashlib
@@ -956,9 +957,21 @@ class YouTubeTelegramBot:
         if not model:
             await update.message.reply_text("⚠️ No model selected. Send /ollama to choose one.")
             return
-        # Build non-stream chat payload
+        # Build chat payload
         history = session.get("history") or []
         messages = history + [{"role": "user", "content": text}]
+        if bool(session.get("stream")):
+            # Streaming reply
+            try:
+                final_text = await self._ollama_stream_chat(update, model, messages)
+            except Exception as exc:
+                await update.message.reply_text(f"❌ Stream error: {str(exc)[:200]}")
+                return
+            # Update history
+            session["history"] = (messages + [{"role": "assistant", "content": final_text}])[-16:]
+            self.ollama_sessions[chat_id] = session
+            return
+
         loop = asyncio.get_running_loop()
 
         def _call():
@@ -1059,6 +1072,89 @@ class YouTubeTelegramBot:
         session["history"] = (messages + [{"role": "assistant", "content": reply_text}])[-16:]
         self.ollama_sessions[chat_id] = session
 
+    async def _ollama_stream_chat(self, update: Update, model: str, messages: List[Dict[str, str]]) -> str:
+        """Stream tokens from the hub and live-edit a single message. Returns final text."""
+        from html import escape as _esc
+        chat_id = update.effective_chat.id
+        # Seed message
+        msg = await update.message.reply_text("⏳ …")
+        message_id = msg.message_id
+        app = getattr(self, 'application', None)
+        bot = getattr(app, 'bot', None)
+        loop = asyncio.get_running_loop()
+
+        final_text = {"buf": ""}
+
+        def _run_stream():
+            import json, time
+            last = 0.0
+            try:
+                for line in ollama_chat_stream(messages, model):
+                    try:
+                        data = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(data, dict):
+                        chunk = data.get("response")
+                        if isinstance(chunk, str) and chunk:
+                            final_text["buf"] += chunk
+                        if data.get("done"):
+                            # Final update
+                            txt = final_text["buf"]
+                            loop.call_soon_threadsafe(asyncio.create_task, bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:]))
+                            break
+                        # Throttle edits
+                        now = time.time()
+                        if now - last > 0.4:
+                            last = now
+                            txt = final_text["buf"]
+                            loop.call_soon_threadsafe(asyncio.create_task, bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:]))
+            except Exception as e:
+                loop.call_soon_threadsafe(asyncio.create_task, bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Stream error: {e}"))
+
+        await loop.run_in_executor(None, _run_stream)
+        return final_text["buf"]
+
+    async def _ollama_ai2ai_continue(self, chat_id: int):
+        session = self.ollama_sessions.get(chat_id) or {}
+        model = session.get("model")
+        if not model:
+            return
+        persona_a = session.get("persona_a", "Albert Einstein")
+        persona_b = session.get("persona_b", "Isaac Newton")
+        topic = session.get("topic", "The nature of space and time")
+        # Turn A
+        a_messages = [
+            {"role": "system", "content": f"You are {persona_a}. Respond concisely."},
+            {"role": "user", "content": f"Debate topic: {topic}. Present your view."},
+        ]
+        # Send via streaming
+        from types import SimpleNamespace
+        dummy_update = SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id), message=SimpleNamespace(reply_text=self.application.bot.send_message))
+        # We can't reuse dummy easily; instead, get a message by sending a small stub then editing via streaming helper that expects update.
+        class U:
+            def __init__(self, app, chat_id):
+                self.effective_chat = SimpleNamespace(id=chat_id)
+                self.message = SimpleNamespace()
+                self._app = app
+            async def reply_text(self, text):
+                return await self._app.bot.send_message(chat_id=chat_id, text=text)
+        u = U(self.application, chat_id)
+        # Monkey patch to fit helper signature
+        u.effective_chat = SimpleNamespace(id=chat_id)
+        u.message = SimpleNamespace()
+        u.message.reply_text = lambda text: self.application.bot.send_message(chat_id=chat_id, text=text)
+        a_text = await self._ollama_stream_chat(u, model, a_messages)
+        session["ai2ai_last_a"] = a_text
+        # Turn B
+        b_messages = [
+            {"role": "system", "content": f"You are {persona_b}. Respond concisely."},
+            {"role": "user", "content": f"Respond to {persona_a}'s statement: {a_text[:800]}"},
+        ]
+        b_text = await self._ollama_stream_chat(u, model, b_messages)
+        session["ai2ai_last_b"] = b_text
+        self.ollama_sessions[chat_id] = session
+
     async def _send_long_text_reply(self, update: Update, text: str, parse_mode: Optional[str] = None):
         text = text or ""
         # Keep a safety margin for formatting
@@ -1102,11 +1198,19 @@ class YouTubeTelegramBot:
             mark_ai = "✅" if mode == "ai-human" else "⬜"
             mark_ai2ai = "✅" if mode == "ai-ai" else "⬜"
             mark_stream = "✅" if stream else "⬜"
-            kb = InlineKeyboardMarkup([
+            # AI↔AI scaffolding controls
+            ai2ai_active = bool(session.get("ai2ai_active"))
+            ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
+            if mode == "ai-ai" and ai2ai_active:
+                ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
+            rows = [
                 [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
-                [InlineKeyboardButton(f"{mark_stream} Streaming (later)", callback_data="ollama_toggle:stream")],
-                [InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")]
-            ])
+                [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
+            ]
+            if ai2ai_row:
+                rows.append(ai2ai_row)
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")])
+            kb = InlineKeyboardMarkup(rows)
             await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
             await query.answer("Options")
             return
@@ -1172,7 +1276,7 @@ class YouTubeTelegramBot:
             if flag == "stream":
                 session["stream"] = not bool(session.get("stream"))
                 self.ollama_sessions[chat_id] = session
-                await query.answer("Toggled stream (not yet)\nStreaming will be added next.")
+                await query.answer(f"Streaming: {'on' if session['stream'] else 'off'}")
             return
         if callback_data == "ollama_cancel":
             self.ollama_sessions.pop(chat_id, None)
@@ -1182,6 +1286,22 @@ class YouTubeTelegramBot:
             except Exception:
                 pass
             return
+        if callback_data.startswith("ollama_ai2ai:"):
+            action = callback_data.split(":", 1)[1]
+            if action == "start":
+                # Initialize AI↔AI session with default personas
+                session["ai2ai_active"] = True
+                session.setdefault("persona_a", "Albert Einstein")
+                session.setdefault("persona_b", "Isaac Newton")
+                session.setdefault("topic", session.get("last_user") or "The nature of space and time")
+                self.ollama_sessions[chat_id] = session
+                await query.answer("AI↔AI started")
+                await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
+                return
+            if action == "continue":
+                await query.answer("Continuing…")
+                await self._ollama_ai2ai_continue(query.message.chat_id)
+                return
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
