@@ -1099,18 +1099,33 @@ class YouTubeTelegramBot:
                         if isinstance(chunk, str) and chunk:
                             final_text["buf"] += chunk
                         if data.get("done"):
-                            # Final update
-                            txt = final_text["buf"]
-                            loop.call_soon_threadsafe(asyncio.create_task, bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:]))
+                            # Final update (guard empty)
+                            txt = final_text["buf"] or "✅ Done"
+                            def _final():
+                                try:
+                                    return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
+                                except Exception:
+                                    return None
+                            loop.call_soon_threadsafe(asyncio.create_task, _final())
                             break
                         # Throttle edits
                         now = time.time()
-                        if now - last > 0.4:
+                        if (now - last > 0.4) and final_text["buf"]:
                             last = now
                             txt = final_text["buf"]
-                            loop.call_soon_threadsafe(asyncio.create_task, bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:]))
+                            def _upd():
+                                try:
+                                    return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
+                                except Exception:
+                                    return None
+                            loop.call_soon_threadsafe(asyncio.create_task, _upd())
             except Exception as e:
-                loop.call_soon_threadsafe(asyncio.create_task, bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Stream error: {e}"))
+                def _err():
+                    try:
+                        return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Stream error: {e}")
+                    except Exception:
+                        return None
+                loop.call_soon_threadsafe(asyncio.create_task, _err())
 
         await loop.run_in_executor(None, _run_stream)
         return final_text["buf"]
@@ -1171,6 +1186,29 @@ class YouTubeTelegramBot:
     async def _handle_ollama_callback(self, query, callback_data: str):
         chat_id = query.message.chat_id
         session = self.ollama_sessions.get(chat_id) or {}
+        # Small helper to re-render options with current state
+        async def _render_options():
+            mode = session.get("mode") or "ai-human"
+            stream = bool(session.get("stream"))
+            mark_ai = "✅" if mode == "ai-human" else "⬜"
+            mark_ai2ai = "✅" if mode == "ai-ai" else "⬜"
+            mark_stream = "✅" if stream else "⬜"
+            ai2ai_active = bool(session.get("ai2ai_active"))
+            ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
+            if mode == "ai-ai" and ai2ai_active:
+                ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
+            rows = [
+                [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
+                [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
+            ]
+            if ai2ai_row:
+                rows.append(ai2ai_row)
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")])
+            kb = InlineKeyboardMarkup(rows)
+            try:
+                await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
+            except Exception:
+                pass
         if callback_data.startswith("ollama_more:"):
             try:
                 page = int(callback_data.split(":", 1)[1])
@@ -1270,6 +1308,7 @@ class YouTubeTelegramBot:
                 session["mode"] = value
                 self.ollama_sessions[chat_id] = session
                 await query.answer(f"Mode: {value}")
+                await _render_options()
             return
         if callback_data.startswith("ollama_toggle:"):
             flag = callback_data.split(":", 1)[1]
@@ -1277,6 +1316,7 @@ class YouTubeTelegramBot:
                 session["stream"] = not bool(session.get("stream"))
                 self.ollama_sessions[chat_id] = session
                 await query.answer(f"Streaming: {'on' if session['stream'] else 'off'}")
+                await _render_options()
             return
         if callback_data == "ollama_cancel":
             self.ollama_sessions.pop(chat_id, None)
@@ -1296,7 +1336,11 @@ class YouTubeTelegramBot:
                 session.setdefault("topic", session.get("last_user") or "The nature of space and time")
                 self.ollama_sessions[chat_id] = session
                 await query.answer("AI↔AI started")
-                await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
+                try:
+                    await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
+                except Exception:
+                    pass
+                await _render_options()
                 return
             if action == "continue":
                 await query.answer("Continuing…")
