@@ -1086,46 +1086,53 @@ class YouTubeTelegramBot:
         final_text = {"buf": ""}
 
         def _run_stream():
-            import json, time
+            import json, time, logging
+            logging.info(f"Ollama streaming start: model={model} msgs={len(messages)}")
             last = 0.0
             try:
                 for line in ollama_chat_stream(messages, model):
+                    if not line:
+                        continue
                     try:
                         data = json.loads(line)
                     except Exception:
                         continue
-                    if isinstance(data, dict):
-                        chunk = data.get("response")
-                        if isinstance(chunk, str) and chunk:
-                            final_text["buf"] += chunk
-                        if data.get("done"):
-                            # Final update (guard empty)
-                            txt = final_text["buf"] or "✅ Done"
-                            def _final():
-                                try:
-                                    return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
-                                except Exception:
-                                    return None
-                            loop.call_soon_threadsafe(asyncio.create_task, _final())
-                            break
-                        # Throttle edits
-                        now = time.time()
-                        if (now - last > 0.4) and final_text["buf"]:
-                            last = now
-                            txt = final_text["buf"]
-                            def _upd():
-                                try:
-                                    return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
-                                except Exception:
-                                    return None
-                            loop.call_soon_threadsafe(asyncio.create_task, _upd())
+                    if not isinstance(data, dict):
+                        continue
+                    # First event is usually {"status":"starting"}
+                    if data.get("status") == "starting":
+                        continue
+                    chunk = data.get("response")
+                    if isinstance(chunk, str) and chunk:
+                        final_text["buf"] += chunk
+                    # Throttle edits
+                    now = time.time()
+                    if (now - last > 0.4) and final_text["buf"]:
+                        last = now
+                        txt = final_text["buf"]
+                        async def _upd():
+                            try:
+                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
+                            except Exception:
+                                pass
+                        asyncio.run_coroutine_threadsafe(_upd(), loop)
+                    if data.get("done"):
+                        # Final update (guard empty)
+                        txt = final_text["buf"] or "✅ Done"
+                        async def _final():
+                            try:
+                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
+                            except Exception:
+                                pass
+                        asyncio.run_coroutine_threadsafe(_final(), loop)
+                        break
             except Exception as e:
-                def _err():
+                async def _err():
                     try:
-                        return bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Stream error: {e}")
+                        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Stream error: {e}")
                     except Exception:
-                        return None
-                loop.call_soon_threadsafe(asyncio.create_task, _err())
+                        pass
+                asyncio.run_coroutine_threadsafe(_err(), loop)
 
         await loop.run_in_executor(None, _run_stream)
         return final_text["buf"]
