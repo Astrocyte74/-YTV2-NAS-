@@ -21,6 +21,11 @@ except Exception:  # pragma: no cover - optional dependency
 DEFAULT_ENGINE = "kokoro"
 
 
+class LocalTTSUnavailable(RuntimeError):
+    """Raised when the local TTS hub is unavailable or errors."""
+
+
+
 def _strip_api_suffix(url: str) -> str:
     url = url.rstrip("/")
     if url.endswith("/api"):
@@ -120,22 +125,28 @@ class TTSHubClient:
         loop = asyncio.get_running_loop()
 
         def _call() -> Dict[str, Any]:
-            resp = requests.post(  # type: ignore
-                f"{self.base_api_url}/synthesise", json=payload, timeout=timeout
-            )
-            resp.raise_for_status()
-            data = resp.json() or {}
-            audio_path = data.get("path")
-            if not audio_path:
-                raise ValueError("TTS hub response missing audio path.")
-            audio_url = urllib.parse.urljoin(audio_base.rstrip("/") + "/", audio_path.lstrip("/"))
-            audio_resp = requests.get(audio_url, timeout=60)  # type: ignore
-            audio_resp.raise_for_status()
-            data["audio_bytes"] = audio_resp.content
-            data["audio_url"] = audio_url
-            return data
+            try:
+                resp = requests.post(  # type: ignore
+                    f"{self.base_api_url}/synthesise", json=payload, timeout=timeout
+                )
+                resp.raise_for_status()
+                data = resp.json() or {}
+                audio_path = data.get("path")
+                if not audio_path:
+                    raise ValueError("TTS hub response missing audio path.")
+                audio_url = urllib.parse.urljoin(audio_base.rstrip("/") + "/", audio_path.lstrip("/"))
+                audio_resp = requests.get(audio_url, timeout=60)  # type: ignore
+                audio_resp.raise_for_status()
+                data["audio_bytes"] = audio_resp.content
+                data["audio_url"] = audio_url
+                return data
+            except requests.exceptions.RequestException as exc:  # type: ignore
+                raise LocalTTSUnavailable(str(exc))
 
-        return await loop.run_in_executor(None, _call)
+        try:
+            return await loop.run_in_executor(None, _call)
+        except (ValueError, LocalTTSUnavailable) as exc:
+            raise LocalTTSUnavailable(str(exc))
 
 
 def normalize_accent_family(accent_id: Optional[str]) -> str:
@@ -219,6 +230,7 @@ def accent_family_label(catalog: Dict[str, Any], family_id: Optional[str]) -> st
 __all__ = [
     "DEFAULT_ENGINE",
     "TTSHubClient",
+    "LocalTTSUnavailable",
     "normalize_accent_family",
     "filter_catalog_voices",
     "available_accent_families",

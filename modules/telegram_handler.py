@@ -6,7 +6,6 @@ It handles all Telegram bot interactions without embedded HTML generation.
 """
 
 import asyncio
-import io
 import json
 import logging
 import os
@@ -40,10 +39,12 @@ from nas_sync import upload_to_render, dual_sync_upload
 from modules.render_api_client import create_client_from_env as create_render_client
 from modules.tts_hub import (
     TTSHubClient,
+    LocalTTSUnavailable,
     accent_family_label,
     available_accent_families,
     filter_catalog_voices,
 )
+from modules.tts_queue import enqueue as enqueue_tts_job
 import hashlib
 import unicodedata
 
@@ -866,7 +867,11 @@ class YouTubeTelegramBot:
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
         query = update.callback_query
-        await query.answer()
+        # Acknowledge quickly to stop Telegram's loading spinner
+        try:
+            await query.answer()
+        except Exception as e:
+            logging.debug(f"callback answer() failed: {e}")
         
         user_id = query.from_user.id
         user_name = query.from_user.first_name or "Unknown"
@@ -876,6 +881,7 @@ class YouTubeTelegramBot:
             return
         
         callback_data = query.data
+        logging.info(f"🔔 Callback received: user={user_id} data={callback_data}")
         
         # Handle summary requests
         if callback_data.startswith("summarize_"):
@@ -1360,6 +1366,7 @@ class YouTubeTelegramBot:
 
         if display_voices:
             row: List[InlineKeyboardButton] = []
+            idx = 0
             for voice in display_voices:
                 voice_id = voice.get('id')
                 if not voice_id:
@@ -1369,11 +1376,9 @@ class YouTubeTelegramBot:
                     fav_meta = favorite_by_voice.get(voice_id)
                 if mode == 'favorites' and not fav_meta:
                     continue
-                if mode == 'favorites':
-                    slug = fav_meta.get('slug') or fav_meta.get('id') or voice_id
-                    key = f"fav|{slug}"
-                else:
-                    key = f"cat|{voice_id}"
+                # Build a compact, index-based key to avoid Telegram's 64-byte limit
+                short_key = f"v{idx}"
+                idx += 1
 
                 accent = voice.get('accent') or {}
                 flag = accent.get('flag') or ''
@@ -1390,8 +1395,16 @@ class YouTubeTelegramBot:
                     'engine': voice.get('engine'),
                     'favoriteSlug': (fav_meta.get('slug') if fav_meta else None) or (fav_meta.get('id') if fav_meta else None),
                 }
-                voice_lookup[key] = entry_lookup
-                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{key}"))
+                # Store both short and legacy keys for robustness
+                voice_lookup[short_key] = entry_lookup
+                if mode == 'favorites' and fav_meta:
+                    legacy_key = f"fav|{(fav_meta.get('slug') or fav_meta.get('id') or voice_id)}"
+                    voice_lookup[legacy_key] = entry_lookup
+                else:
+                    legacy_key = f"cat|{voice_id}"
+                    voice_lookup[legacy_key] = entry_lookup
+
+                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{short_key}"))
                 if len(row) == 3:
                     rows.append(row)
                     row = []
@@ -1418,6 +1431,238 @@ class YouTubeTelegramBot:
         keyboard = self._build_tts_catalog_keyboard(session)
         await query.edit_message_text(prompt, reply_markup=keyboard)
 
+    def _build_provider_keyboard(self, include_local: bool = True) -> InlineKeyboardMarkup:
+        row = []
+        if include_local:
+            row.append(InlineKeyboardButton("🏠 Local TTS hub", callback_data="tts_provider:local"))
+        else:
+            row.append(InlineKeyboardButton("🏠 Local TTS hub", callback_data="tts_provider:local"))
+        row.append(InlineKeyboardButton("☁️ OpenAI TTS", callback_data="tts_provider:openai"))
+        buttons = [row, [InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")]]
+        return InlineKeyboardMarkup(buttons)
+
+    def _build_local_failure_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Queue for later", callback_data="tts_queue:local"),
+             InlineKeyboardButton("☁️ Use OpenAI", callback_data="tts_provider:openai")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")]
+        ])
+
+    async def _prompt_tts_provider(self, query, session_payload: Dict[str, Any], title: str) -> None:
+        base_hint = session_payload.get('tts_base')
+        client = self.tts_client or self._resolve_tts_client(base_hint)
+        if client and client.base_api_url:
+            self.tts_client = client
+            session_payload['tts_base'] = client.base_api_url
+        else:
+            session_payload['tts_base'] = None
+        prompt_text = (
+            f"🎙️ Choose how to generate audio for **{self._escape_markdown(title)}**"
+        )
+        prompt_message = await query.message.reply_text(
+            prompt_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self._build_provider_keyboard(include_local=True)
+        )
+        self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
+
+    async def _execute_tts_job(self, query, session: Dict[str, Any], provider: str) -> None:
+        provider = (provider or 'openai').lower()
+        summary_text = session.get('summary_text') or session.get('text') or ''
+        if not summary_text:
+            logging.warning("TTS: session missing text; aborting")
+            await query.answer("Missing summary text", show_alert=True)
+            return
+
+        placeholders = session.get('placeholders') or {}
+        audio_filename = placeholders.get('audio_filename') or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+        json_placeholder = placeholders.get('json_placeholder') or f"tts_{int(time.time())}.json"
+
+        selected_voice = session.get('selected_voice') or {}
+        favorite_slug = selected_voice.get('favorite_slug')
+        voice_id = selected_voice.get('voice_id')
+        engine_id = selected_voice.get('engine')
+
+        await query.answer(f"Generating audio via {provider.title()}…")
+
+        provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
+        voice_label = session.get('last_voice') or ''
+        # As a fallback, try to infer a label from the selected_voice payload
+        if not voice_label:
+            try:
+                sv = session.get('selected_voice') or {}
+                slug = None
+                if sv.get('favorite_slug'):
+                    slug = f"fav|{sv.get('favorite_slug')}"
+                elif sv.get('voice_id'):
+                    slug = f"cat|{sv.get('voice_id')}"
+                if slug:
+                    voice_label = self._tts_voice_label(session, slug)
+            except Exception:
+                voice_label = ''
+
+        # Post a visible status bubble so the user knows the click registered
+        status_msg = None
+        try:
+            status_text = (
+                f"⏳ Generating TTS"
+                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                + f" • {provider_label}"
+            )
+            status_msg = await query.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            status_msg = None
+
+        try:
+            logging.info(
+                f"🧩 Starting TTS generation via {provider} | title={session.get('title')}"
+            )
+            audio_filepath = await self.summarizer.generate_tts_audio(
+                summary_text,
+                audio_filename,
+                json_placeholder,
+                provider=provider,
+                voice=voice_id,
+                engine=engine_id,
+                favorite_slug=favorite_slug,
+            )
+        except LocalTTSUnavailable as exc:
+            logging.warning(f"Local TTS unavailable during execution: {exc}")
+            await self._handle_local_unavailable(query, session, message=str(exc))
+            return
+        except Exception as exc:
+            logging.error(f"TTS synthesis error: {exc}")
+            await query.answer("TTS failed", show_alert=True)
+            return
+
+        if not audio_filepath or not Path(audio_filepath).exists():
+            logging.warning("TTS generation returned no audio")
+            await query.answer("TTS generation failed", show_alert=True)
+            return
+
+        logging.info(f"📦 TTS file ready: {audio_filepath}")
+        await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider)
+        # Update the status bubble to confirm
+        try:
+            if status_msg:
+                done_text = (
+                    f"✅ Generated"
+                    + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}"
+                )
+                await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+        # Keep session open so user can test more voices without restarting
+
+    async def _handle_local_unavailable(self, query, session: Dict[str, Any], message: str = "") -> None:
+        logging.warning(f"Local TTS unavailable: {message}")
+        notice = "⚠️ Local TTS hub unavailable. Queue the job for later or use OpenAI now?"
+        await query.edit_message_text(notice, reply_markup=self._build_local_failure_keyboard())
+        # keep session so user can choose fallback
+
+    async def _enqueue_tts_job(self, query, session: Dict[str, Any]) -> None:
+        job = {
+            "created_at": datetime.utcnow().isoformat(),
+            "summary_type": session.get('summary_type'),
+            "summary_text": session.get('summary_text'),
+            "title": session.get('title'),
+            "video_info": session.get('video_info'),
+            "placeholders": session.get('placeholders'),
+            "preferred_provider": "local",
+            "selected_voice": session.get('selected_voice'),
+        }
+        path = enqueue_tts_job(job)
+        await query.answer("Queued for local TTS")
+        await query.edit_message_text(
+            f"📥 Queued TTS job for later processing.\n🗂️ {path.name}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close", callback_data="tts_cancel")]])
+        )
+        logging.info(f"Queued TTS job at {path}")
+        self._remove_tts_session(query.message.chat_id, query.message.message_id)
+
+    async def _finalize_tts_delivery(self, query, session: Dict[str, Any], audio_path: Path, provider: str) -> None:
+        provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
+        metrics.record_tts(True)
+        video_info = session.get('video_info') or {}
+        mode = session.get('mode') or 'oneoff_tts'
+        title = session.get('title') or video_info.get('title', 'Unknown Title')
+        ledger_id = session.get('ledger_id')
+        normalized_video_id = session.get('normalized_video_id') or video_info.get('video_id')
+        summary_type = session.get('summary_type') or 'audio'
+        base_variant = session.get('base_variant') or 'audio'
+
+        # Resolve voice label to display in captions
+        voice_label = session.get('last_voice') or ''
+        if not voice_label:
+            try:
+                sv = session.get('selected_voice') or {}
+                slug = None
+                if sv.get('favorite_slug'):
+                    slug = f"fav|{sv.get('favorite_slug')}"
+                elif sv.get('voice_id'):
+                    slug = f"cat|{sv.get('voice_id')}"
+                if slug:
+                    voice_label = self._tts_voice_label(session, slug)
+            except Exception:
+                voice_label = ''
+
+        audio_reply_markup = None
+        if mode == 'summary_audio':
+            normalized_id = normalized_video_id or video_info.get('video_id') or 'unknown'
+            if ledger_id and ':' not in ledger_id:
+                ledger_id = f"yt:{ledger_id}"
+
+            content_identifier = (
+                session.get('result_id')
+                or video_info.get('content_id')
+                or ledger_id
+                or normalized_id
+            )
+            if content_identifier and ':' not in content_identifier:
+                content_identifier = f"yt:{content_identifier}"
+
+            self._sync_audio_to_targets(normalized_id, audio_path, ledger_id, summary_type)
+            if content_identifier:
+                self._upload_audio_to_render(content_identifier, audio_path)
+
+            audio_reply_markup = self._build_audio_inline_keyboard(
+                normalized_id,
+                base_variant,
+                video_info.get('video_id', '')
+            )
+
+        try:
+            with audio_path.open('rb') as audio_file:
+                if mode == 'summary_audio':
+                    base = f"🎧 **Audio Summary**: {self._escape_markdown(title)}"
+                    voice_bit = f" • {self._escape_markdown(voice_label)}" if voice_label else ""
+                    caption = f"{base}{voice_bit}\n🎵 {provider_label}"
+                else:
+                    caption = (
+                        f"🎧 **TTS Preview**"
+                        + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}"
+                    )
+                await query.message.reply_voice(
+                    voice=audio_file,
+                    caption=caption,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=audio_reply_markup
+                )
+            logging.info(f"✅ Successfully sent audio summary for {title} using {provider_label}")
+        except Exception as exc:
+            logging.error(f"Failed to send voice message: {exc}")
+        # Do not close the TTS picker; refresh it (when catalog flow is active)
+        try:
+            if session.get('catalog'):
+                await self._refresh_tts_catalog(query, session)
+            else:
+                # Favorites-only flow: keep message as-is; show a brief toast
+                await query.answer("Audio sent — select another voice")
+        except Exception:
+            pass
+
     def _tts_session_key(self, chat_id: int, message_id: int) -> tuple:
         return (chat_id, message_id)
 
@@ -1435,7 +1680,7 @@ class YouTubeTelegramBot:
         row: List[InlineKeyboardButton] = []
         max_per_row = 3
 
-        for profile in favorites:
+        for i, profile in enumerate(favorites):
             slug = profile.get('slug') or profile.get('voiceId')
             if not slug:
                 continue
@@ -1444,7 +1689,8 @@ class YouTubeTelegramBot:
                 label = label.split("·", 1)[1].strip() or label
             if len(label) > 28:
                 label = f"{label[:25]}…"
-            row.append(InlineKeyboardButton(f"🎤 {label}", callback_data=f"tts_voice:{slug}"))
+            short_key = f"v{i}"
+            row.append(InlineKeyboardButton(f"🎤 {label}", callback_data=f"tts_voice:{short_key}"))
             if len(row) == max_per_row:
                 buttons.append(row)
                 row = []
@@ -1557,6 +1803,7 @@ class YouTubeTelegramBot:
                 "favorites": favorites_list,
                 "voice_mode": 'favorites' if favorites_list else 'all',
                 "tts_base": client.base_api_url,
+                "mode": "oneoff_tts",
             }
             prompt = self._tts_prompt_text(speak_text, catalog=catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
@@ -1579,8 +1826,26 @@ class YouTubeTelegramBot:
             return
 
         prompt = self._tts_prompt_text(speak_text)
+        # Build favorites keyboard and a compact lookup for selections
         keyboard = self._build_tts_keyboard(favorites)
         prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)
+
+        # Build a compact lookup: v0, v1, ... -> favorite voice/meta
+        voice_lookup: Dict[str, Dict[str, Any]] = {}
+        for i, fav in enumerate(favorites):
+            slug = fav.get('slug') or fav.get('voiceId')
+            if not slug:
+                continue
+            short_key = f"v{i}"
+            entry = {
+                'label': (fav.get('label') or slug),
+                'voice': None,
+                'voiceId': fav.get('voiceId'),
+                'engine': fav.get('engine'),
+                'favoriteSlug': slug,
+            }
+            voice_lookup[short_key] = entry
+            voice_lookup[f"fav|{slug}"] = entry
 
         session_payload = {
             "text": speak_text,
@@ -1588,16 +1853,23 @@ class YouTubeTelegramBot:
             "tts_base": client.base_api_url,
             "last_voice": None,
             "selected_family": None,
+            "voice_lookup": voice_lookup,
+            "mode": "oneoff_tts",
         }
         self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 
     async def _handle_tts_callback(self, query, callback_data: str):
+        logging.info(f"🎛️ TTS callback: {callback_data}")
         message = query.message
         if not message:
             return
         chat_id = message.chat_id
         message_id = message.message_id
         session = self._get_tts_session(chat_id, message_id)
+        if session:
+            logging.debug(f"TTS session found for {chat_id}:{message_id} keys={list(session.keys())}")
+        else:
+            logging.warning(f"TTS session missing for {chat_id}:{message_id}")
 
         if not session:
             await query.answer("Session expired", show_alert=True)
@@ -1609,6 +1881,7 @@ class YouTubeTelegramBot:
 
         client = self._resolve_tts_client(session.get('tts_base'))
         if not client or not client.base_api_url:
+            logging.warning("TTS hub unavailable during TTS callback")
             await query.answer("TTS hub unavailable", show_alert=True)
             return
 
@@ -1660,10 +1933,57 @@ class YouTubeTelegramBot:
                 await query.answer("Accent updated")
                 return
 
+        if callback_data.startswith("tts_provider:"):
+            provider = callback_data.split(":", 1)[1]
+            session['provider'] = provider
+            if provider == 'local':
+                client = self._resolve_tts_client(session.get('tts_base'))
+                session['tts_base'] = client.base_api_url if client else None
+                catalog = session.get('catalog')
+                favorites = session.get('favorites')
+                if client and not catalog:
+                    try:
+                        catalog = await client.fetch_catalog()
+                        session['catalog'] = catalog
+                        # Populate favorites: prefer tag=telegram, fall back to global
+                        if not favorites:
+                            try:
+                                favorites = await client.fetch_favorites(tag="telegram")
+                            except Exception:
+                                favorites = []
+                            if not favorites:
+                                try:
+                                    favorites = await client.fetch_favorites()
+                                except Exception:
+                                    favorites = []
+                            session['favorites'] = favorites or []
+                    except Exception as exc:
+                        await self._handle_local_unavailable(query, session, message=str(exc))
+                        return
+                if not catalog or not catalog.get('voices'):
+                    await self._handle_local_unavailable(query, session, message="No voices available")
+                    return
+                if favorites is None and session.get('favorites') is None:
+                    session['favorites'] = []
+                # Default to favorites when available
+                session['voice_mode'] = session.get('voice_mode') or ('favorites' if session.get('favorites') else 'all')
+                self._store_tts_session(query.message.chat_id, query.message.message_id, session)
+                await self._refresh_tts_catalog(query, session)
+                await query.answer("Select a voice")
+                return
+            else:
+                await self._execute_tts_job(query, session, provider)
+            return
+
+        if callback_data.startswith("tts_queue:"):
+            await self._enqueue_tts_job(query, session)
+            return
+
         if not callback_data.startswith("tts_voice:"):
             return
 
         payload = callback_data.split(":", 1)[1]
+        logging.info(f"🔊 Voice selected payload={payload}")
         kind, _, identifier = payload.partition("|")
         if not identifier:
             identifier = kind
@@ -1672,73 +1992,41 @@ class YouTubeTelegramBot:
         voice_lookup = session.get('voice_lookup') or {}
         entry = voice_lookup.get(payload) or {}
 
-        if kind == 'fav':
-            favorite_slug = entry.get('favoriteSlug') or identifier
-            voice_id = entry.get('voiceId')
-            engine_id = entry.get('engine')
-        else:
-            favorite_slug = None
-            voice_id = entry.get('voiceId') or identifier
-            engine_id = entry.get('engine')
+        # Prefer values from the lookup entry (works for both catalog and favorites)
+        favorite_slug = entry.get('favoriteSlug') if entry else None
+        voice_id = entry.get('voiceId') if entry else None
+        engine_id = entry.get('engine') if entry else None
 
-        label = self._tts_voice_label(session, payload)
-        text = session.get("text", "")
-        client = self._resolve_tts_client(session.get('tts_base'))
-        if not client or not client.base_api_url:
-            await query.answer("TTS hub unavailable", show_alert=True)
-            return
+        # Legacy/fallback: if no entry was found, infer from the payload
+        if not favorite_slug and not voice_id:
+            if kind == 'fav':
+                favorite_slug = identifier
+            else:
+                voice_id = identifier
 
-        await query.answer(f"Generating {label}…")
+        session['selected_voice'] = {
+            'favorite_slug': favorite_slug,
+            'voice_id': voice_id,
+            'engine': engine_id,
+        }
 
-        if catalog and kind == 'cat' and not voice_id:
-            favorite_slug = None
-            voice_id = identifier
-            engine_id = entry.get('engine')
-        if not catalog and favorite_slug is None:
-            favorite_slug = identifier
+        provider_choice = session.get('provider') or 'local'
+        # Remember last selection for prompt header
+        try:
+            session['last_voice'] = self._tts_voice_label(session, payload)
+        except Exception:
+            pass
+        self._store_tts_session(chat_id, message_id, session)
+
+        logging.info(
+            f"🚀 Executing TTS job provider={provider_choice} fav={favorite_slug} voice_id={voice_id} engine={engine_id}"
+        )
 
         try:
-            result = await client.synthesise(
-                text,
-                favorite_slug=favorite_slug,
-                voice_id=voice_id,
-                engine=engine_id,
-            )
-        except Exception as e:
-            logging.error(f"TTS synthesis failed: {e}")
-            await query.answer("❌ TTS failed", show_alert=True)
+            await self._execute_tts_job(query, session, provider_choice)
+        except LocalTTSUnavailable as exc:
+            await self._handle_local_unavailable(query, session, message=str(exc))
             return
-
-        audio_bytes = result.get("audio_bytes")
-        filename = result.get("filename") or f"{identifier}.wav"
-        if not audio_bytes:
-            await query.answer("❌ No audio received", show_alert=True)
-            return
-
-        bio = io.BytesIO(audio_bytes)
-        bio.name = filename
-
-        try:
-            await query.message.reply_audio(audio=bio, caption=f"🎤 {label}")
-        except Exception as send_error:
-            logging.error(f"Failed to send TTS audio: {send_error}")
-            await query.answer("❌ Failed to send audio", show_alert=True)
-            return
-
-        session["last_voice"] = label
-
-        if catalog:
-            try:
-                await self._refresh_tts_catalog(query, session)
-            except Exception:
-                pass
-        else:
-            prompt = self._tts_prompt_text(text, last_voice=label)
-            keyboard = self._build_tts_keyboard(session.get("favorites", []))
-            try:
-                await query.edit_message_text(prompt, reply_markup=keyboard)
-            except Exception:
-                pass
 
     def _get_dashboard_base(self) -> Optional[str]:
         return (
@@ -2455,96 +2743,52 @@ class YouTubeTelegramBot:
             
             # Generate TTS audio for audio summaries (after text is sent)
             if summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es"):
-                await self._generate_and_send_tts(query, result, summary, summary_type)
+                await self._prepare_tts_generation(query, result, summary, summary_type)
             
         except Exception as e:
             logging.error(f"Error sending formatted response: {e}")
             await query.edit_message_text("❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
     
-    async def _generate_and_send_tts(self, query, result: Dict[str, Any], summary_text: str, summary_type: str):
-        """Generate TTS audio and send as voice message (separate from text summary)."""
-        try:
-            # Get video metadata  
-            video_info = result.get('metadata', {})
-            title = video_info.get('title', 'Unknown Title')
-            
-            # Determine ledger/content identifiers for follow-up sync
-            ledger_id = (
-                result.get('id')
-                or video_info.get('content_id')
-                or (self.current_item or {}).get('content_id')
-            )
+    async def _prepare_tts_generation(self, query, result: Dict[str, Any], summary_text: str, summary_type: str):
+        """Store context and prompt the user to choose a TTS provider."""
+        video_info = result.get('metadata', {})
+        title = video_info.get('title', 'Unknown Title')
 
-            normalized_video_id = video_info.get('video_id')
-            if not normalized_video_id and ledger_id:
-                normalized_video_id = self._normalize_content_id(ledger_id)
+        ledger_id = (
+            result.get('id')
+            or video_info.get('content_id')
+            or (self.current_item or {}).get('content_id')
+        )
 
-            if not ledger_id and normalized_video_id:
-                ledger_id = f"yt:{normalized_video_id}"
+        normalized_video_id = video_info.get('video_id')
+        if not normalized_video_id and ledger_id:
+            normalized_video_id = self._normalize_content_id(ledger_id)
 
-            # Generate TTS audio
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            video_id = video_info.get('video_id', 'unknown')
-            audio_filename = f"audio_{video_id}_{timestamp}.mp3"
-            
-            # Generate placeholder path for SQLite-only workflow (no JSON files needed)
-            json_filepath = f"yt_{video_id}_placeholder.json"  # Placeholder used for NAS compatibility
-            logging.info(f"📊 Using Postgres-centric workflow (SQLite disabled) for video_id: {video_id}")
+        if not ledger_id and normalized_video_id:
+            ledger_id = f"yt:{normalized_video_id}"
 
-            # Generate the audio file (run in executor to avoid blocking event loop)
-            logging.info(f"🎙️ Generating TTS audio for: {title}")
-            loop = asyncio.get_running_loop()
-            audio_filepath = await loop.run_in_executor(
-                None, 
-                lambda: asyncio.run(self.summarizer.generate_tts_audio(summary_text, audio_filename, json_filepath))
-            )
-            
-            base_variant = (summary_type or "").split(":", 1)[0]
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        video_id = video_info.get('video_id', 'unknown')
+        base_variant = (summary_type or "").split(":", 1)[0]
+        placeholders = {
+            "audio_filename": f"audio_{video_id}_{timestamp}.mp3",
+            "json_placeholder": f"yt_{video_id}_placeholder.json",
+        }
 
-            if audio_filepath and Path(audio_filepath).exists():
-                metrics.record_tts(True)
-                audio_path_obj = Path(audio_filepath)
-                normalized_id = normalized_video_id or video_id
-                content_identifier = (
-                    result.get('id')
-                    or video_info.get('content_id')
-                    or ledger_id
-                    or normalized_id
-                )
-                if content_identifier and ":" not in content_identifier:
-                    content_identifier = f"yt:{content_identifier}"
+        session_payload = {
+            "mode": "summary_audio",
+            "summary_text": summary_text,
+            "summary_type": summary_type,
+            "title": title,
+            "video_info": video_info,
+            "ledger_id": ledger_id,
+            "normalized_video_id": normalized_video_id,
+            "placeholders": placeholders,
+            "base_variant": base_variant,
+            "result_id": result.get('id'),
+        }
 
-                self._sync_audio_to_targets(
-                    normalized_id,
-                    audio_path_obj,
-                    ledger_id,
-                    summary_type,
-                )
-                if content_identifier:
-                    self._upload_audio_to_render(content_identifier, audio_path_obj)
-
-                try:
-                    audio_reply_markup = self._build_audio_inline_keyboard(
-                        normalized_id,
-                        base_variant,
-                        video_info.get('video_id', '')
-                    )
-                    with open(audio_filepath, 'rb') as audio_file:
-                        await query.message.reply_voice(
-                            voice=audio_file,
-                            caption=f"🎧 **Audio Summary**: {self._escape_markdown(title)}\n"
-                                   f"🎵 Generated with OpenAI TTS",
-                            parse_mode=ParseMode.MARKDOWN,
-                            reply_markup=audio_reply_markup
-                        )
-                    logging.info(f"✅ Successfully sent audio summary for: {title}")
-                except Exception as e:
-                    logging.error(f"❌ Failed to send voice message: {e}")
-            else:
-                logging.warning("⚠️ TTS generation failed")
-                
-        except Exception as e:
-            logging.error(f"Error generating TTS audio: {e}")
+        await self._prompt_tts_provider(query, session_payload, title)
     
     def _format_duration_and_savings(self, metadata: Dict) -> str:
         """Format video duration and calculate time savings from summary."""

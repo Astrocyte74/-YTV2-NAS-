@@ -43,6 +43,8 @@ from langchain_community.chat_models import ChatOllama
 from langchain_core.messages import HumanMessage
 import requests
 
+from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
+
 # Import LLM configuration manager
 from llm_config import llm_config
 
@@ -74,24 +76,26 @@ class YouTubeSummarizer:
         """
         self.downloads_dir = Path("./downloads")
         self.downloads_dir.mkdir(exist_ok=True)
-        
+
         # Get LLM configuration from mkpy system
         try:
             self.llm_provider, self.model, api_key = llm_config.get_model_config(llm_provider, model)
         except ValueError as e:
             print(f"🔴 {e}")
             raise
-        
+
         # Set Ollama base URL
         self.ollama_base_url = ollama_base_url or llm_config.ollama_host
-        
+
         # Initialize LLM based on determined configuration
         self._initialize_llm(api_key)
-        
+
         # Lazy-initialized Reddit fetcher
         self._reddit_fetcher: Optional["RedditFetcher"] = None
         # Lazy-initialized web page fetcher
         self._web_fetcher: Optional["WebPageFetcher"] = None
+        # Lazy-initialized local TTS hub client
+        self._tts_hub_client: Optional[TTSHubClient] = None
     
     def _initialize_llm(self, api_key: str):
         """Initialize the LLM based on provider and model"""
@@ -2454,7 +2458,18 @@ Multiple Categories (when content genuinely spans areas):
             
         return chunks
     
-    async def _generate_chunked_tts(self, text_chunks: List[str], base_filename: str, json_filepath: str = None) -> Optional[str]:
+    async def _generate_chunked_tts(
+        self,
+        text_chunks: List[str],
+        base_filename: str,
+        json_filepath: str = None,
+        *,
+        provider: str = "openai",
+        local_client: Optional[TTSHubClient] = None,
+        voice: Optional[str] = None,
+        engine: Optional[str] = None,
+        favorite_slug: Optional[str] = None,
+    ) -> Optional[str]:
         """Generate TTS for multiple chunks and combine them"""
         import tempfile
         import shutil
@@ -2470,7 +2485,15 @@ Multiple Categories (when content genuinely spans areas):
                     chunk_filename = temp_file.name
                 
                 # Generate TTS for this chunk
-                chunk_result = await self._generate_single_tts(chunk, chunk_filename)
+                chunk_result = await self._generate_single_tts(
+                    chunk,
+                    chunk_filename,
+                    provider=provider,
+                    local_client=local_client,
+                    voice=voice,
+                    engine=engine,
+                    favorite_slug=favorite_slug,
+                )
                 if chunk_result:
                     chunk_files.append(chunk_filename)
                     print(f"✅ Generated chunk {i+1}")
@@ -2525,8 +2548,44 @@ Multiple Categories (when content genuinely spans areas):
                 except:
                     pass
     
-    async def _generate_single_tts(self, text: str, output_filename: str) -> Optional[str]:
+    async def _generate_single_tts(
+        self,
+        text: str,
+        output_filename: str,
+        *,
+        provider: str = "openai",
+        local_client: Optional[TTSHubClient] = None,
+        voice: Optional[str] = None,
+        engine: Optional[str] = None,
+        favorite_slug: Optional[str] = None,
+    ) -> Optional[str]:
         """Generate TTS for a single text chunk"""
+        provider = (provider or "openai").lower()
+
+        if provider == "local":
+            client = local_client or self._resolve_local_tts_client()
+            if not client:
+                raise LocalTTSUnavailable("Local TTS hub is not configured.")
+            try:
+                result = await client.synthesise(
+                    text,
+                    voice_id=voice,
+                    engine=engine,
+                    favorite_slug=favorite_slug,
+                )
+            except LocalTTSUnavailable:
+                raise
+            except Exception as exc:
+                raise LocalTTSUnavailable(str(exc))
+
+            audio_bytes = result.get("audio_bytes")
+            if not audio_bytes:
+                raise LocalTTSUnavailable("Local TTS hub returned no audio data.")
+            with open(output_filename, "wb") as f:
+                f.write(audio_bytes)
+            return output_filename
+
+        # Default to OpenAI provider
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             print("❌ OPENAI_API_KEY not found")
@@ -2541,7 +2600,7 @@ Multiple Categories (when content genuinely spans areas):
         payload = {
             "model": "tts-1",
             "input": text,
-            "voice": "alloy",
+            "voice": voice or "fable",
             "response_format": "mp3"
         }
         
@@ -2659,92 +2718,83 @@ Multiple Categories (when content genuinely spans areas):
         print(f"❌ All {operation_name} attempts failed")
         return None
 
-    async def generate_tts_audio(self, text: str, output_filename: str = None, json_filepath: str = None) -> Optional[str]:
-        """Generate TTS audio using OpenAI API with robust error handling and auto-condensing
-        
-        Args:
-            text: Text to convert to speech
-            output_filename: Optional filename (will generate if not provided)
-            json_filepath: Optional path to JSON report to update with MP3 metadata
-            
-        Returns:
-            Path to generated audio file or None if failed
-        """
+    async def generate_tts_audio(
+        self,
+        text: str,
+        output_filename: str = None,
+        json_filepath: str = None,
+        *,
+        provider: str = "openai",
+        voice: Optional[str] = None,
+        engine: Optional[str] = None,
+        favorite_slug: Optional[str] = None,
+    ) -> Optional[str]:
+        """Generate TTS audio with support for local hub or OpenAI."""
+        provider = (provider or "openai").lower()
+
+        # Generate filename if not provided
+        if not output_filename:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_filename = f"audio_summary_{timestamp}.mp3"
+
+        # Ensure exports directory exists
+        exports_dir = Path('exports')
+        exports_dir.mkdir(exist_ok=True)
+        output_path = exports_dir / output_filename
+
+        # Determine whether chunking is required (OpenAI limit ~4096 chars)
+        should_chunk = len(text) > 4090
+        chunks = self._split_text_for_tts(text) if should_chunk else [text]
+
+        local_client: Optional[TTSHubClient] = None
+        if provider == "local":
+            local_client = self._resolve_local_tts_client()
+            if not local_client:
+                raise LocalTTSUnavailable("Local TTS hub is not configured.")
+
         try:
-            # Get API key from environment
-            api_key = os.getenv('OPENAI_API_KEY')
-            if not api_key:
-                print("❌ OPENAI_API_KEY not found in environment")
-                return None
-            
-            # Step 1: Handle TTS character limit with chunking approach
-            if len(text) > 4090:  # Only chunk when actually exceeding OpenAI's 4096 limit
-                print(f"📝 Audio summary is {len(text)} characters (exceeds OpenAI's 4096 TTS limit)")
-                print("🔄 Splitting into chunks and combining audio files...")
-                tts_chunks = self._split_text_for_tts(text)
-                print(f"✅ Split into {len(tts_chunks)} chunks (preserves all content)")
-                return await self._generate_chunked_tts(tts_chunks, output_filename, json_filepath)
+            if len(chunks) > 1:
+                print(f"📝 Audio summary is {len(text)} characters, generating across {len(chunks)} chunks…")
+                result_path = await self._generate_chunked_tts(
+                    chunks,
+                    output_filename,
+                    json_filepath,
+                    provider=provider,
+                    local_client=local_client,
+                    voice=voice,
+                    engine=engine,
+                    favorite_slug=favorite_slug,
+                )
             else:
-                print(f"✅ Audio summary length: {len(text)} chars (within TTS limits)")
-                tts_text = text
-            
-            # Generate filename if not provided
-            if not output_filename:
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                output_filename = f"audio_summary_{timestamp}.mp3"
-            
-            # Ensure exports directory exists
-            exports_dir = Path('exports')
-            exports_dir.mkdir(exist_ok=True)
-            output_path = exports_dir / output_filename
-            
-            # Step 2: Make API request with robust retry logic
-            url = "https://api.openai.com/v1/audio/speech"
-            payload = {
-                "model": "tts-1",  # Standard quality (tts-1-hd for higher quality)
-                "input": tts_text,
-                "voice": "fable"  # CURRENT: Warm, engaging male voice - great for storytelling
-            }
-            
-            # OpenAI TTS Voice Options (change "voice" above to switch):
-            # "alloy"   - Male (neutral): Natural, smooth young male voice, could pass as gender-neutral
-            # "echo"    - Male: Articulate, precise young male voice, very proper English style
-            # "fable"   - Male: Warm, engaging young male voice, perfect for storytelling (CURRENT)
-            # "onyx"    - Male: Deep, authoritative older male voice, BBC presenter style  
-            # "nova"    - Female: Bright, energetic young female voice
-            # "shimmer" - Female: Soft, gentle young female voice, soothing tone
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            print("🎙️ Generating TTS audio with OpenAI...")
-            response = self._make_request_with_retry(url, headers, payload)
-            
-            if response and response.status_code == 200:
-                with open(output_path, "wb") as f:
-                    f.write(response.content)
-                print(f"✅ TTS audio saved to {output_path}")
-                
-                # Update JSON with MP3 metadata if generation succeeded
-                if json_filepath:
+                result_path = await self._generate_single_tts(
+                    chunks[0],
+                    str(output_path),
+                    provider=provider,
+                    local_client=local_client,
+                    voice=voice,
+                    engine=engine,
+                    favorite_slug=favorite_slug,
+                )
+                if result_path and json_filepath:
                     self._update_json_with_mp3_metadata(json_filepath, str(output_path))
-                
-                return str(output_path)
-            elif response:
-                print(f"❌ Final TTS API Error: {response.status_code} - {response.text}")
-                return None
-            else:
-                print("❌ All TTS API attempts failed")
-                return None
-                
-        except Exception as e:
-            print(f"❌ TTS generation failed: {str(e)}")
+
+            if result_path and Path(result_path).exists():
+                print(f"✅ TTS audio saved to {result_path}")
+                return result_path
+
+            print("❌ TTS generation returned no audio")
+            return None
+
+        except LocalTTSUnavailable as exc:
+            print(f"⚠️ Local TTS unavailable: {exc}")
+            raise
+        except Exception as exc:
+            print(f"❌ TTS generation failed: {exc}")
             return None
 
     def _update_json_with_mp3_metadata(self, json_filepath: str, mp3_filepath: str) -> bool:
         """Update JSON report with MP3 metadata after TTS generation
-        
+
         Args:
             json_filepath: Path to the JSON report file to update
             mp3_filepath: Path to the generated MP3 file
@@ -2772,6 +2822,15 @@ Multiple Categories (when content genuinely spans areas):
         except Exception as e:
             print(f"❌ Error updating JSON with MP3 metadata: {e}")
             return False
+
+    def _resolve_local_tts_client(self) -> Optional[TTSHubClient]:
+        if self._tts_hub_client and self._tts_hub_client.base_api_url:
+            return self._tts_hub_client
+        client = TTSHubClient.from_env()
+        if client and client.base_api_url:
+            self._tts_hub_client = client
+            return client
+        return None
 
         # HUME AI TTS (COMMENTED OUT - keeping for reference)
         # try:
