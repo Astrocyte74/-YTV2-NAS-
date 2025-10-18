@@ -1514,7 +1514,7 @@ class YouTubeTelegramBot:
 
         logging.info(f"📦 TTS file ready: {audio_filepath}")
         await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider)
-        self._remove_tts_session(query.message.chat_id, query.message.message_id)
+        # Keep session open so user can test more voices without restarting
 
     async def _handle_local_unavailable(self, query, session: Dict[str, Any], message: str = "") -> None:
         logging.warning(f"Local TTS unavailable: {message}")
@@ -1589,8 +1589,13 @@ class YouTubeTelegramBot:
             logging.info(f"✅ Successfully sent audio summary for {title} using {provider_label}")
         except Exception as exc:
             logging.error(f"Failed to send voice message: {exc}")
+        # Do not close the TTS picker; refresh it (when catalog flow is active)
         try:
-            await query.edit_message_text(f"✅ Generated audio with {provider_label}", reply_markup=None)
+            if session.get('catalog'):
+                await self._refresh_tts_catalog(query, session)
+            else:
+                # Favorites-only flow: keep message as-is; show a brief toast
+                await query.answer("Audio sent — select another voice")
         except Exception:
             pass
 
@@ -1931,6 +1936,13 @@ class YouTubeTelegramBot:
         }
 
         provider_choice = session.get('provider') or 'local'
+        # Remember last selection for prompt header
+        try:
+            session['last_voice'] = self._tts_voice_label(session, payload)
+        except Exception:
+            pass
+        self._store_tts_session(chat_id, message_id, session)
+
         logging.info(
             f"🚀 Executing TTS job provider={provider_choice} fav={favorite_slug} voice_id={voice_id} engine={engine_id}"
         )
