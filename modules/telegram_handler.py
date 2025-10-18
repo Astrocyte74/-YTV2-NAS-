@@ -38,6 +38,12 @@ from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
 from nas_sync import upload_to_render, dual_sync_upload
 from modules.render_api_client import create_client_from_env as create_render_client
+from modules.tts_hub import (
+    TTSHubClient,
+    accent_family_label,
+    available_accent_families,
+    filter_catalog_voices,
+)
 import hashlib
 import unicodedata
 
@@ -78,6 +84,7 @@ class YouTubeTelegramBot:
         self.json_exporter = JSONReportGenerator("./data/reports")
         # In-memory cache for one-off TTS playback keyed by (chat_id, message_id)
         self.tts_cache: Dict[tuple, Dict[str, Any]] = {}
+        self.tts_client: Optional[TTSHubClient] = None
         # Interactive TTS sessions keyed by (chat_id, message_id)
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
         
@@ -1180,6 +1187,19 @@ class YouTubeTelegramBot:
         base.mkdir(parents=True, exist_ok=True)
         return base / f"{message_id}.json"
 
+    def _resolve_tts_client(self, base_hint: Optional[str] = None) -> Optional[TTSHubClient]:
+        client = self.tts_client
+        if client and client.base_api_url:
+            return client
+        base = base_hint or os.getenv('TTSHUB_API_BASE')
+        if not base:
+            return None
+        client = TTSHubClient(base)
+        if client.base_api_url:
+            self.tts_client = client
+            return client
+        return None
+
     def _cache_oneoff_tts(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
         try:
             self.tts_cache[(chat_id, message_id)] = dict(payload)
@@ -1227,70 +1247,6 @@ class YouTubeTelegramBot:
         return s.strip()
 
     # ------------------------- External TTS hub helpers -------------------------
-    def _get_tts_base_url(self) -> Optional[str]:
-        base = os.getenv('TTSHUB_API_BASE')
-        if not base:
-            return None
-        return base.rstrip('/')
-
-    @staticmethod
-    def _tts_audio_base(base_url: str) -> str:
-        base = base_url.rstrip('/') if base_url else ''
-        if base.endswith('/api'):
-            base = base[:-4]
-        return base or base_url
-
-    async def _fetch_tts_catalog(self, base_url: str, engine: str = "kokoro") -> Optional[Dict[str, Any]]:
-        if requests is None:
-            raise RuntimeError("requests library is not available for HTTP calls.")
-
-        async_loop = asyncio.get_running_loop()
-        url = f"{base_url}/voices_catalog"
-        params = {'engine': engine} if engine else {}
-
-        def _call():
-            resp = requests.get(url, params=params, timeout=12)
-            if resp.status_code == 404:
-                return None
-            resp.raise_for_status()
-            return resp.json()
-
-        return await async_loop.run_in_executor(None, _call)
-
-    def _normalize_accent_family(self, accent_id: Optional[str]) -> str:
-        accent_id = (accent_id or '').lower()
-        if accent_id.startswith('us'):
-            return 'us'
-        if accent_id.startswith('uk'):
-            return 'uk'
-        return 'other'
-
-    def _filter_catalog_voices(
-        self,
-        catalog: Dict[str, Any],
-        *,
-        gender: Optional[str] = None,
-        family: Optional[str] = None,
-        allowed_ids: Optional[set] = None,
-    ) -> List[Dict[str, Any]]:
-        voices = (catalog or {}).get('voices') or []
-        result = []
-        for voice in voices:
-            voice_id = voice.get('id')
-            if not voice_id:
-                continue
-            if allowed_ids is not None and voice_id not in allowed_ids:
-                continue
-            if gender and voice.get('gender') != gender:
-                continue
-            accent_id = (voice.get('accent') or {}).get('id')
-            family_id = self._normalize_accent_family(accent_id)
-            if family and family_id != family:
-                continue
-            result.append(voice)
-        result.sort(key=lambda v: (v.get('label') or v.get('id') or '').lower())
-        return result
-
     def _gender_label(self, gender: Optional[str]) -> str:
         if not gender:
             return "All genders"
@@ -1300,43 +1256,6 @@ class YouTubeTelegramBot:
             "unknown": "Unknown",
         }
         return mapping.get(gender, gender.title())
-
-    def _family_label(self, catalog: Dict[str, Any], family_id: Optional[str]) -> str:
-        families = ((catalog or {}).get('filters') or {}).get('accentFamilies', {}).get('any', [])
-        for entry in families:
-            if entry.get('id') == family_id:
-                label = entry.get('label') or family_id.title()
-                flag = entry.get('flag') or ''
-                return f"{flag} {label}".strip()
-        return (family_id or 'All accents').title()
-
-    def _available_families(
-        self,
-        catalog: Dict[str, Any],
-        *,
-        gender: Optional[str] = None,
-        allowed_ids: Optional[set] = None,
-    ) -> List[Dict[str, Any]]:
-        voices = self._filter_catalog_voices(catalog, gender=gender, allowed_ids=allowed_ids)
-        counts: Dict[str, int] = {}
-        for voice in voices:
-            accent_id = (voice.get('accent') or {}).get('id')
-            family_id = self._normalize_accent_family(accent_id)
-            counts[family_id] = counts.get(family_id, 0) + 1
-        families_meta = ((catalog or {}).get('filters') or {}).get('accentFamilies', {}).get('any', [])
-        meta_lookup = {entry.get('id'): entry for entry in families_meta if entry.get('id')}
-        result = []
-        for family_id, count in counts.items():
-            meta = meta_lookup.get(family_id, {'label': family_id.title(), 'flag': ''})
-            entry = {
-                'id': family_id,
-                'label': meta.get('label') or family_id.title(),
-                'flag': meta.get('flag') or '',
-                'count': count,
-            }
-            result.append(entry)
-        result.sort(key=lambda item: (-item['count'], item['label'].lower()))
-        return result
 
     def _build_tts_catalog_keyboard(self, session: Dict[str, Any]) -> InlineKeyboardMarkup:
         catalog = session.get('catalog') or {}
@@ -1389,7 +1308,7 @@ class YouTubeTelegramBot:
 
         # Accent family header and options
         rows.append([InlineKeyboardButton("Accent", callback_data="tts_nop")])
-        family_options = self._available_families(catalog, gender=selected_gender, allowed_ids=allowed_ids)
+        family_options = available_accent_families(catalog, gender=selected_gender, allowed_ids=allowed_ids)
         accent_rows: List[List[InlineKeyboardButton]] = []
         mark_all_family = "✅" if not selected_family else "⬜"
         accent_rows.append([InlineKeyboardButton(f"{mark_all_family} All", callback_data="tts_accent:all")])
@@ -1418,7 +1337,7 @@ class YouTubeTelegramBot:
         # Determine voices to display
         display_voices: List[Dict[str, Any]] = []
         if mode == 'favorites' and allowed_ids:
-            filtered = self._filter_catalog_voices(
+            filtered = filter_catalog_voices(
                 catalog,
                 gender=selected_gender,
                 family=selected_family,
@@ -1433,7 +1352,7 @@ class YouTubeTelegramBot:
                 entry['_favorite'] = fav
                 display_voices.append(entry)
         else:
-            display_voices = self._filter_catalog_voices(
+            display_voices = filter_catalog_voices(
                 catalog,
                 gender=selected_gender,
                 family=selected_family,
@@ -1499,23 +1418,6 @@ class YouTubeTelegramBot:
         keyboard = self._build_tts_catalog_keyboard(session)
         await query.edit_message_text(prompt, reply_markup=keyboard)
 
-    async def _fetch_tts_favorites(self, base_url: str, tag: Optional[str] = None) -> List[Dict[str, Any]]:
-        if requests is None:
-            raise RuntimeError("requests library is not available for HTTP calls.")
-
-        async_loop = asyncio.get_running_loop()
-        url = f"{base_url}/favorites"
-
-        def _call():
-            params = {'tag': tag} if tag else None
-            resp = requests.get(url, params=params, timeout=10)
-            resp.raise_for_status()
-            data = resp.json() or {}
-            profiles = data.get('profiles') or []
-            return [profile for profile in profiles if isinstance(profile, dict)]
-
-        return await async_loop.run_in_executor(None, _call)
-
     def _tts_session_key(self, chat_id: int, message_id: int) -> tuple:
         return (chat_id, message_id)
 
@@ -1570,51 +1472,11 @@ class YouTubeTelegramBot:
         lines.append("🗣️ Ready to synthesize speech for:")
         lines.append(f"“{snippet or '…'}”")
         gender_label = self._gender_label(gender)
-        family_label = self._family_label(catalog or {}, family)
+        family_label = accent_family_label(catalog or {}, family)
         lines.append(f"Filters: {gender_label} · {family_label}")
         lines.append("Select a voice below or cancel.")
         lines.append("──────────────────────────────")
         return "\n".join(lines)
-
-    async def _tts_synthesise(
-        self,
-        base_url: str,
-        text: str,
-        *,
-        favorite_slug: Optional[str] = None,
-        voice_id: Optional[str] = None,
-        engine_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        if requests is None:
-            raise RuntimeError("requests library is not available for HTTP calls.")
-
-        async_loop = asyncio.get_running_loop()
-        synth_url = f"{base_url}/synthesise"
-        audio_base = self._tts_audio_base(base_url)
-
-        def _call():
-            if favorite_slug:
-                payload = {"favoriteSlug": favorite_slug, "text": text}
-            elif voice_id:
-                payload = {"voice": voice_id, "text": text}
-                if engine_id:
-                    payload["engine"] = engine_id
-            else:
-                raise ValueError("Either favorite_slug or voice_id must be provided for TTS synthesis")
-            resp = requests.post(synth_url, json=payload, timeout=30)
-            resp.raise_for_status()
-            data = resp.json() or {}
-            audio_path = data.get('path')
-            if not audio_path:
-                raise ValueError("TTS hub response missing audio path.")
-            audio_url = urllib.parse.urljoin(audio_base.rstrip('/') + '/', audio_path.lstrip('/'))
-            audio_resp = requests.get(audio_url, timeout=60)
-            audio_resp.raise_for_status()
-            data['audio_bytes'] = audio_resp.content
-            data['audio_url'] = audio_url
-            return data
-
-        return await async_loop.run_in_executor(None, _call)
 
     def _tts_voice_label(self, session: Dict[str, Any], slug: str) -> str:
         lookup = session.get('voice_lookup') or {}
@@ -1657,10 +1519,11 @@ class YouTubeTelegramBot:
             await update.message.reply_text("❌ You are not authorized to use this bot.")
             return
 
-        base_url = self._get_tts_base_url()
-        if not base_url:
+        client = self._resolve_tts_client()
+        if not client or not client.base_api_url:
             await update.message.reply_text("⚠️ TTS hub is not configured. Set TTSHUB_API_BASE and try again.")
             return
+        self.tts_client = client
 
         full_text = (update.message.text or "").split(" ", 1)
         speak_text = full_text[1].strip() if len(full_text) > 1 else ""
@@ -1670,16 +1533,16 @@ class YouTubeTelegramBot:
 
         catalog = None
         try:
-            catalog = await self._fetch_tts_catalog(base_url)
+            catalog = await client.fetch_catalog()
         except Exception as e:
             logging.warning(f"TTS catalog fetch failed: {e}")
             catalog = None
 
         favorites_list: List[Dict[str, Any]] = []
         try:
-            favorites_list = await self._fetch_tts_favorites(base_url, tag="telegram")
+            favorites_list = await client.fetch_favorites(tag="telegram")
             if not favorites_list:
-                favorites_list = await self._fetch_tts_favorites(base_url)
+                favorites_list = await client.fetch_favorites()
         except Exception as e:
             logging.warning(f"TTS favorites fetch failed: {e}")
             favorites_list = []
@@ -1694,6 +1557,7 @@ class YouTubeTelegramBot:
                 "last_voice": None,
                 "favorites": favorites_list,
                 "voice_mode": 'favorites' if favorites_list else 'all',
+                "tts_base": client.base_api_url,
             }
             prompt = self._tts_prompt_text(speak_text, catalog=catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
@@ -1705,7 +1569,7 @@ class YouTubeTelegramBot:
         favorites = favorites_list
         if not favorites:
             try:
-                favorites = await self._fetch_tts_favorites(base_url)
+                favorites = await client.fetch_favorites()
             except Exception as e:
                 logging.error(f"Failed to fetch TTS favorites: {e}")
                 await update.message.reply_text("❌ Could not reach the TTS hub. Please try again later.")
@@ -1722,7 +1586,7 @@ class YouTubeTelegramBot:
         session_payload = {
             "text": speak_text,
             "favorites": favorites,
-            "base": base_url,
+            "tts_base": client.base_api_url,
             "last_voice": None,
             "selected_family": None,
         }
@@ -1742,6 +1606,11 @@ class YouTubeTelegramBot:
                 await query.edit_message_text("⚠️ This TTS session has expired. Send /tts again.")
             except Exception:
                 pass
+            return
+
+        client = self._resolve_tts_client(session.get('tts_base'))
+        if not client or not client.base_api_url:
+            await query.answer("TTS hub unavailable", show_alert=True)
             return
 
         if callback_data == "tts_cancel":
@@ -1815,9 +1684,8 @@ class YouTubeTelegramBot:
 
         label = self._tts_voice_label(session, payload)
         text = session.get("text", "")
-        base_url = session.get("base")
-
-        if not base_url:
+        client = self._resolve_tts_client(session.get('tts_base'))
+        if not client or not client.base_api_url:
             await query.answer("TTS hub unavailable", show_alert=True)
             return
 
@@ -1831,12 +1699,11 @@ class YouTubeTelegramBot:
             favorite_slug = identifier
 
         try:
-            result = await self._tts_synthesise(
-                base_url,
+            result = await client.synthesise(
                 text,
                 favorite_slug=favorite_slug,
                 voice_id=voice_id,
-                engine_id=engine_id,
+                engine=engine_id,
             )
         except Exception as e:
             logging.error(f"TTS synthesis failed: {e}")
