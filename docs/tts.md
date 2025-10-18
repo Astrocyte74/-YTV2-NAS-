@@ -65,6 +65,27 @@
   - `DATABASE_URL` – Postgres connection for direct upserts
   - `AUDIO_PUBLIC_BASE` – Base used to construct public audio URLs (e.g., `https://your-host` → `${AUDIO_PUBLIC_BASE}/exports/<file>.mp3`)
 
+## Queue Worker (Auto‑run)
+
+- The image now starts both the Telegram bot and a background TTS queue watcher by default.
+- Entrypoint: `/app/entrypoint.sh` runs:
+  - `python3 telegram_bot.py`
+  - `python3 tools/drain_tts_queue.py --watch`
+- Environment toggles:
+  - `ENABLE_TTS_QUEUE_WORKER=1` (default) – set to `0` to disable the watcher
+  - `TTS_QUEUE_INTERVAL=30` – poll interval in seconds
+  - `POSTGRES_ONLY=true` – worker skips any SQLite metadata update
+- Manual usage inside the container:
+  - One‑shot: `python3 tools/drain_tts_queue.py`
+  - Watcher: `python3 tools/drain_tts_queue.py --watch --interval 15`
+
+## Deployment Notes
+
+- Because the entrypoint and Dockerfile changed to include the watcher, you must rebuild the image once:
+  - `docker build -t ytv2-nas:web-ingest .` (or a new tag like `ytv2-nas:web-ingest-watcher`)
+  - Recreate the container in Portainer using the rebuilt tag.
+- No compose change is required; a single container runs both processes.
+
 ## Future Considerations
 
 - Build a queue worker to drain `data/tts_queue/` when the hub comes online.
@@ -87,3 +108,7 @@
 
 - Favorites toggle does nothing
   - If `tag=telegram` favorites are empty, the picker falls back to global favorites. Toggle should then reflect “Favorites” mode with that list.
+- Queue not draining
+  - Confirm `ENABLE_TTS_QUEUE_WORKER=1` and that logs show the worker PID.
+  - Verify jobs appear in `/app/data/tts_queue/` inside the container.
+  - If local hub was down when jobs were queued, ensure `TTSHUB_API_BASE` is reachable again.

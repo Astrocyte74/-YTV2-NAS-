@@ -200,6 +200,22 @@ YTV2-NAS/
 3. **Deploy**: Start the stack
 4. **Monitor**: Check logs for successful startup
 
+### Built‑in TTS Queue Worker
+
+- The image runs both the Telegram bot and a background TTS queue watcher by default.
+- No extra service is required; the entrypoint launches:
+  - `python3 telegram_bot.py`
+  - `python3 tools/drain_tts_queue.py --watch`
+- Environment toggles:
+  - `ENABLE_TTS_QUEUE_WORKER=1` (default) – set to `0` to disable
+  - `TTS_QUEUE_INTERVAL=30` – poll interval in seconds
+  - `POSTGRES_ONLY=true` – recommended for NAS; worker skips SQLite
+- Manual drain (inside container):
+  - `python3 tools/drain_tts_queue.py` (one‑shot)
+  - `python3 tools/drain_tts_queue.py --watch --interval 15` (watch mode)
+
+Note: After updating to the image with the new entrypoint, rebuild once and recreate the container (or re‑pull if using a registry).
+
 ### Manual Docker
 
 ```bash
