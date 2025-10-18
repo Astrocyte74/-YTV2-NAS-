@@ -989,6 +989,22 @@ class YouTubeTelegramBot:
         except Exception:
             pass
         if isinstance(resp, dict) and resp.get("error"):
+            err = str(resp["error"]).lower()
+            # Offer pull if model appears missing
+            if ("404" in err or "not found" in err or "no such model" in err) and model:
+                # Persist last user text to retry after pull
+                session["last_user"] = text
+                self.ollama_sessions[chat_id] = session
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"📥 Pull {model}", callback_data=f"ollama_pull:{model}")],
+                    [InlineKeyboardButton("❌ Cancel", callback_data="ollama_cancel")],
+                ])
+                await update.message.reply_text(
+                    f"⚠️ Model `{self._escape_markdown(model)}` is not available on the hub. Pull it now?",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=kb,
+                )
+                return
             await update.message.reply_text(f"❌ Ollama error: {resp['error'][:200]}")
             return
         # Extract reply text robustly
@@ -1093,6 +1109,56 @@ class YouTubeTelegramBot:
             ])
             await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
             await query.answer("Options")
+            return
+        if callback_data.startswith("ollama_pull:"):
+            model = callback_data.split(":", 1)[1]
+            await query.answer("Pulling…")
+            # Show status message
+            try:
+                status = await query.message.reply_text(f"⏬ Pulling `{self._escape_markdown(model)}`…", parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                status = None
+            loop = asyncio.get_running_loop()
+            def _pull_call():
+                try:
+                    # Non-stream pull for now (fast path); streaming can be added next
+                    from modules.ollama_client import pull as ollama_pull
+                    return {"ok": True, "resp": ollama_pull(model, stream=False)}
+                except Exception as e:
+                    return {"ok": False, "error": str(e)}
+            result = await loop.run_in_executor(None, _pull_call)
+            if result.get("ok"):
+                try:
+                    if status:
+                        await status.edit_text(f"✅ Pulled `{self._escape_markdown(model)}`.", parse_mode=ParseMode.MARKDOWN)
+                except Exception:
+                    pass
+                # Auto-retry last user prompt if present
+                last_user = session.get("last_user")
+                if last_user and session.get("model") == model:
+                    await query.message.reply_text("🔁 Retrying your last prompt…")
+                    # Reuse session and route to chat handler
+                    # Construct a pseudo-update for the same chat
+                    try:
+                        # Send via normal path
+                        class _Dummy:
+                            pass
+                        d = _Dummy()
+                        d.effective_chat = query.message.chat
+                        d.message = query.message
+                        # Use send_message path instead of fake update to avoid confusion
+                        await self._ollama_handle_user_text(type("U", (), {"effective_chat": query.message.chat, "message": query.message})(), session, last_user)
+                    except Exception:
+                        pass
+                else:
+                    await query.message.reply_text("✅ Model is ready. Send a message to chat.")
+            else:
+                msg = result.get("error") or "pull failed"
+                try:
+                    if status:
+                        await status.edit_text(f"❌ Pull failed: {msg[:140]}")
+                except Exception:
+                    pass
             return
         if callback_data.startswith("ollama_mode:"):
             value = callback_data.split(":", 1)[1]
