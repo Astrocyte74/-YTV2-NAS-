@@ -1391,6 +1391,7 @@ class YouTubeTelegramBot:
         rows.append([InlineKeyboardButton("Voices", callback_data="tts_nop")])
         voices = self._filter_catalog_voices(catalog, gender=selected_gender, accent=selected_accent, accent_map=accent_map)
         session['current_voices'] = [voice.get('id') for voice in voices]
+        session['voice_lookup'] = {voice.get('id'): voice for voice in voices if voice.get('id')}
         if voices:
             row: List[InlineKeyboardButton] = []
             for voice in voices:
@@ -1505,7 +1506,15 @@ class YouTubeTelegramBot:
         lines.append("──────────────────────────────")
         return "\n".join(lines)
 
-    async def _tts_synthesise(self, base_url: str, slug: str, text: str) -> Dict[str, Any]:
+    async def _tts_synthesise(
+        self,
+        base_url: str,
+        text: str,
+        *,
+        favorite_slug: Optional[str] = None,
+        voice_id: Optional[str] = None,
+        engine_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if requests is None:
             raise RuntimeError("requests library is not available for HTTP calls.")
 
@@ -1514,7 +1523,14 @@ class YouTubeTelegramBot:
         audio_base = self._tts_audio_base(base_url)
 
         def _call():
-            payload = {"favoriteSlug": slug, "text": text}
+            if favorite_slug:
+                payload = {"favoriteSlug": favorite_slug, "text": text}
+            elif voice_id:
+                payload = {"voice": voice_id, "text": text}
+                if engine_id:
+                    payload["engine"] = engine_id
+            else:
+                raise ValueError("Either favorite_slug or voice_id must be provided for TTS synthesis")
             resp = requests.post(synth_url, json=payload, timeout=30)
             resp.raise_for_status()
             data = resp.json() or {}
@@ -1678,8 +1694,28 @@ class YouTubeTelegramBot:
 
         await query.answer(f"Generating {label}…")
 
+        favorite_slug = None
+        voice_id = None
+        engine_id = None
+
+        if catalog:
+            voice_meta = (session.get('voice_lookup') or {}).get(slug)
+            if voice_meta:
+                voice_id = slug
+                engine_id = voice_meta.get('engine')
+            else:
+                favorite_slug = slug
+        else:
+            favorite_slug = slug
+
         try:
-            result = await self._tts_synthesise(base_url, slug, text)
+            result = await self._tts_synthesise(
+                base_url,
+                text,
+                favorite_slug=favorite_slug,
+                voice_id=voice_id,
+                engine_id=engine_id,
+            )
         except Exception as e:
             logging.error(f"TTS synthesis failed: {e}")
             await query.answer("❌ TTS failed", show_alert=True)
