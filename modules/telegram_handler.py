@@ -1275,24 +1275,25 @@ class YouTubeTelegramBot:
         gender: Optional[str] = None,
         accent: Optional[str] = None,
         accent_map: Optional[Dict[str, set]] = None,
+        allowed_ids: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         voices = (catalog or {}).get('voices') or []
         accent_map = accent_map or {}
-        allowed_ids: Optional[set] = None
-        if accent:
-            allowed_ids = accent_map.get(accent)
+        accent_allowed = accent_map.get(accent) if accent else None
         result = []
         for voice in voices:
             voice_id = voice.get('id')
             if not voice_id:
+                continue
+            if allowed_ids is not None and voice_id not in allowed_ids:
                 continue
             if gender and voice.get('gender') != gender:
                 continue
             if accent:
                 voice_accent = (voice.get('accent') or {}).get('id')
                 if voice_accent != accent:
-                    if allowed_ids is not None:
-                        if voice_id not in allowed_ids:
+                    if accent_allowed is not None:
+                        if voice_id not in accent_allowed:
                             continue
                     else:
                         continue
@@ -1321,8 +1322,13 @@ class YouTubeTelegramBot:
                 return f"{flag} {label}".strip()
         return accent_id
 
-    def _compute_accent_filters(self, catalog: Dict[str, Any], gender: Optional[str] = None) -> List[Dict[str, Any]]:
-        voices = self._filter_catalog_voices(catalog, gender=gender)
+    def _compute_accent_filters(
+        self,
+        catalog: Dict[str, Any],
+        gender: Optional[str] = None,
+        allowed_ids: Optional[set] = None,
+    ) -> List[Dict[str, Any]]:
+        voices = self._filter_catalog_voices(catalog, gender=gender, allowed_ids=allowed_ids)
         counts: Dict[str, Dict[str, Any]] = {}
         for voice in voices:
             accent = voice.get('accent') or {}
@@ -1341,18 +1347,44 @@ class YouTubeTelegramBot:
     def _build_tts_catalog_keyboard(self, session: Dict[str, Any]) -> InlineKeyboardMarkup:
         catalog = session.get('catalog') or {}
         filters = (catalog.get('filters') or {}) if catalog else {}
+        favorites = session.get('favorites') or []
         selected_gender = session.get('selected_gender')
         selected_accent = session.get('selected_accent')
         accent_map = session.get('accent_map') or {}
 
+        mode = session.get('voice_mode')
+        if mode not in ('favorites', 'all'):
+            mode = 'favorites' if favorites else 'all'
+        if mode == 'favorites' and not favorites:
+            mode = 'all'
+        session['voice_mode'] = mode
+
+        favorite_by_voice = {}
+        allowed_ids = None
+        if favorites:
+            for fav in favorites:
+                voice_id = fav.get('voiceId')
+                if voice_id:
+                    favorite_by_voice[voice_id] = fav
+            if mode == 'favorites':
+                allowed_ids = {vid for vid in favorite_by_voice.keys() if vid}
+
         rows: List[List[InlineKeyboardButton]] = []
+
+        # Mode row
+        mark_fav = "✅" if mode == 'favorites' else "⬜"
+        mark_all = "✅" if mode == 'all' else "⬜"
+        rows.append([
+            InlineKeyboardButton(f"{mark_fav} Favorites", callback_data="tts_mode:favorites"),
+            InlineKeyboardButton(f"{mark_all} All voices", callback_data="tts_mode:all"),
+        ])
 
         # Gender header and options
         rows.append([InlineKeyboardButton("Gender", callback_data="tts_nop")])
         genders = filters.get('genders') or []
         gender_buttons: List[InlineKeyboardButton] = []
-        mark_all = "✅" if not selected_gender else "⬜"
-        gender_buttons.append(InlineKeyboardButton(f"{mark_all} All", callback_data="tts_gender:all"))
+        mark_all_gender = "✅" if not selected_gender else "⬜"
+        gender_buttons.append(InlineKeyboardButton(f"{mark_all_gender} All", callback_data="tts_gender:all"))
         for entry in genders:
             gid = entry.get('id')
             if not gid:
@@ -1360,12 +1392,11 @@ class YouTubeTelegramBot:
             label = entry.get('label') or gid.title()
             mark = "✅" if selected_gender == gid else "⬜"
             gender_buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"tts_gender:{gid}"))
-        if gender_buttons:
-            rows.append(gender_buttons)
+        rows.append(gender_buttons)
 
         # Accent header and options
         rows.append([InlineKeyboardButton("Accent", callback_data="tts_nop")])
-        accent_entries = self._compute_accent_filters(catalog, gender=selected_gender)
+        accent_entries = self._compute_accent_filters(catalog, gender=selected_gender, allowed_ids=allowed_ids)
         accent_rows: List[List[InlineKeyboardButton]] = []
         mark_all_acc = "✅" if not selected_accent else "⬜"
         accent_rows.append([InlineKeyboardButton(f"{mark_all_acc} All", callback_data="tts_accent:all")])
@@ -1389,23 +1420,74 @@ class YouTubeTelegramBot:
 
         # Voices header
         rows.append([InlineKeyboardButton("Voices", callback_data="tts_nop")])
-        voices = self._filter_catalog_voices(catalog, gender=selected_gender, accent=selected_accent, accent_map=accent_map)
-        session['current_voices'] = [voice.get('id') for voice in voices]
-        session['voice_lookup'] = {voice.get('id'): voice for voice in voices if voice.get('id')}
-        if voices:
+        voice_lookup: Dict[str, Dict[str, Any]] = {}
+
+        # Determine voices to display
+        display_voices: List[Dict[str, Any]] = []
+        if mode == 'favorites' and allowed_ids:
+            filtered = self._filter_catalog_voices(
+                catalog,
+                gender=selected_gender,
+                accent=selected_accent,
+                accent_map=accent_map,
+                allowed_ids=allowed_ids,
+            )
+            id_to_voice = {voice.get('id'): voice for voice in filtered if voice.get('id')}
+            for voice_id, fav in favorite_by_voice.items():
+                voice_meta = id_to_voice.get(voice_id)
+                if not voice_meta:
+                    continue
+                entry = dict(voice_meta)
+                entry['_favorite'] = fav
+                display_voices.append(entry)
+        else:
+            display_voices = self._filter_catalog_voices(
+                catalog,
+                gender=selected_gender,
+                accent=selected_accent,
+                accent_map=accent_map,
+            )
+
+        if mode == 'favorites' and not display_voices and favorites:
+            # No favorites match filters; fallback to unfiltered favorites
+            session['selected_gender'] = None
+            session['selected_accent'] = None
+            display_voices = self._filter_catalog_voices(catalog, accent_map=accent_map, allowed_ids=allowed_ids)
+
+        if display_voices:
             row: List[InlineKeyboardButton] = []
-            for voice in voices:
+            for voice in display_voices:
                 voice_id = voice.get('id')
                 if not voice_id:
                     continue
-                label = voice.get('label') or voice_id
+                fav_meta = voice.get('_favorite') if mode == 'favorites' else None
+                if mode == 'favorites' and not fav_meta:
+                    fav_meta = favorite_by_voice.get(voice_id)
+                if mode == 'favorites' and not fav_meta:
+                    continue
+                if mode == 'favorites':
+                    slug = fav_meta.get('slug') or fav_meta.get('id') or voice_id
+                    key = f"fav|{slug}"
+                else:
+                    key = f"cat|{voice_id}"
+
                 accent = voice.get('accent') or {}
-                flag = accent.get('flag')
+                flag = accent.get('flag') or ''
+                label = voice.get('label') or voice_id
                 if flag:
                     label = f"{flag} {label}"
                 if len(label) > 28:
                     label = f"{label[:25]}…"
-                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{voice_id}"))
+
+                entry_lookup = {
+                    'label': label,
+                    'voice': voice,
+                    'voiceId': voice_id,
+                    'engine': voice.get('engine'),
+                    'favoriteSlug': fav_meta.get('slug') if fav_meta else None,
+                }
+                voice_lookup[key] = entry_lookup
+                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{key}"))
                 if len(row) == 3:
                     rows.append(row)
                     row = []
@@ -1413,6 +1495,9 @@ class YouTubeTelegramBot:
                 rows.append(row)
         else:
             rows.append([InlineKeyboardButton("(No voices for this filter)", callback_data="tts_nop")])
+
+        session['voice_lookup'] = voice_lookup
+        session['current_voices'] = list(voice_lookup.keys())
 
         rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
         return InlineKeyboardMarkup(rows)
@@ -1547,9 +1632,23 @@ class YouTubeTelegramBot:
         return await async_loop.run_in_executor(None, _call)
 
     def _tts_voice_label(self, session: Dict[str, Any], slug: str) -> str:
+        lookup = session.get('voice_lookup') or {}
+        entry = lookup.get(slug)
+        if entry:
+            label = entry.get('label')
+            if label:
+                return label
+            voice = entry.get('voice') or {}
+            accent = voice.get('accent') or {}
+            base_label = voice.get('label') or entry.get('voiceId') or slug
+            flag = accent.get('flag')
+            if flag:
+                return f"{flag} {base_label}"
+            return base_label
+        base_slug = slug.split('|', 1)[-1]
         catalog = session.get('catalog') or {}
         for voice in catalog.get('voices') or []:
-            if voice.get('id') == slug:
+            if voice.get('id') == base_slug:
                 label = voice.get('label') or slug
                 accent = voice.get('accent') or {}
                 flag = accent.get('flag')
@@ -1559,7 +1658,7 @@ class YouTubeTelegramBot:
         favorites = session.get('favorites') or []
         for profile in favorites:
             profile_slug = profile.get('slug') or profile.get('voiceId')
-            if profile_slug == slug:
+            if profile_slug == base_slug:
                 raw_label = profile.get('label') or profile.get('voiceId') or slug
                 if raw_label.startswith("Favorite ·"):
                     return raw_label.split("·", 1)[1].strip() or slug
@@ -1591,6 +1690,15 @@ class YouTubeTelegramBot:
             logging.warning(f"TTS catalog fetch failed: {e}")
             catalog = None
 
+        favorites_list: List[Dict[str, Any]] = []
+        try:
+            favorites_list = await self._fetch_tts_favorites(base_url, tag="telegram")
+            if not favorites_list:
+                favorites_list = await self._fetch_tts_favorites(base_url)
+        except Exception as e:
+            logging.warning(f"TTS favorites fetch failed: {e}")
+            favorites_list = []
+
         if catalog and catalog.get('voices'):
             accent_map = self._accent_voice_map(catalog)
             session_payload = {
@@ -1601,6 +1709,8 @@ class YouTubeTelegramBot:
                 "selected_gender": None,
                 "selected_accent": None,
                 "last_voice": None,
+                "favorites": favorites_list,
+                "voice_mode": 'favorites' if favorites_list else 'all',
             }
             prompt = self._tts_prompt_text(speak_text, catalog=catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
@@ -1609,15 +1719,14 @@ class YouTubeTelegramBot:
             return
 
         # Fallback to favorites when catalog unavailable
-        favorites = []
-        try:
-            favorites = await self._fetch_tts_favorites(base_url, tag="telegram")
-            if not favorites:
+        favorites = favorites_list
+        if not favorites:
+            try:
                 favorites = await self._fetch_tts_favorites(base_url)
-        except Exception as e:
-            logging.error(f"Failed to fetch TTS favorites: {e}")
-            await update.message.reply_text("❌ Could not reach the TTS hub. Please try again later.")
-            return
+            except Exception as e:
+                logging.error(f"Failed to fetch TTS favorites: {e}")
+                await update.message.reply_text("❌ Could not reach the TTS hub. Please try again later.")
+                return
 
         if not favorites:
             await update.message.reply_text("⚠️ No favorite voices available on the TTS hub.")
@@ -1663,6 +1772,25 @@ class YouTubeTelegramBot:
         catalog = session.get("catalog")
 
         if catalog:
+            if callback_data.startswith("tts_mode:"):
+                mode_value = callback_data.split(":", 1)[1]
+                if mode_value == "favorites":
+                    if session.get('favorites'):
+                        session['voice_mode'] = 'favorites'
+                        session['selected_gender'] = None
+                        session['selected_accent'] = None
+                        await self._refresh_tts_catalog(query, session)
+                        await query.answer("Favorites selected")
+                    else:
+                        await query.answer("No favorites available", show_alert=True)
+                    return
+                elif mode_value == "all":
+                    session['voice_mode'] = 'all'
+                    session['selected_gender'] = None
+                    session['selected_accent'] = None
+                    await self._refresh_tts_catalog(query, session)
+                    await query.answer("Showing all voices")
+                    return
             if callback_data == "tts_nop":
                 await query.answer("Select an option below")
                 return
@@ -1683,8 +1811,25 @@ class YouTubeTelegramBot:
         if not callback_data.startswith("tts_voice:"):
             return
 
-        slug = callback_data.split(":", 1)[1]
-        label = self._tts_voice_label(session, slug)
+        payload = callback_data.split(":", 1)[1]
+        kind, _, identifier = payload.partition("|")
+        if not identifier:
+            identifier = kind
+            kind = 'cat'
+
+        voice_lookup = session.get('voice_lookup') or {}
+        entry = voice_lookup.get(payload) or {}
+
+        if kind == 'fav':
+            favorite_slug = entry.get('favoriteSlug') or identifier
+            voice_id = entry.get('voiceId')
+            engine_id = entry.get('engine')
+        else:
+            favorite_slug = None
+            voice_id = entry.get('voiceId') or identifier
+            engine_id = entry.get('engine')
+
+        label = self._tts_voice_label(session, payload)
         text = session.get("text", "")
         base_url = session.get("base")
 
@@ -1694,19 +1839,12 @@ class YouTubeTelegramBot:
 
         await query.answer(f"Generating {label}…")
 
-        favorite_slug = None
-        voice_id = None
-        engine_id = None
-
-        if catalog:
-            voice_meta = (session.get('voice_lookup') or {}).get(slug)
-            if voice_meta:
-                voice_id = slug
-                engine_id = voice_meta.get('engine')
-            else:
-                favorite_slug = slug
-        else:
-            favorite_slug = slug
+        if catalog and kind == 'cat' and not voice_id:
+            favorite_slug = None
+            voice_id = identifier
+            engine_id = entry.get('engine')
+        if not catalog and favorite_slug is None:
+            favorite_slug = identifier
 
         try:
             result = await self._tts_synthesise(
@@ -1722,7 +1860,7 @@ class YouTubeTelegramBot:
             return
 
         audio_bytes = result.get("audio_bytes")
-        filename = result.get("filename") or f"{slug}.wav"
+        filename = result.get("filename") or f"{identifier}.wav"
         if not audio_bytes:
             await query.answer("❌ No audio received", show_alert=True)
             return
