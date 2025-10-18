@@ -1550,7 +1550,6 @@ class YouTubeTelegramBot:
         if catalog and catalog.get('voices'):
             session_payload = {
                 "text": speak_text,
-                "base": base_url,
                 "catalog": catalog,
                 "selected_gender": None,
                 "selected_family": None,
