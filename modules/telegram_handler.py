@@ -1485,6 +1485,34 @@ class YouTubeTelegramBot:
 
         await query.answer(f"Generating audio via {provider.title()}…")
 
+        provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
+        voice_label = session.get('last_voice') or ''
+        # As a fallback, try to infer a label from the selected_voice payload
+        if not voice_label:
+            try:
+                sv = session.get('selected_voice') or {}
+                slug = None
+                if sv.get('favorite_slug'):
+                    slug = f"fav|{sv.get('favorite_slug')}"
+                elif sv.get('voice_id'):
+                    slug = f"cat|{sv.get('voice_id')}"
+                if slug:
+                    voice_label = self._tts_voice_label(session, slug)
+            except Exception:
+                voice_label = ''
+
+        # Post a visible status bubble so the user knows the click registered
+        status_msg = None
+        try:
+            status_text = (
+                f"⏳ Generating TTS"
+                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                + f" • {provider_label}"
+            )
+            status_msg = await query.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            status_msg = None
+
         try:
             logging.info(
                 f"🧩 Starting TTS generation via {provider} | title={session.get('title')}"
@@ -1514,6 +1542,17 @@ class YouTubeTelegramBot:
 
         logging.info(f"📦 TTS file ready: {audio_filepath}")
         await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider)
+        # Update the status bubble to confirm
+        try:
+            if status_msg:
+                done_text = (
+                    f"✅ Generated"
+                    + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}"
+                )
+                await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
         # Keep session open so user can test more voices without restarting
 
     async def _handle_local_unavailable(self, query, session: Dict[str, Any], message: str = "") -> None:
@@ -1553,6 +1592,21 @@ class YouTubeTelegramBot:
         summary_type = session.get('summary_type') or 'audio'
         base_variant = session.get('base_variant') or 'audio'
 
+        # Resolve voice label to display in captions
+        voice_label = session.get('last_voice') or ''
+        if not voice_label:
+            try:
+                sv = session.get('selected_voice') or {}
+                slug = None
+                if sv.get('favorite_slug'):
+                    slug = f"fav|{sv.get('favorite_slug')}"
+                elif sv.get('voice_id'):
+                    slug = f"cat|{sv.get('voice_id')}"
+                if slug:
+                    voice_label = self._tts_voice_label(session, slug)
+            except Exception:
+                voice_label = ''
+
         audio_reply_markup = None
         if mode == 'summary_audio':
             normalized_id = normalized_video_id or video_info.get('video_id') or 'unknown'
@@ -1581,12 +1635,10 @@ class YouTubeTelegramBot:
         try:
             with audio_path.open('rb') as audio_file:
                 if mode == 'summary_audio':
-                    caption = (
-                        f"🎧 **Audio Summary**: {self._escape_markdown(title)}\n"
-                        f"🎵 Generated with {provider_label}"
-                    )
+                    base = f"🎧 **Audio Summary**: {self._escape_markdown(title)}"
+                    voice_bit = f" • {self._escape_markdown(voice_label)}" if voice_label else ""
+                    caption = f"{base}{voice_bit}\n🎵 {provider_label}"
                 else:
-                    voice_label = session.get('last_voice') or ''
                     caption = (
                         f"🎧 **TTS Preview**"
                         + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
