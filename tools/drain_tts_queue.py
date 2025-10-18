@@ -129,21 +129,42 @@ async def process_job(path: Path) -> bool:
     except Exception as exc:
         logging.warning(f"YouTubeSummarizer unavailable; using direct TTS: {exc}")
 
-    # If using local and no explicit voice, pick first favorite from hub
+    # If using local and no explicit voice, try env default, then hub favorites.
     if provider == "local" and not (favorite_slug or voice_id):
-        try:
-            from modules.tts_hub import TTSHubClient
-            client = TTSHubClient.from_env()
-            favs = await client.fetch_favorites(tag="telegram")
-            if not favs:
-                favs = await client.fetch_favorites()
-            if favs:
-                picked = favs[0]
-                favorite_slug = picked.get("slug") or picked.get("id") or picked.get("voiceId")
-                engine_id = picked.get("engine") or engine_id
-                logging.info(f"Picked default favorite: {favorite_slug} (engine={engine_id})")
-        except Exception as exc:
-            logging.warning(f"Could not resolve default favorite voice: {exc}")
+        # ENV defaults
+        env_fav = os.getenv("TTS_DEFAULT_FAVORITE_SLUG")
+        env_voice = os.getenv("TTS_DEFAULT_VOICE_ID")
+        env_engine = os.getenv("TTS_DEFAULT_ENGINE")
+        if env_fav or env_voice:
+            favorite_slug = favorite_slug or env_fav
+            voice_id = voice_id or env_voice
+            engine_id = engine_id or env_engine
+            logging.info(
+                f"Using env default voice: fav={favorite_slug} voice={voice_id} engine={engine_id}"
+            )
+        # Hub favorites (only if still no voice)
+        if not (favorite_slug or voice_id):
+            try:
+                from modules.tts_hub import TTSHubClient
+                client = TTSHubClient.from_env()
+                favs = await client.fetch_favorites(tag="telegram")
+                if not favs:
+                    favs = await client.fetch_favorites()
+                if favs:
+                    picked = favs[0]
+                    favorite_slug = picked.get("slug") or picked.get("id") or picked.get("voiceId")
+                    engine_id = picked.get("engine") or engine_id
+                    logging.info(f"Picked default favorite: {favorite_slug} (engine={engine_id})")
+            except Exception as exc:
+                # Hub unreachable or other error — defer instead of failing; worker will retry later
+                logging.warning(f"Could not resolve default favorite voice: {exc}")
+                logging.info("Deferring job until hub becomes reachable or defaults are provided")
+                return False
+
+    # If still no voice info for local provider, defer processing (do not mark failed)
+    if provider == "local" and not (favorite_slug or voice_id):
+        logging.info("No voice resolved for local provider; deferring job for retry")
+        return False
 
     logging.info(
         f"Processing job {path.name} | provider={provider} fav={favorite_slug} voice={voice_id} engine={engine_id}"
@@ -181,6 +202,11 @@ async def process_job(path: Path) -> bool:
                     out_path.write_bytes(audio_bytes)
                     result_path = str(out_path)
                 except Exception as exc:
+                    # Defer if hub unreachable; otherwise mark as failure
+                    msg = str(exc)
+                    if "Connection" in msg or "unreachable" in msg.lower() or "Failed to establish" in msg:
+                        logging.warning(f"Local TTS unreachable: {exc}; deferring job")
+                        return False
                     logging.error(f"Local TTS fallback failed: {exc}")
                     result_path = None
             else:
@@ -210,6 +236,11 @@ async def process_job(path: Path) -> bool:
             except Exception:
                 pass
     except Exception as exc:
+        # Defer local-provider jobs when hub is unavailable; otherwise fail
+        msg = str(exc)
+        if provider == "local" and ("Local TTS unavailable" in msg or "Connection" in msg or "Failed to establish" in msg):
+            logging.warning(f"Local TTS unavailable during synthesis: {exc}; deferring job")
+            return False
         logging.error(f"TTS failed for {path.name}: {exc}")
         move_job(path, "failed")
         return False
