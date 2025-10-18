@@ -979,29 +979,50 @@ class YouTubeTelegramBot:
         if isinstance(resp, dict) and resp.get("error"):
             await update.message.reply_text(f"❌ Ollama error: {resp['error'][:200]}")
             return
-        # Extract reply text
+        # Extract reply text robustly
         reply_text = None
         if isinstance(resp, dict):
-            reply_text = resp.get("response") or resp.get("message")
-            if isinstance(reply_text, dict):
-                reply_text = reply_text.get("content")
-            # Additional fallbacks for unusual shapes
-            if not reply_text:
-                # Some hubs may return {"message": {"role":"assistant","content":"..."}} only
-                m = resp.get("message")
-                if isinstance(m, dict):
-                    reply_text = m.get("content")
-            if not reply_text:
-                # As a last resort, show a compact JSON snippet
+            # 1) Common shapes
+            val = resp.get("response")
+            if isinstance(val, str) and val.strip():
+                reply_text = val
+            if reply_text is None:
+                msg = resp.get("message")
+                if isinstance(msg, dict):
+                    c = msg.get("content")
+                    if isinstance(c, str) and c.strip():
+                        reply_text = c
+                    elif isinstance(c, list):
+                        # Some implementations surface list of segments
+                        parts = []
+                        for seg in c:
+                            if isinstance(seg, dict):
+                                t = seg.get("text") or seg.get("content")
+                                if isinstance(t, str) and t.strip():
+                                    parts.append(t)
+                        if parts:
+                            reply_text = "\n".join(parts)
+            # 2) Fallback: messages array
+            if reply_text is None:
+                msgs = resp.get("messages")
+                if isinstance(msgs, list):
+                    for m in reversed(msgs):
+                        if isinstance(m, dict) and m.get("role") == "assistant":
+                            c = m.get("content")
+                            if isinstance(c, str) and c.strip():
+                                reply_text = c
+                                break
+            # 3) Last resort: compact JSON snippet for debugging
+            if reply_text is None:
+                import json as _json
+                snippet = _json.dumps({k: resp[k] for k in list(resp.keys())[:8]})[:380]
+                reply_text = f"(No response)\n<pre>{snippet}</pre>"
                 try:
-                    import json as _json
-                    snippet = _json.dumps(resp)[:280]
-                    reply_text = f"(No response)\n```\n{snippet}\n```"
-                    await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN)
-                    # Do not add to history on no-response
+                    await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML)
                     return
                 except Exception:
-                    reply_text = "(No response)"
+                    # Fall through to plain text
+                    reply_text = f"(No response)\n{snippet}"
         if not reply_text:
             reply_text = "(No response)"
         await update.message.reply_text(reply_text)
