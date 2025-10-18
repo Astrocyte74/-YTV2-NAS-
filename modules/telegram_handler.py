@@ -1610,7 +1610,7 @@ class YouTubeTelegramBot:
         row: List[InlineKeyboardButton] = []
         max_per_row = 3
 
-        for profile in favorites:
+        for i, profile in enumerate(favorites):
             slug = profile.get('slug') or profile.get('voiceId')
             if not slug:
                 continue
@@ -1619,7 +1619,8 @@ class YouTubeTelegramBot:
                 label = label.split("·", 1)[1].strip() or label
             if len(label) > 28:
                 label = f"{label[:25]}…"
-            row.append(InlineKeyboardButton(f"🎤 {label}", callback_data=f"tts_voice:{slug}"))
+            short_key = f"v{i}"
+            row.append(InlineKeyboardButton(f"🎤 {label}", callback_data=f"tts_voice:{short_key}"))
             if len(row) == max_per_row:
                 buttons.append(row)
                 row = []
