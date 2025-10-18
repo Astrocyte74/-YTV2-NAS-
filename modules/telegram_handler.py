@@ -921,6 +921,32 @@ class YouTubeTelegramBot:
         rows.append([InlineKeyboardButton("⚙️ Options", callback_data="ollama_options"), InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
         return InlineKeyboardMarkup(rows)
 
+    def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9) -> InlineKeyboardMarkup:
+        start = page * page_size
+        end = start + page_size
+        subset = models[start:end]
+        rows: List[List[InlineKeyboardButton]] = []
+        row: List[InlineKeyboardButton] = []
+        for name in subset:
+            label = name
+            if len(label) > 28:
+                label = f"{label[:25]}…"
+            row.append(InlineKeyboardButton(label, callback_data=f"ollama_ai2ai_set:{slot}:{name}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        nav: List[InlineKeyboardButton] = []
+        if end < len(models):
+            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more_ai2ai:{slot}:{page+1}"))
+        if page > 0:
+            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more_ai2ai:{slot}:{page-1}"))
+        if nav:
+            rows.append(nav)
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ollama_cancel")])
+        return InlineKeyboardMarkup(rows)
+
     async def ollama_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self._is_user_allowed(user_id):
@@ -1139,8 +1165,13 @@ class YouTubeTelegramBot:
 
     async def _ollama_ai2ai_continue(self, chat_id: int):
         session = self.ollama_sessions.get(chat_id) or {}
-        model = session.get("model")
-        if not model:
+        model_a = session.get("ai2ai_model_a") or session.get("model")
+        model_b = session.get("ai2ai_model_b") or session.get("model")
+        if not model_a or not model_b:
+            try:
+                await self.application.bot.send_message(chat_id=chat_id, text="⚠️ Pick models for A and B in Options")
+            except Exception:
+                pass
             return
         persona_a = session.get("persona_a", "Albert Einstein")
         persona_b = session.get("persona_b", "Isaac Newton")
@@ -1150,30 +1181,29 @@ class YouTubeTelegramBot:
             {"role": "system", "content": f"You are {persona_a}. Respond concisely."},
             {"role": "user", "content": f"Debate topic: {topic}. Present your view."},
         ]
-        # Send via streaming
+        # Create a tiny wrapper update-like object for streaming helper
         from types import SimpleNamespace
-        dummy_update = SimpleNamespace(effective_chat=SimpleNamespace(id=chat_id), message=SimpleNamespace(reply_text=self.application.bot.send_message))
-        # We can't reuse dummy easily; instead, get a message by sending a small stub then editing via streaming helper that expects update.
         class U:
             def __init__(self, app, chat_id):
                 self.effective_chat = SimpleNamespace(id=chat_id)
-                self.message = SimpleNamespace()
                 self._app = app
-            async def reply_text(self, text):
-                return await self._app.bot.send_message(chat_id=chat_id, text=text)
+            @property
+            def message(self):
+                class M:
+                    def __init__(self, app, chat_id):
+                        self._app = app; self._chat = chat_id
+                    async def reply_text(self, text):
+                        return await self._app.bot.send_message(chat_id=self._chat, text=text)
+                return M(self._app, chat_id)
         u = U(self.application, chat_id)
-        # Monkey patch to fit helper signature
-        u.effective_chat = SimpleNamespace(id=chat_id)
-        u.message = SimpleNamespace()
-        u.message.reply_text = lambda text: self.application.bot.send_message(chat_id=chat_id, text=text)
-        a_text = await self._ollama_stream_chat(u, model, a_messages)
+        a_text = await self._ollama_stream_chat(u, model_a, a_messages)
         session["ai2ai_last_a"] = a_text
         # Turn B
         b_messages = [
             {"role": "system", "content": f"You are {persona_b}. Respond concisely."},
             {"role": "user", "content": f"Respond to {persona_a}'s statement: {a_text[:800]}"},
         ]
-        b_text = await self._ollama_stream_chat(u, model, b_messages)
+        b_text = await self._ollama_stream_chat(u, model_b, b_messages)
         session["ai2ai_last_b"] = b_text
         self.ollama_sessions[chat_id] = session
 
@@ -1245,6 +1275,8 @@ class YouTubeTelegramBot:
             mark_stream = "✅" if stream else "⬜"
             # AI↔AI scaffolding controls
             ai2ai_active = bool(session.get("ai2ai_active"))
+            ai2ai_model_a = session.get("ai2ai_model_a") or session.get("model") or "—"
+            ai2ai_model_b = session.get("ai2ai_model_b") or session.get("model") or "—"
             ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
             if mode == "ai-ai" and ai2ai_active:
                 ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
@@ -1252,6 +1284,11 @@ class YouTubeTelegramBot:
                 [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
+            if mode == "ai-ai":
+                rows.append([
+                    InlineKeyboardButton(f"A: {ai2ai_model_a}", callback_data="ollama_ai2ai:pick_a"),
+                    InlineKeyboardButton(f"B: {ai2ai_model_b}", callback_data="ollama_ai2ai:pick_b"),
+                ])
             if ai2ai_row:
                 rows.append(ai2ai_row)
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")])
@@ -1341,6 +1378,11 @@ class YouTubeTelegramBot:
                 session.setdefault("persona_a", "Albert Einstein")
                 session.setdefault("persona_b", "Isaac Newton")
                 session.setdefault("topic", session.get("last_user") or "The nature of space and time")
+                # Default models
+                if not session.get("ai2ai_model_a"):
+                    session["ai2ai_model_a"] = session.get("model")
+                if not session.get("ai2ai_model_b"):
+                    session["ai2ai_model_b"] = session.get("model")
                 self.ollama_sessions[chat_id] = session
                 await query.answer("AI↔AI started")
                 try:
@@ -1353,6 +1395,48 @@ class YouTubeTelegramBot:
                 await query.answer("Continuing…")
                 await self._ollama_ai2ai_continue(query.message.chat_id)
                 return
+            if action == "pick_a":
+                models = session.get("models") or []
+                if not models:
+                    raw = ollama_get_models()
+                    models = self._ollama_models_list(raw)
+                    session["models"] = models
+                kb = self._build_ollama_models_keyboard_ai2ai(models, "A", session.get("page", 0))
+                await query.edit_message_text("🤖 Pick model for A:", reply_markup=kb)
+                await query.answer("Pick A")
+                return
+            if action == "pick_b":
+                models = session.get("models") or []
+                if not models:
+                    raw = ollama_get_models()
+                    models = self._ollama_models_list(raw)
+                    session["models"] = models
+                kb = self._build_ollama_models_keyboard_ai2ai(models, "B", session.get("page", 0))
+                await query.edit_message_text("🤖 Pick model for B:", reply_markup=kb)
+                await query.answer("Pick B")
+                return
+        if callback_data.startswith("ollama_more_ai2ai:"):
+            _, slot, page_str = callback_data.split(":", 2)
+            try:
+                page = int(page_str)
+            except Exception:
+                page = 0
+            models = session.get("models") or []
+            kb = self._build_ollama_models_keyboard_ai2ai(models, slot, page)
+            await query.edit_message_text(f"🤖 Pick model for {slot}:", reply_markup=kb)
+            session["page"] = page
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Page updated")
+            return
+        if callback_data.startswith("ollama_ai2ai_set:"):
+            _, slot, name = callback_data.split(":", 2)
+            key = "ai2ai_model_a" if slot == "A" else "ai2ai_model_b"
+            session[key] = name
+            self.ollama_sessions[chat_id] = session
+            await query.answer(f"Set {slot} -> {name}")
+            # Return to options view
+            await _render_options()
+            return
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
