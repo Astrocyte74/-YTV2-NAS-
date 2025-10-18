@@ -6,7 +6,6 @@ It handles all Telegram bot interactions without embedded HTML generation.
 """
 
 import asyncio
-import io
 import json
 import logging
 import os
@@ -868,7 +867,11 @@ class YouTubeTelegramBot:
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries from inline keyboards."""
         query = update.callback_query
-        await query.answer()
+        # Acknowledge quickly to stop Telegram's loading spinner
+        try:
+            await query.answer()
+        except Exception as e:
+            logging.debug(f"callback answer() failed: {e}")
         
         user_id = query.from_user.id
         user_name = query.from_user.first_name or "Unknown"
@@ -878,6 +881,7 @@ class YouTubeTelegramBot:
             return
         
         callback_data = query.data
+        logging.info(f"🔔 Callback received: user={user_id} data={callback_data}")
         
         # Handle summary requests
         if callback_data.startswith("summarize_"):
@@ -1362,6 +1366,7 @@ class YouTubeTelegramBot:
 
         if display_voices:
             row: List[InlineKeyboardButton] = []
+            idx = 0
             for voice in display_voices:
                 voice_id = voice.get('id')
                 if not voice_id:
@@ -1371,11 +1376,9 @@ class YouTubeTelegramBot:
                     fav_meta = favorite_by_voice.get(voice_id)
                 if mode == 'favorites' and not fav_meta:
                     continue
-                if mode == 'favorites':
-                    slug = fav_meta.get('slug') or fav_meta.get('id') or voice_id
-                    key = f"fav|{slug}"
-                else:
-                    key = f"cat|{voice_id}"
+                # Build a compact, index-based key to avoid Telegram's 64-byte limit
+                short_key = f"v{idx}"
+                idx += 1
 
                 accent = voice.get('accent') or {}
                 flag = accent.get('flag') or ''
@@ -1392,8 +1395,16 @@ class YouTubeTelegramBot:
                     'engine': voice.get('engine'),
                     'favoriteSlug': (fav_meta.get('slug') if fav_meta else None) or (fav_meta.get('id') if fav_meta else None),
                 }
-                voice_lookup[key] = entry_lookup
-                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{key}"))
+                # Store both short and legacy keys for robustness
+                voice_lookup[short_key] = entry_lookup
+                if mode == 'favorites' and fav_meta:
+                    legacy_key = f"fav|{(fav_meta.get('slug') or fav_meta.get('id') or voice_id)}"
+                    voice_lookup[legacy_key] = entry_lookup
+                else:
+                    legacy_key = f"cat|{voice_id}"
+                    voice_lookup[legacy_key] = entry_lookup
+
+                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{short_key}"))
                 if len(row) == 3:
                     rows.append(row)
                     row = []
@@ -1424,6 +1435,8 @@ class YouTubeTelegramBot:
         row = []
         if include_local:
             row.append(InlineKeyboardButton("🏠 Local TTS hub", callback_data="tts_provider:local"))
+        else:
+            row.append(InlineKeyboardButton("🏠 Local TTS hub", callback_data="tts_provider:local"))
         row.append(InlineKeyboardButton("☁️ OpenAI TTS", callback_data="tts_provider:openai"))
         buttons = [row, [InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")]]
         return InlineKeyboardMarkup(buttons)
@@ -1449,7 +1462,7 @@ class YouTubeTelegramBot:
         prompt_message = await query.message.reply_text(
             prompt_text,
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self._build_provider_keyboard(include_local=bool(session_payload['tts_base']))
+            reply_markup=self._build_provider_keyboard(include_local=True)
         )
         self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 
@@ -1464,21 +1477,28 @@ class YouTubeTelegramBot:
         audio_filename = placeholders.get('audio_filename') or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
         json_placeholder = placeholders.get('json_placeholder') or f"tts_{int(time.time())}.json"
 
-        loop = asyncio.get_running_loop()
-
-        async def _run_generate() -> Optional[str]:
-            return await self.summarizer.generate_tts_audio(
-                summary_text,
-                audio_filename,
-                json_placeholder,
-                provider=provider,
-            )
+        selected_voice = session.get('selected_voice') or {}
+        favorite_slug = selected_voice.get('favorite_slug')
+        voice_id = selected_voice.get('voice_id')
+        engine_id = selected_voice.get('engine')
 
         await query.answer(f"Generating audio via {provider.title()}…")
 
         try:
-            audio_filepath = await loop.run_in_executor(None, lambda: asyncio.run(_run_generate()))
+            logging.info(
+                f"🧩 Starting TTS generation via {provider} | title={session.get('title')}"
+            )
+            audio_filepath = await self.summarizer.generate_tts_audio(
+                summary_text,
+                audio_filename,
+                json_placeholder,
+                provider=provider,
+                voice=voice_id,
+                engine=engine_id,
+                favorite_slug=favorite_slug,
+            )
         except LocalTTSUnavailable as exc:
+            logging.warning(f"Local TTS unavailable during execution: {exc}")
             await self._handle_local_unavailable(query, session, message=str(exc))
             return
         except Exception as exc:
@@ -1491,6 +1511,7 @@ class YouTubeTelegramBot:
             await query.answer("TTS generation failed", show_alert=True)
             return
 
+        logging.info(f"📦 TTS file ready: {audio_filepath}")
         await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider)
         self._remove_tts_session(query.message.chat_id, query.message.message_id)
 
@@ -1509,6 +1530,7 @@ class YouTubeTelegramBot:
             "video_info": session.get('video_info'),
             "placeholders": session.get('placeholders'),
             "preferred_provider": "local",
+            "selected_voice": session.get('selected_voice'),
         }
         path = enqueue_tts_job(job)
         await query.answer("Queued for local TTS")
@@ -1732,8 +1754,26 @@ class YouTubeTelegramBot:
             return
 
         prompt = self._tts_prompt_text(speak_text)
+        # Build favorites keyboard and a compact lookup for selections
         keyboard = self._build_tts_keyboard(favorites)
         prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)
+
+        # Build a compact lookup: v0, v1, ... -> favorite voice/meta
+        voice_lookup: Dict[str, Dict[str, Any]] = {}
+        for i, fav in enumerate(favorites):
+            slug = fav.get('slug') or fav.get('voiceId')
+            if not slug:
+                continue
+            short_key = f"v{i}"
+            entry = {
+                'label': (fav.get('label') or slug),
+                'voice': None,
+                'voiceId': fav.get('voiceId'),
+                'engine': fav.get('engine'),
+                'favoriteSlug': slug,
+            }
+            voice_lookup[short_key] = entry
+            voice_lookup[f"fav|{slug}"] = entry
 
         session_payload = {
             "text": speak_text,
@@ -1741,16 +1781,22 @@ class YouTubeTelegramBot:
             "tts_base": client.base_api_url,
             "last_voice": None,
             "selected_family": None,
+            "voice_lookup": voice_lookup,
         }
         self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 
     async def _handle_tts_callback(self, query, callback_data: str):
+        logging.info(f"🎛️ TTS callback: {callback_data}")
         message = query.message
         if not message:
             return
         chat_id = message.chat_id
         message_id = message.message_id
         session = self._get_tts_session(chat_id, message_id)
+        if session:
+            logging.debug(f"TTS session found for {chat_id}:{message_id} keys={list(session.keys())}")
+        else:
+            logging.warning(f"TTS session missing for {chat_id}:{message_id}")
 
         if not session:
             await query.answer("Session expired", show_alert=True)
@@ -1762,6 +1808,7 @@ class YouTubeTelegramBot:
 
         client = self._resolve_tts_client(session.get('tts_base'))
         if not client or not client.base_api_url:
+            logging.warning("TTS hub unavailable during TTS callback")
             await query.answer("TTS hub unavailable", show_alert=True)
             return
 
@@ -1815,7 +1862,35 @@ class YouTubeTelegramBot:
 
         if callback_data.startswith("tts_provider:"):
             provider = callback_data.split(":", 1)[1]
-            await self._execute_tts_job(query, session, provider)
+            session['provider'] = provider
+            if provider == 'local':
+                client = self._resolve_tts_client(session.get('tts_base'))
+                session['tts_base'] = client.base_api_url if client else None
+                catalog = session.get('catalog')
+                favorites = session.get('favorites')
+                if client and not catalog:
+                    try:
+                        catalog = await client.fetch_catalog()
+                        session['catalog'] = catalog
+                        if not favorites:
+                            favorites = await client.fetch_favorites(tag="telegram")
+                            if favorites:
+                                session['favorites'] = favorites
+                    except Exception as exc:
+                        await self._handle_local_unavailable(query, session, message=str(exc))
+                        return
+                if not catalog or not catalog.get('voices'):
+                    await self._handle_local_unavailable(query, session, message="No voices available")
+                    return
+                if favorites is None and session.get('favorites') is None:
+                    session['favorites'] = []
+                session['voice_mode'] = session.get('voice_mode') or ('favorites' if session.get('favorites') else 'all')
+                self._store_tts_session(query.message.chat_id, query.message.message_id, session)
+                await self._refresh_tts_catalog(query, session)
+                await query.answer("Select a voice")
+                return
+            else:
+                await self._execute_tts_job(query, session, provider)
             return
 
         if callback_data.startswith("tts_queue:"):
@@ -1826,6 +1901,7 @@ class YouTubeTelegramBot:
             return
 
         payload = callback_data.split(":", 1)[1]
+        logging.info(f"🔊 Voice selected payload={payload}")
         kind, _, identifier = payload.partition("|")
         if not identifier:
             identifier = kind
@@ -1834,73 +1910,34 @@ class YouTubeTelegramBot:
         voice_lookup = session.get('voice_lookup') or {}
         entry = voice_lookup.get(payload) or {}
 
-        if kind == 'fav':
-            favorite_slug = entry.get('favoriteSlug') or identifier
-            voice_id = entry.get('voiceId')
-            engine_id = entry.get('engine')
-        else:
-            favorite_slug = None
-            voice_id = entry.get('voiceId') or identifier
-            engine_id = entry.get('engine')
+        # Prefer values from the lookup entry (works for both catalog and favorites)
+        favorite_slug = entry.get('favoriteSlug') if entry else None
+        voice_id = entry.get('voiceId') if entry else None
+        engine_id = entry.get('engine') if entry else None
 
-        label = self._tts_voice_label(session, payload)
-        text = session.get("text", "")
-        client = self._resolve_tts_client(session.get('tts_base'))
-        if not client or not client.base_api_url:
-            await query.answer("TTS hub unavailable", show_alert=True)
-            return
+        # Legacy/fallback: if no entry was found, infer from the payload
+        if not favorite_slug and not voice_id:
+            if kind == 'fav':
+                favorite_slug = identifier
+            else:
+                voice_id = identifier
 
-        await query.answer(f"Generating {label}…")
+        session['selected_voice'] = {
+            'favorite_slug': favorite_slug,
+            'voice_id': voice_id,
+            'engine': engine_id,
+        }
 
-        if catalog and kind == 'cat' and not voice_id:
-            favorite_slug = None
-            voice_id = identifier
-            engine_id = entry.get('engine')
-        if not catalog and favorite_slug is None:
-            favorite_slug = identifier
+        provider_choice = session.get('provider') or 'local'
+        logging.info(
+            f"🚀 Executing TTS job provider={provider_choice} fav={favorite_slug} voice_id={voice_id} engine={engine_id}"
+        )
 
         try:
-            result = await client.synthesise(
-                text,
-                favorite_slug=favorite_slug,
-                voice_id=voice_id,
-                engine=engine_id,
-            )
-        except Exception as e:
-            logging.error(f"TTS synthesis failed: {e}")
-            await query.answer("❌ TTS failed", show_alert=True)
+            await self._execute_tts_job(query, session, provider_choice)
+        except LocalTTSUnavailable as exc:
+            await self._handle_local_unavailable(query, session, message=str(exc))
             return
-
-        audio_bytes = result.get("audio_bytes")
-        filename = result.get("filename") or f"{identifier}.wav"
-        if not audio_bytes:
-            await query.answer("❌ No audio received", show_alert=True)
-            return
-
-        bio = io.BytesIO(audio_bytes)
-        bio.name = filename
-
-        try:
-            await query.message.reply_audio(audio=bio, caption=f"🎤 {label}")
-        except Exception as send_error:
-            logging.error(f"Failed to send TTS audio: {send_error}")
-            await query.answer("❌ Failed to send audio", show_alert=True)
-            return
-
-        session["last_voice"] = label
-
-        if catalog:
-            try:
-                await self._refresh_tts_catalog(query, session)
-            except Exception:
-                pass
-        else:
-            prompt = self._tts_prompt_text(text, last_voice=label)
-            keyboard = self._build_tts_keyboard(session.get("favorites", []))
-            try:
-                await query.edit_message_text(prompt, reply_markup=keyboard)
-            except Exception:
-                pass
 
     def _get_dashboard_base(self) -> Optional[str]:
         return (
