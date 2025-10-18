@@ -1037,10 +1037,24 @@ class YouTubeTelegramBot:
                     reply_text = f"(No response)\n{snippet}"
         if not reply_text:
             reply_text = "(No response)"
-        await update.message.reply_text(reply_text)
+        # Send safely within Telegram length limits
+        await self._send_long_text_reply(update, reply_text)
         # Update conversation history (keep it short)
         session["history"] = (messages + [{"role": "assistant", "content": reply_text}])[-16:]
         self.ollama_sessions[chat_id] = session
+
+    async def _send_long_text_reply(self, update: Update, text: str, parse_mode: Optional[str] = None):
+        text = text or ""
+        # Keep a safety margin for formatting
+        safety = 100
+        limit = max(1000, self.MAX_MESSAGE_LENGTH - safety)
+        if len(text) <= limit:
+            await update.message.reply_text(text, parse_mode=parse_mode)
+            return
+        chunks = self._split_text_into_chunks(text, limit)
+        for i, chunk in enumerate(chunks):
+            # No parse mode on continuation to avoid formatting issues across chunks
+            await update.message.reply_text(chunk)
 
     async def _handle_ollama_callback(self, query, callback_data: str):
         chat_id = query.message.chat_id
