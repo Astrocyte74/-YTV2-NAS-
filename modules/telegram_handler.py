@@ -1546,43 +1546,55 @@ class YouTubeTelegramBot:
         provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
         metrics.record_tts(True)
         video_info = session.get('video_info') or {}
+        mode = session.get('mode') or 'oneoff_tts'
         title = session.get('title') or video_info.get('title', 'Unknown Title')
         ledger_id = session.get('ledger_id')
         normalized_video_id = session.get('normalized_video_id') or video_info.get('video_id')
         summary_type = session.get('summary_type') or 'audio'
         base_variant = session.get('base_variant') or 'audio'
 
-        normalized_id = normalized_video_id or video_info.get('video_id') or 'unknown'
-        if ledger_id and ':' not in ledger_id:
-            ledger_id = f"yt:{ledger_id}"
+        audio_reply_markup = None
+        if mode == 'summary_audio':
+            normalized_id = normalized_video_id or video_info.get('video_id') or 'unknown'
+            if ledger_id and ':' not in ledger_id:
+                ledger_id = f"yt:{ledger_id}"
 
-        content_identifier = (
-            session.get('result_id')
-            or video_info.get('content_id')
-            or ledger_id
-            or normalized_id
-        )
-        if content_identifier and ':' not in content_identifier:
-            content_identifier = f"yt:{content_identifier}"
+            content_identifier = (
+                session.get('result_id')
+                or video_info.get('content_id')
+                or ledger_id
+                or normalized_id
+            )
+            if content_identifier and ':' not in content_identifier:
+                content_identifier = f"yt:{content_identifier}"
 
-        self._sync_audio_to_targets(normalized_id, audio_path, ledger_id, summary_type)
-        if content_identifier:
-            self._upload_audio_to_render(content_identifier, audio_path)
+            self._sync_audio_to_targets(normalized_id, audio_path, ledger_id, summary_type)
+            if content_identifier:
+                self._upload_audio_to_render(content_identifier, audio_path)
 
-        audio_reply_markup = self._build_audio_inline_keyboard(
-            normalized_id,
-            base_variant,
-            video_info.get('video_id', '')
-        )
+            audio_reply_markup = self._build_audio_inline_keyboard(
+                normalized_id,
+                base_variant,
+                video_info.get('video_id', '')
+            )
 
         try:
             with audio_path.open('rb') as audio_file:
-                await query.message.reply_voice(
-                    voice=audio_file,
-                    caption=(
+                if mode == 'summary_audio':
+                    caption = (
                         f"🎧 **Audio Summary**: {self._escape_markdown(title)}\n"
                         f"🎵 Generated with {provider_label}"
-                    ),
+                    )
+                else:
+                    voice_label = session.get('last_voice') or ''
+                    caption = (
+                        f"🎧 **TTS Preview**"
+                        + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}"
+                    )
+                await query.message.reply_voice(
+                    voice=audio_file,
+                    caption=caption,
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=audio_reply_markup
                 )
@@ -1739,6 +1751,7 @@ class YouTubeTelegramBot:
                 "favorites": favorites_list,
                 "voice_mode": 'favorites' if favorites_list else 'all',
                 "tts_base": client.base_api_url,
+                "mode": "oneoff_tts",
             }
             prompt = self._tts_prompt_text(speak_text, catalog=catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
@@ -1789,6 +1802,7 @@ class YouTubeTelegramBot:
             "last_voice": None,
             "selected_family": None,
             "voice_lookup": voice_lookup,
+            "mode": "oneoff_tts",
         }
         self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 
