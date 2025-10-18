@@ -1468,8 +1468,9 @@ class YouTubeTelegramBot:
 
     async def _execute_tts_job(self, query, session: Dict[str, Any], provider: str) -> None:
         provider = (provider or 'openai').lower()
-        summary_text = session.get('summary_text', '')
+        summary_text = session.get('summary_text') or session.get('text') or ''
         if not summary_text:
+            logging.warning("TTS: session missing text; aborting")
             await query.answer("Missing summary text", show_alert=True)
             return
 
