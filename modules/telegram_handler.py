@@ -1257,29 +1257,23 @@ class YouTubeTelegramBot:
 
         return await async_loop.run_in_executor(None, _call)
 
-    def _accent_voice_map(self, catalog: Dict[str, Any]) -> Dict[str, set]:
-        mapping: Dict[str, set] = {}
-        filters = (catalog or {}).get('filters') or {}
-        accent_filters = filters.get('accents') or []
-        for entry in accent_filters:
-            accent_id = entry.get('id')
-            if not accent_id:
-                continue
-            voices = set(entry.get('voices') or [])
-            mapping[accent_id] = voices
-        return mapping
+    def _normalize_accent_family(self, accent_id: Optional[str]) -> str:
+        accent_id = (accent_id or '').lower()
+        if accent_id.startswith('us'):
+            return 'us'
+        if accent_id.startswith('uk'):
+            return 'uk'
+        return 'other'
 
     def _filter_catalog_voices(
         self,
         catalog: Dict[str, Any],
+        *,
         gender: Optional[str] = None,
-        accent: Optional[str] = None,
-        accent_map: Optional[Dict[str, set]] = None,
+        family: Optional[str] = None,
         allowed_ids: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         voices = (catalog or {}).get('voices') or []
-        accent_map = accent_map or {}
-        accent_allowed = accent_map.get(accent) if accent else None
         result = []
         for voice in voices:
             voice_id = voice.get('id')
@@ -1289,14 +1283,10 @@ class YouTubeTelegramBot:
                 continue
             if gender and voice.get('gender') != gender:
                 continue
-            if accent:
-                voice_accent = (voice.get('accent') or {}).get('id')
-                if voice_accent != accent:
-                    if accent_allowed is not None:
-                        if voice_id not in accent_allowed:
-                            continue
-                    else:
-                        continue
+            accent_id = (voice.get('accent') or {}).get('id')
+            family_id = self._normalize_accent_family(accent_id)
+            if family and family_id != family:
+                continue
             result.append(voice)
         result.sort(key=lambda v: (v.get('label') or v.get('id') or '').lower())
         return result
@@ -1311,36 +1301,40 @@ class YouTubeTelegramBot:
         }
         return mapping.get(gender, gender.title())
 
-    def _accent_label_from_catalog(self, catalog: Dict[str, Any], accent_id: Optional[str]) -> str:
-        if not accent_id:
-            return "All accents"
-        filters = (catalog or {}).get('filters') or {}
-        for entry in filters.get('accents') or []:
-            if entry.get('id') == accent_id:
-                label = entry.get('label') or accent_id
-                flag = entry.get('flag') or ""
+    def _family_label(self, catalog: Dict[str, Any], family_id: Optional[str]) -> str:
+        families = ((catalog or {}).get('filters') or {}).get('accentFamilies', {}).get('any', [])
+        for entry in families:
+            if entry.get('id') == family_id:
+                label = entry.get('label') or family_id.title()
+                flag = entry.get('flag') or ''
                 return f"{flag} {label}".strip()
-        return accent_id
+        return (family_id or 'All accents').title()
 
-    def _compute_accent_filters(
+    def _available_families(
         self,
         catalog: Dict[str, Any],
+        *,
         gender: Optional[str] = None,
         allowed_ids: Optional[set] = None,
     ) -> List[Dict[str, Any]]:
         voices = self._filter_catalog_voices(catalog, gender=gender, allowed_ids=allowed_ids)
-        counts: Dict[str, Dict[str, Any]] = {}
+        counts: Dict[str, int] = {}
         for voice in voices:
-            accent = voice.get('accent') or {}
-            accent_id = accent.get('id') or 'misc'
-            entry = counts.setdefault(accent_id, {
-                'id': accent_id,
-                'label': accent.get('label') or accent_id.title(),
-                'flag': accent.get('flag') or '',
-                'count': 0,
-            })
-            entry['count'] += 1
-        result = list(counts.values())
+            accent_id = (voice.get('accent') or {}).get('id')
+            family_id = self._normalize_accent_family(accent_id)
+            counts[family_id] = counts.get(family_id, 0) + 1
+        families_meta = ((catalog or {}).get('filters') or {}).get('accentFamilies', {}).get('any', [])
+        meta_lookup = {entry.get('id'): entry for entry in families_meta if entry.get('id')}
+        result = []
+        for family_id, count in counts.items():
+            meta = meta_lookup.get(family_id, {'label': family_id.title(), 'flag': ''})
+            entry = {
+                'id': family_id,
+                'label': meta.get('label') or family_id.title(),
+                'flag': meta.get('flag') or '',
+                'count': count,
+            }
+            result.append(entry)
         result.sort(key=lambda item: (-item['count'], item['label'].lower()))
         return result
 
@@ -1349,8 +1343,7 @@ class YouTubeTelegramBot:
         filters = (catalog.get('filters') or {}) if catalog else {}
         favorites = session.get('favorites') or []
         selected_gender = session.get('selected_gender')
-        selected_accent = session.get('selected_accent')
-        accent_map = session.get('accent_map') or {}
+        selected_family = session.get('selected_family')
 
         mode = session.get('voice_mode')
         if mode not in ('favorites', 'all'):
@@ -1394,23 +1387,23 @@ class YouTubeTelegramBot:
             gender_buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"tts_gender:{gid}"))
         rows.append(gender_buttons)
 
-        # Accent header and options
+        # Accent family header and options
         rows.append([InlineKeyboardButton("Accent", callback_data="tts_nop")])
-        accent_entries = self._compute_accent_filters(catalog, gender=selected_gender, allowed_ids=allowed_ids)
+        family_options = self._available_families(catalog, gender=selected_gender, allowed_ids=allowed_ids)
         accent_rows: List[List[InlineKeyboardButton]] = []
-        mark_all_acc = "✅" if not selected_accent else "⬜"
-        accent_rows.append([InlineKeyboardButton(f"{mark_all_acc} All", callback_data="tts_accent:all")])
+        mark_all_family = "✅" if not selected_family else "⬜"
+        accent_rows.append([InlineKeyboardButton(f"{mark_all_family} All", callback_data="tts_accent:all")])
 
         row: List[InlineKeyboardButton] = []
-        for entry in accent_entries:
-            accent_id = entry.get('id')
-            if not accent_id:
+        for entry in family_options:
+            family_id = entry.get('id')
+            if not family_id:
                 continue
-            label = entry.get('label') or accent_id.title()
+            label = entry.get('label') or family_id.title()
             flag = entry.get('flag') or ''
-            mark = "✅" if selected_accent == accent_id else "⬜"
+            mark = "✅" if selected_family == family_id else "⬜"
             button_label = f"{mark} {flag} {label}".strip()
-            row.append(InlineKeyboardButton(button_label, callback_data=f"tts_accent:{accent_id}"))
+            row.append(InlineKeyboardButton(button_label, callback_data=f"tts_accent:{family_id}"))
             if len(row) == 3:
                 accent_rows.append(row)
                 row = []
@@ -1428,8 +1421,7 @@ class YouTubeTelegramBot:
             filtered = self._filter_catalog_voices(
                 catalog,
                 gender=selected_gender,
-                accent=selected_accent,
-                accent_map=accent_map,
+                family=selected_family,
                 allowed_ids=allowed_ids,
             )
             id_to_voice = {voice.get('id'): voice for voice in filtered if voice.get('id')}
@@ -1444,8 +1436,7 @@ class YouTubeTelegramBot:
             display_voices = self._filter_catalog_voices(
                 catalog,
                 gender=selected_gender,
-                accent=selected_accent,
-                accent_map=accent_map,
+                family=selected_family,
             )
 
         if display_voices:
@@ -1478,7 +1469,7 @@ class YouTubeTelegramBot:
                     'voice': voice,
                     'voiceId': voice_id,
                     'engine': voice.get('engine'),
-                    'favoriteSlug': fav_meta.get('slug') if fav_meta else None,
+                    'favoriteSlug': (fav_meta.get('slug') if fav_meta else None) or (fav_meta.get('id') if fav_meta else None),
                 }
                 voice_lookup[key] = entry_lookup
                 row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{key}"))
@@ -1502,7 +1493,7 @@ class YouTubeTelegramBot:
             session.get('text', ''),
             last_voice=session.get('last_voice'),
             gender=session.get('selected_gender'),
-            accent=session.get('selected_accent'),
+            family=session.get('selected_family'),
             catalog=catalog,
         )
         keyboard = self._build_tts_catalog_keyboard(session)
@@ -1565,7 +1556,7 @@ class YouTubeTelegramBot:
         text: str,
         last_voice: Optional[str] = None,
         gender: Optional[str] = None,
-        accent: Optional[str] = None,
+        family: Optional[str] = None,
         catalog: Optional[Dict[str, Any]] = None,
     ) -> str:
         snippet = (text or "").strip()
@@ -1579,8 +1570,8 @@ class YouTubeTelegramBot:
         lines.append("🗣️ Ready to synthesize speech for:")
         lines.append(f"“{snippet or '…'}”")
         gender_label = self._gender_label(gender)
-        accent_label = self._accent_label_from_catalog(catalog or {}, accent)
-        lines.append(f"Filters: {gender_label} · {accent_label}")
+        family_label = self._family_label(catalog or {}, family)
+        lines.append(f"Filters: {gender_label} · {family_label}")
         lines.append("Select a voice below or cancel.")
         lines.append("──────────────────────────────")
         return "\n".join(lines)
@@ -1694,14 +1685,12 @@ class YouTubeTelegramBot:
             favorites_list = []
 
         if catalog and catalog.get('voices'):
-            accent_map = self._accent_voice_map(catalog)
             session_payload = {
                 "text": speak_text,
                 "base": base_url,
                 "catalog": catalog,
-                "accent_map": accent_map,
                 "selected_gender": None,
-                "selected_accent": None,
+                "selected_family": None,
                 "last_voice": None,
                 "favorites": favorites_list,
                 "voice_mode": 'favorites' if favorites_list else 'all',
@@ -1735,6 +1724,7 @@ class YouTubeTelegramBot:
             "favorites": favorites,
             "base": base_url,
             "last_voice": None,
+            "selected_family": None,
         }
         self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 
@@ -1772,7 +1762,7 @@ class YouTubeTelegramBot:
                     if session.get('favorites'):
                         session['voice_mode'] = 'favorites'
                         session['selected_gender'] = None
-                        session['selected_accent'] = None
+                        session['selected_family'] = None
                         await self._refresh_tts_catalog(query, session)
                         await query.answer("Favorites selected")
                     else:
@@ -1781,7 +1771,7 @@ class YouTubeTelegramBot:
                 elif mode_value == "all":
                     session['voice_mode'] = 'all'
                     session['selected_gender'] = None
-                    session['selected_accent'] = None
+                    session['selected_family'] = None
                     await self._refresh_tts_catalog(query, session)
                     await query.answer("Showing all voices")
                     return
@@ -1791,13 +1781,13 @@ class YouTubeTelegramBot:
             if callback_data.startswith("tts_gender:"):
                 value = callback_data.split(":", 1)[1]
                 session["selected_gender"] = None if value in ("all", "") else value
-                session["selected_accent"] = None
+                session["selected_family"] = None
                 await self._refresh_tts_catalog(query, session)
                 await query.answer("Gender updated")
                 return
             if callback_data.startswith("tts_accent:"):
                 value = callback_data.split(":", 1)[1]
-                session["selected_accent"] = None if value in ("all", "") else value
+                session["selected_family"] = None if value in ("all", "") else value
                 await self._refresh_tts_catalog(query, session)
                 await query.answer("Accent updated")
                 return
