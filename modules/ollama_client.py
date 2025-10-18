@@ -54,12 +54,15 @@ def delete(model: str) -> Dict:
     return _post("ollama/delete", {"model": model}, timeout=30)
 
 
-def pull(model: str, *, stream: bool = True) -> Iterable[str]:
+def pull(model: str, *, stream: bool = True) -> Dict | Iterable[str]:
+    if not stream:
+        return _post("ollama/pull", {"model": model, "stream": False}, timeout=None)
+    return pull_stream(model)
+
+
+def pull_stream(model: str) -> Iterable[str]:
     url = f"{_base()}/ollama/pull"
-    body = {"model": model, "stream": bool(stream)}
-    if not stream:
-        yield from [requests.post(url, json=body, timeout=None).text]
-        return
+    body = {"model": model, "stream": True}
     with requests.post(url, json=body, stream=True, timeout=None) as r:
         r.raise_for_status()
         for line in r.iter_lines(decode_unicode=True):
@@ -69,11 +72,15 @@ def pull(model: str, *, stream: bool = True) -> Iterable[str]:
                 yield line[6:]
 
 
-def generate(prompt: str, model: str, *, stream: bool = False) -> Iterable[str] | Dict:
+def generate(prompt: str, model: str, *, stream: bool = False) -> Dict | Iterable[str]:
+    if not stream:
+        return _post("ollama/generate", {"model": model, "prompt": prompt, "stream": False})
+    return generate_stream(prompt, model)
+
+
+def generate_stream(prompt: str, model: str) -> Iterable[str]:
     url = f"{_base()}/ollama/generate"
-    body = {"model": model, "prompt": prompt, "stream": bool(stream)}
-    if not stream:
-        return _post("ollama/generate", body)
+    body = {"model": model, "prompt": prompt, "stream": True}
     with requests.post(url, json=body, stream=True, timeout=None) as r:
         r.raise_for_status()
         for line in r.iter_lines(decode_unicode=True):
@@ -83,11 +90,15 @@ def generate(prompt: str, model: str, *, stream: bool = False) -> Iterable[str] 
                 yield line[6:]
 
 
-def chat(messages: List[Dict[str, str]], model: str, *, stream: bool = False) -> Iterable[str] | Dict:
-    url = f"{_base()}/ollama/chat"
-    body = {"model": model, "messages": messages, "stream": bool(stream)}
+def chat(messages: List[Dict[str, str]], model: str, *, stream: bool = False) -> Dict | Iterable[str]:
     if not stream:
-        return _post("ollama/chat", body)
+        return _post("ollama/chat", {"model": model, "messages": messages, "stream": False})
+    return chat_stream(messages, model)
+
+
+def chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[str]:
+    url = f"{_base()}/ollama/chat"
+    body = {"model": model, "messages": messages, "stream": True}
     with requests.post(url, json=body, stream=True, timeout=None) as r:
         r.raise_for_status()
         for line in r.iter_lines(decode_unicode=True):
@@ -104,7 +115,9 @@ __all__ = [
     "show",
     "delete",
     "pull",
+    "pull_stream",
     "generate",
+    "generate_stream",
     "chat",
+    "chat_stream",
 ]
-
