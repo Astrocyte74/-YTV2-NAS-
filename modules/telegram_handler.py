@@ -1448,12 +1448,6 @@ class YouTubeTelegramBot:
                 accent_map=accent_map,
             )
 
-        if mode == 'favorites' and not display_voices and favorites:
-            # No favorites match filters; fallback to unfiltered favorites
-            session['selected_gender'] = None
-            session['selected_accent'] = None
-            display_voices = self._filter_catalog_voices(catalog, accent_map=accent_map, allowed_ids=allowed_ids)
-
         if display_voices:
             row: List[InlineKeyboardButton] = []
             for voice in display_voices:
