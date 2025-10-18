@@ -27,5 +27,10 @@ RUN mkdir -p data exports logs cache downloads
 # Expose port
 EXPOSE 6452
 
-# Run the application
-CMD ["python", "telegram_bot.py"]
+# Defaults for embedded queue worker
+ENV ENABLE_TTS_QUEUE_WORKER=1 \
+    TTS_QUEUE_INTERVAL=30
+
+# Entrypoint to run both the bot and the queue worker (watch mode)
+RUN chmod +x /app/entrypoint.sh
+CMD ["/app/entrypoint.sh"]
