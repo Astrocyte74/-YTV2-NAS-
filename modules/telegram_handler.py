@@ -1131,6 +1131,13 @@ class YouTubeTelegramBot:
                     chunk = data.get("response")
                     if isinstance(chunk, str) and chunk:
                         final_text["buf"] += chunk
+                    else:
+                        # Some hubs send tokens in message.content
+                        msg = data.get("message")
+                        if isinstance(msg, dict):
+                            c = msg.get("content")
+                            if isinstance(c, str) and c:
+                                final_text["buf"] += c
                     # Throttle edits
                     now = time.time()
                     if (now - last > 0.4) and final_text["buf"]:
@@ -1260,6 +1267,40 @@ class YouTubeTelegramBot:
             return
         if callback_data.startswith("ollama_model:"):
             model = callback_data.split(":", 1)[1]
+            mode = session.get("mode") or "ai-human"
+            if mode == "ai-ai":
+                # Select A then B on the main picker flow
+                if not session.get("ai2ai_model_a"):
+                    session["ai2ai_model_a"] = model
+                    self.ollama_sessions[chat_id] = session
+                    await query.edit_message_text(
+                        f"✅ Set A → `{self._escape_markdown(model)}`\nPick model for B:",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=self._build_ollama_models_keyboard_ai2ai(session.get("models") or [], "B", session.get("page", 0))
+                    )
+                    await query.answer("Model A selected")
+                    return
+                if not session.get("ai2ai_model_b"):
+                    session["ai2ai_model_b"] = model
+                    self.ollama_sessions[chat_id] = session
+                    # After both selected, prompt to start AI↔AI
+                    a = session.get("ai2ai_model_a")
+                    b = session.get("ai2ai_model_b")
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")]])
+                    await query.edit_message_text(
+                        f"✅ Models set:\nA: `{self._escape_markdown(a)}`\nB: `{self._escape_markdown(b)}`",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=kb,
+                    )
+                    await query.answer("Model B selected")
+                    return
+                # If both already set, toggle A
+                session["ai2ai_model_a"] = model
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Updated A")
+                await _render_options()
+                return
+            # Default AI→Human
             session["model"] = model
             session["active"] = True
             self.ollama_sessions[chat_id] = session
