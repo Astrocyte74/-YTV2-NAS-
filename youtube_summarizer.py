@@ -2468,6 +2468,7 @@ Multiple Categories (when content genuinely spans areas):
         local_client: Optional[TTSHubClient] = None,
         voice: Optional[str] = None,
         engine: Optional[str] = None,
+        favorite_slug: Optional[str] = None,
     ) -> Optional[str]:
         """Generate TTS for multiple chunks and combine them"""
         import tempfile
@@ -2491,6 +2492,7 @@ Multiple Categories (when content genuinely spans areas):
                     local_client=local_client,
                     voice=voice,
                     engine=engine,
+                    favorite_slug=favorite_slug,
                 )
                 if chunk_result:
                     chunk_files.append(chunk_filename)
@@ -2555,6 +2557,7 @@ Multiple Categories (when content genuinely spans areas):
         local_client: Optional[TTSHubClient] = None,
         voice: Optional[str] = None,
         engine: Optional[str] = None,
+        favorite_slug: Optional[str] = None,
     ) -> Optional[str]:
         """Generate TTS for a single text chunk"""
         provider = (provider or "openai").lower()
@@ -2568,6 +2571,7 @@ Multiple Categories (when content genuinely spans areas):
                     text,
                     voice_id=voice,
                     engine=engine,
+                    favorite_slug=favorite_slug,
                 )
             except LocalTTSUnavailable:
                 raise
@@ -2723,6 +2727,7 @@ Multiple Categories (when content genuinely spans areas):
         provider: str = "openai",
         voice: Optional[str] = None,
         engine: Optional[str] = None,
+        favorite_slug: Optional[str] = None,
     ) -> Optional[str]:
         """Generate TTS audio with support for local hub or OpenAI."""
         provider = (provider or "openai").lower()
@@ -2758,6 +2763,7 @@ Multiple Categories (when content genuinely spans areas):
                     local_client=local_client,
                     voice=voice,
                     engine=engine,
+                    favorite_slug=favorite_slug,
                 )
             else:
                 result_path = await self._generate_single_tts(
@@ -2767,6 +2773,7 @@ Multiple Categories (when content genuinely spans areas):
                     local_client=local_client,
                     voice=voice,
                     engine=engine,
+                    favorite_slug=favorite_slug,
                 )
                 if result_path and json_filepath:
                     self._update_json_with_mp3_metadata(json_filepath, str(output_path))
