@@ -976,6 +976,18 @@ class YouTubeTelegramBot:
             pass
         logging.info(f"Ollama chat: model={model} text_len={len(text)}")
         resp = await loop.run_in_executor(None, _call)
+        try:
+            import json as _json
+            if isinstance(resp, dict):
+                keys = list(resp.keys())
+                logging.info(f"Ollama resp keys: {keys[:8]}")
+                msg = resp.get("message")
+                if isinstance(msg, dict):
+                    logging.info(f"Ollama message keys: {list(msg.keys())}")
+            else:
+                logging.info(f"Ollama resp type: {type(resp)}")
+        except Exception:
+            pass
         if isinstance(resp, dict) and resp.get("error"):
             await update.message.reply_text(f"❌ Ollama error: {resp['error'][:200]}")
             return
