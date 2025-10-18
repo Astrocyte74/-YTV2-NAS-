@@ -1088,6 +1088,8 @@ class YouTubeTelegramBot:
         
         elif callback_data.startswith("tts_"):
             await self._handle_tts_callback(query, callback_data)
+        elif callback_data.startswith("ollama_"):
+            await self._handle_ollama_callback(query, callback_data)
         
         # Handle delete requests
         elif callback_data.startswith('delete_'):
