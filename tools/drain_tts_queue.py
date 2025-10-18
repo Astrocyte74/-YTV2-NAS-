@@ -22,7 +22,23 @@ import time
 from pathlib import Path
 from typing import Dict, Optional
 
+# Ensure project root is on sys.path so `modules` imports resolve when executed from tools/
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from modules.tts_queue import QUEUE_DIR
+
+# If running in POSTGRES_ONLY mode, patch out SQLite metadata updates to avoid locks.
+try:
+    import modules.report_generator as _rg  # type: ignore
+    if os.getenv('POSTGRES_ONLY', 'false').lower() == 'true':
+        def _no_sqlite_update(json_filepath: str, mp3_filepath: str, voice: str = "fable") -> bool:
+            print("Skipping SQLite MP3 metadata update (POSTGRES_ONLY=true)")
+            return True
+        _rg.update_json_with_mp3_metadata = _no_sqlite_update  # type: ignore
+except Exception:
+    pass
 
 
 def setup_logging() -> None:
@@ -46,6 +62,9 @@ def move_job(path: Path, outcome: str) -> None:
     dest_dir = QUEUE_DIR / outcome
     dest_dir.mkdir(parents=True, exist_ok=True)
     try:
+        if not path.exists():
+            logging.warning(f"Job {path.name} already moved; skipping move to {outcome}")
+            return
         path.rename(dest_dir / path.name)
     except Exception as exc:
         logging.warning(f"Could not move job {path.name} to {outcome}: {exc}")
@@ -99,34 +118,97 @@ async def process_job(path: Path) -> bool:
     provider = (job.get("preferred_provider") or "local").lower()
 
     # Build summarizer and generate audio
+    summarizer = None
     try:
         from youtube_summarizer import YouTubeSummarizer  # heavy, but provides chunking + JSON update
+        try:
+            summarizer = YouTubeSummarizer()
+        except Exception as exc:
+            logging.warning(f"Summarizer init failed; will fallback to direct TTS: {exc}")
+            summarizer = None
     except Exception as exc:
-        logging.error(f"Failed to import YouTubeSummarizer: {exc}")
-        move_job(path, "failed")
-        return False
+        logging.warning(f"YouTubeSummarizer unavailable; using direct TTS: {exc}")
 
-    try:
-        summarizer = YouTubeSummarizer()
-    except Exception as exc:
-        logging.error(f"Failed to init summarizer: {exc}")
-        move_job(path, "failed")
-        return False
+    # If using local and no explicit voice, pick first favorite from hub
+    if provider == "local" and not (favorite_slug or voice_id):
+        try:
+            from modules.tts_hub import TTSHubClient
+            client = TTSHubClient.from_env()
+            favs = await client.fetch_favorites(tag="telegram")
+            if not favs:
+                favs = await client.fetch_favorites()
+            if favs:
+                picked = favs[0]
+                favorite_slug = picked.get("slug") or picked.get("id") or picked.get("voiceId")
+                engine_id = picked.get("engine") or engine_id
+                logging.info(f"Picked default favorite: {favorite_slug} (engine={engine_id})")
+        except Exception as exc:
+            logging.warning(f"Could not resolve default favorite voice: {exc}")
 
     logging.info(
         f"Processing job {path.name} | provider={provider} fav={favorite_slug} voice={voice_id} engine={engine_id}"
     )
 
+    result_path: Optional[str] = None
     try:
-        result_path = await summarizer.generate_tts_audio(
-            text,
-            audio_filename,
-            json_placeholder,
-            provider=provider,
-            voice=voice_id,
-            engine=engine_id,
-            favorite_slug=favorite_slug,
-        )
+        if summarizer is not None:
+            result_path = await summarizer.generate_tts_audio(
+                text,
+                audio_filename,
+                json_placeholder,
+                provider=provider,
+                voice=voice_id,
+                engine=engine_id,
+                favorite_slug=favorite_slug,
+            )
+        else:
+            # Minimal direct TTS fallback (no chunking)
+            exports = Path("exports"); exports.mkdir(exist_ok=True)
+            out_path = exports / audio_filename
+            if provider == "local":
+                try:
+                    from modules.tts_hub import TTSHubClient
+                    client = TTSHubClient.from_env()
+                    data = await client.synthesise(
+                        text,
+                        favorite_slug=favorite_slug,
+                        voice_id=voice_id,
+                        engine=engine_id,
+                    )
+                    audio_bytes = (data or {}).get("audio_bytes")
+                    if not audio_bytes:
+                        raise RuntimeError("Local TTS returned no audio_bytes")
+                    out_path.write_bytes(audio_bytes)
+                    result_path = str(out_path)
+                except Exception as exc:
+                    logging.error(f"Local TTS fallback failed: {exc}")
+                    result_path = None
+            else:
+                # OpenAI fallback
+                import requests
+                api_key = os.getenv("OPENAI_API_KEY")
+                if not api_key:
+                    raise RuntimeError("OPENAI_API_KEY not set")
+                url = "https://api.openai.com/v1/audio/speech"
+                payload = {
+                    "model": "tts-1",
+                    "input": text,
+                    "voice": voice_id or "fable",
+                    "response_format": "mp3",
+                }
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                resp = requests.post(url, json=payload, headers=headers, timeout=60)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"OpenAI TTS error {resp.status_code}: {resp.text[:200]}")
+                out_path.write_bytes(resp.content)
+                result_path = str(out_path)
+            # Update JSON metadata when possible
+            try:
+                from modules.report_generator import update_json_with_mp3_metadata
+                voice_for_json = voice_id or favorite_slug or "fable"
+                update_json_with_mp3_metadata(json_placeholder, str(out_path), voice_for_json)
+            except Exception:
+                pass
     except Exception as exc:
         logging.error(f"TTS failed for {path.name}: {exc}")
         move_job(path, "failed")
@@ -220,4 +302,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
