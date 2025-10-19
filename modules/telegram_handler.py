@@ -684,8 +684,11 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("tts", self.tts_command))
+        # Ollama chat commands (alias: /o)
         self.application.add_handler(CommandHandler("ollama", self.ollama_command))
+        self.application.add_handler(CommandHandler("o", self.ollama_command))
         self.application.add_handler(CommandHandler("ollama_stop", self.ollama_stop_command))
+        # (moved above)
         
         # Message handlers
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
@@ -918,8 +921,39 @@ class YouTubeTelegramBot:
             nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page-1}"))
         if nav:
             rows.append(nav)
-        rows.append([InlineKeyboardButton("⚙️ Options", callback_data="ollama_options"), InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
+        # Options only for AI↔AI advanced settings (appears when both models selected)
+        rows.append([InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
         return InlineKeyboardMarkup(rows)
+
+    def _ollama_stream_default(self) -> bool:
+        val = os.getenv('OLLAMA_STREAM_DEFAULT', '1').lower()
+        return val not in ('0', 'false', 'no')
+
+    def _ollama_status_text(self, session: Dict[str, Any]) -> str:
+        line = "-" * 54
+        # Determine mode
+        a = session.get('ai2ai_model_a')
+        b = session.get('ai2ai_model_b')
+        stream_on = True  # default on
+        mode = 'AI↔AI' if (a and b) else 'AI→Human'
+        parts = [
+            line,
+            f"🤖 Ollama Chat · Mode: {mode} · Streaming: ON",
+        ]
+        if a and b:
+            pa = session.get('persona_a') or 'Persona A'
+            pb = session.get('persona_b') or 'Persona B'
+            parts.append(f"A: {a} · {pa}")
+            parts.append(f"B: {b} · {pb}")
+            turns = session.get('ai2ai_turns_left')
+            if isinstance(turns, int):
+                parts.append(f"Turns remaining: {turns}")
+        else:
+            model = session.get('model') or '—'
+            parts.append(f"Model: {model}")
+        parts.append(line)
+        parts.append("Select a model below or type to chat.")
+        return "\n".join(parts)
 
     def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9) -> InlineKeyboardMarkup:
         start = page * page_size
@@ -959,16 +993,17 @@ class YouTubeTelegramBot:
                 await update.message.reply_text("⚠️ No models available on the hub.")
                 return
             kb = self._build_ollama_models_keyboard(models, 0)
-            await update.message.reply_text("🤖 Select an Ollama model to chat with:", reply_markup=kb)
-            # Store browse session context
+            # Initialize session with defaults (streaming on)
             self.ollama_sessions[update.effective_chat.id] = {
                 "active": False,
                 "models": models,
                 "page": 0,
-                "mode": "ai-human",
-                "stream": False,
+                "stream": True if self._ollama_stream_default() else False,
                 "history": [],
             }
+            # Render dynamic status above the picker
+            text = self._ollama_status_text(self.ollama_sessions[update.effective_chat.id])
+            await update.message.reply_text(text, reply_markup=kb)
         except Exception as exc:
             await update.message.reply_text(f"❌ Ollama hub error: {exc}")
 
@@ -982,6 +1017,27 @@ class YouTubeTelegramBot:
         model = session.get("model")
         if not model:
             await update.message.reply_text("⚠️ No model selected. Send /ollama to choose one.")
+            return
+        # If AI↔AI is active (two models picked), treat user text as topic and run a turn
+        if session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
+            session["ai2ai_active"] = True
+            session["topic"] = text
+            # Initialize turns if not present
+            if not isinstance(session.get("ai2ai_turns_left"), int):
+                try:
+                    session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                except Exception:
+                    session["ai2ai_turns_left"] = 10
+            await update.message.reply_text("🤝 Starting AI↔AI exchange…")
+            await self._ollama_ai2ai_continue(update.effective_chat.id)
+            # Decrement one turn (A+B considered one combined turn)
+            turns = max(0, int(session.get("ai2ai_turns_left") or 0) - 1)
+            session["ai2ai_turns_left"] = turns
+            self.ollama_sessions[update.effective_chat.id] = session
+            if turns > 0:
+                await update.message.reply_text(f"⏭️ {turns} turns remaining. Use Options → Continue exchange to proceed.")
+            else:
+                await update.message.reply_text("✅ AI↔AI session complete.")
             return
         # Build chat payload
         history = session.get("history") or []
@@ -1255,50 +1311,48 @@ class YouTubeTelegramBot:
             session["page"] = max(0, page)
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session["page"])
-            await query.edit_message_text("🤖 Select an Ollama model to chat with:", reply_markup=kb)
+            text = self._ollama_status_text(session)
+            await query.edit_message_text(text, reply_markup=kb)
             self.ollama_sessions[chat_id] = session
             await query.answer("Page updated")
             return
         if callback_data.startswith("ollama_model:"):
             model = callback_data.split(":", 1)[1]
             mode = session.get("mode") or "ai-human"
+            if (session.get("ai2ai_model_a") and session.get("ai2ai_model_b")):
+                session["ai2ai_active"] = True
+            else:
+                session["ai2ai_active"] = False
+            mode = "ai-ai" if session.get("ai2ai_active") else "ai-human"
             if mode == "ai-ai":
                 # Select A then B on the main picker flow
                 if not session.get("ai2ai_model_a"):
                     session["ai2ai_model_a"] = model
                     self.ollama_sessions[chat_id] = session
-                    await query.edit_message_text(
-                        f"✅ Set A → `{self._escape_markdown(model)}`\nPick model for B:",
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=self._build_ollama_models_keyboard_ai2ai(session.get("models") or [], "B", session.get("page", 0))
-                    )
+                    kb = self._build_ollama_models_keyboard_ai2ai(session.get("models") or [], "B", session.get("page", 0))
+                    await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
                     await query.answer("Model A selected")
                     return
                 if not session.get("ai2ai_model_b"):
                     session["ai2ai_model_b"] = model
                     self.ollama_sessions[chat_id] = session
-                    # After both selected, prompt to start AI↔AI
-                    a = session.get("ai2ai_model_a")
-                    b = session.get("ai2ai_model_b")
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")]])
-                    await query.edit_message_text(
-                        f"✅ Models set:\nA: `{self._escape_markdown(a)}`\nB: `{self._escape_markdown(b)}`",
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=kb,
-                    )
+                    # After both selected, show updated picker with status
+                    kb = self._build_ollama_models_keyboard(session.get("models") or [], session.get("page", 0))
+                    await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
                     await query.answer("Model B selected")
                     return
                 # If both already set, toggle A
                 session["ai2ai_model_a"] = model
                 self.ollama_sessions[chat_id] = session
                 await query.answer("Updated A")
-                await _render_options()
+                kb = self._build_ollama_models_keyboard(session.get("models") or [], session.get("page", 0))
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
                 return
             # Default AI→Human
             session["model"] = model
             session["active"] = True
             self.ollama_sessions[chat_id] = session
-            await query.edit_message_text(f"💬 Chat started with `{model}`. Send a message.", parse_mode=ParseMode.MARKDOWN)
+            await query.edit_message_text(self._ollama_status_text(session), reply_markup=self._build_ollama_models_keyboard(session.get("models") or [], session.get("page", 0)))
             await query.answer("Model selected")
             return
         if callback_data == "ollama_options":
@@ -1413,6 +1467,12 @@ class YouTubeTelegramBot:
                 session.setdefault("persona_a", "Albert Einstein")
                 session.setdefault("persona_b", "Isaac Newton")
                 session.setdefault("topic", session.get("last_user") or "The nature of space and time")
+                # Default turns
+                try:
+                    default_turns = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                except Exception:
+                    default_turns = 10
+                session.setdefault("ai2ai_turns_left", default_turns)
                 # Default models
                 if not session.get("ai2ai_model_a"):
                     session["ai2ai_model_a"] = session.get("model")
