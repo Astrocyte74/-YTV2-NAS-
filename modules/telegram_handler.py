@@ -1112,17 +1112,11 @@ class YouTubeTelegramBot:
         final_text = {"buf": ""}
 
         def _run_stream():
-            import json, time, logging
+            import time, logging
             logging.info(f"Ollama streaming start: model={model} msgs={len(messages)}")
             last = 0.0
             try:
-                for line in ollama_chat_stream(messages, model):
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except Exception:
-                        continue
+                for data in ollama_chat_stream(messages, model):
                     if not isinstance(data, dict):
                         continue
                     # First event is usually {"status":"starting"}

@@ -8,7 +8,8 @@ strings without the "data: " prefix).
 from __future__ import annotations
 
 import os
-from typing import Dict, Iterable, Iterator, List, Optional
+from typing import Dict, Iterable, Iterator, List, Optional, Union
+import ast
 
 import requests
 
@@ -60,16 +61,40 @@ def pull(model: str, *, stream: bool = True) -> Dict | Iterable[str]:
     return pull_stream(model)
 
 
-def pull_stream(model: str) -> Iterable[str]:
+def _sse_events(resp: requests.Response) -> Iterable[bytes]:
+    acc: List[bytes] = []
+    for raw in resp.iter_lines(decode_unicode=False):
+        if raw is None:
+            continue
+        if raw == b"":
+            if acc:
+                payload = b"".join(acc)
+                acc.clear()
+                yield payload
+            continue
+        if raw.startswith(b"data: "):
+            acc.append(raw[6:])
+
+
+def pull_stream(model: str) -> Iterable[Dict]:
     url = f"{_base()}/ollama/pull"
     body = {"model": model, "stream": True}
     with requests.post(url, json=body, stream=True, timeout=None) as r:
         r.raise_for_status()
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
+        for payload in _sse_events(r):
+            txt: str
+            if payload.startswith(b"b'") and payload.endswith(b"'"):
+                try:
+                    by = ast.literal_eval(payload.decode("utf-8", errors="ignore"))  # type: ignore
+                    txt = by.decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+            else:
+                txt = payload.decode("utf-8", errors="ignore")
+            try:
+                yield requests.models.complexjson.loads(txt)
+            except Exception:
                 continue
-            if line.startswith("data: "):
-                yield line[6:]
 
 
 def generate(prompt: str, model: str, *, stream: bool = False) -> Dict | Iterable[str]:
@@ -78,16 +103,25 @@ def generate(prompt: str, model: str, *, stream: bool = False) -> Dict | Iterabl
     return generate_stream(prompt, model)
 
 
-def generate_stream(prompt: str, model: str) -> Iterable[str]:
+def generate_stream(prompt: str, model: str) -> Iterable[Dict]:
     url = f"{_base()}/ollama/generate"
     body = {"model": model, "prompt": prompt, "stream": True}
     with requests.post(url, json=body, stream=True, timeout=None) as r:
         r.raise_for_status()
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
+        for payload in _sse_events(r):
+            txt: str
+            if payload.startswith(b"b'") and payload.endswith(b"'"):
+                try:
+                    by = ast.literal_eval(payload.decode("utf-8", errors="ignore"))  # type: ignore
+                    txt = by.decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+            else:
+                txt = payload.decode("utf-8", errors="ignore")
+            try:
+                yield requests.models.complexjson.loads(txt)
+            except Exception:
                 continue
-            if line.startswith("data: "):
-                yield line[6:]
 
 
 def chat(messages: List[Dict[str, str]], model: str, *, stream: bool = False) -> Dict | Iterable[str]:
@@ -96,16 +130,25 @@ def chat(messages: List[Dict[str, str]], model: str, *, stream: bool = False) ->
     return chat_stream(messages, model)
 
 
-def chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[str]:
+def chat_stream(messages: List[Dict[str, str]], model: str) -> Iterable[Dict]:
     url = f"{_base()}/ollama/chat"
     body = {"model": model, "messages": messages, "stream": True}
     with requests.post(url, json=body, stream=True, timeout=None) as r:
         r.raise_for_status()
-        for line in r.iter_lines(decode_unicode=True):
-            if not line:
+        for payload in _sse_events(r):
+            txt: str
+            if payload.startswith(b"b'") and payload.endswith(b"'"):
+                try:
+                    by = ast.literal_eval(payload.decode("utf-8", errors="ignore"))  # type: ignore
+                    txt = by.decode("utf-8", errors="ignore")
+                except Exception:
+                    continue
+            else:
+                txt = payload.decode("utf-8", errors="ignore")
+            try:
+                yield requests.models.complexjson.loads(txt)
+            except Exception:
                 continue
-            if line.startswith("data: "):
-                yield line[6:]
 
 
 __all__ = [
