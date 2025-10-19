@@ -1017,7 +1017,7 @@ class YouTubeTelegramBot:
         return val not in ('0', 'false', 'no')
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
-        line = "-" * 160
+        line = "--------------------------------------------------------------------------"
         # Determine mode
         a = session.get('ai2ai_model_a')
         b = session.get('ai2ai_model_b')
@@ -1039,7 +1039,7 @@ class YouTubeTelegramBot:
             model = session.get('model') or '—'
             parts.append(f"Model: {model}")
         parts.append(line)
-        parts.append("Pick a model to chat. Or tap ‘AI↔AI Mode’ to configure two models. Type a prompt to start.")
+        parts.append("Pick a model to chat. Or toggle AI↔AI and select models A and B. Type a prompt to start.")
         return "\n".join(parts)
 
     def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
@@ -1090,6 +1090,7 @@ class YouTubeTelegramBot:
                 "page": 0,
                 "stream": True if self._ollama_stream_default() else False,
                 "history": [],
+                "mode": "ai-human",
             }
             self.ollama_sessions[update.effective_chat.id] = sess
             kb = self._build_ollama_models_keyboard(models, 0, session=sess)
@@ -1408,6 +1409,43 @@ class YouTubeTelegramBot:
             self.ollama_sessions[chat_id] = session
             await query.answer("Page updated")
             return
+        if callback_data.startswith("ollama_set_mode:"):
+            which = callback_data.split(":", 1)[1]
+            if which == "single":
+                session["mode"] = "ai-human"
+            else:
+                session["mode"] = "ai-ai"
+                session.setdefault("ai2ai_page_a", 0)
+                session.setdefault("ai2ai_page_b", 0)
+            logging.info(f"Ollama UI: set mode -> {session['mode']}")
+            models = session.get("models") or []
+            kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Mode updated")
+            return
+        if callback_data.startswith("ollama_set_a:"):
+            name = callback_data.split(":", 1)[1]
+            session["mode"] = "ai-ai"
+            session["ai2ai_model_a"] = name
+            logging.info(f"Ollama UI: set model A -> {name}")
+            models = session.get("models") or []
+            kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Model A set")
+            return
+        if callback_data.startswith("ollama_set_b:"):
+            name = callback_data.split(":", 1)[1]
+            session["mode"] = "ai-ai"
+            session["ai2ai_model_b"] = name
+            logging.info(f"Ollama UI: set model B -> {name}")
+            models = session.get("models") or []
+            kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Model B set")
+            return
         if callback_data.startswith("ollama_model:"):
             model = callback_data.split(":", 1)[1]
             # Always select single model on main picker; AI↔AI uses dedicated flow
@@ -1603,26 +1641,6 @@ class YouTubeTelegramBot:
             await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
             await query.answer("Updated turns")
             return
-            if action == "pick_a":
-                models = session.get("models") or []
-                if not models:
-                    raw = ollama_get_models()
-                    models = self._ollama_models_list(raw)
-                    session["models"] = models
-                kb = self._build_ollama_models_keyboard_ai2ai(models, "A", session.get("page", 0))
-                await query.edit_message_text("🤖 Pick model for A:", reply_markup=kb)
-                await query.answer("Pick A")
-                return
-            if action == "pick_b":
-                models = session.get("models") or []
-                if not models:
-                    raw = ollama_get_models()
-                    models = self._ollama_models_list(raw)
-                    session["models"] = models
-                kb = self._build_ollama_models_keyboard_ai2ai(models, "B", session.get("page", 0))
-                await query.edit_message_text("🤖 Pick model for B:", reply_markup=kb)
-                await query.answer("Pick B")
-                return
         if callback_data.startswith("ollama_more_ai2ai:"):
             _, slot, page_str = callback_data.split(":", 2)
             try:
@@ -1630,20 +1648,12 @@ class YouTubeTelegramBot:
             except Exception:
                 page = 0
             models = session.get("models") or []
-            kb = self._build_ollama_models_keyboard_ai2ai(models, slot, page)
+            key = f"ai2ai_page_{slot.lower()}"
+            session[key] = page
+            kb = self._build_ollama_models_keyboard_ai2ai(models, slot, page, session=session)
             await query.edit_message_text(f"🤖 Pick model for {slot}:", reply_markup=kb)
-            session["page"] = page
             self.ollama_sessions[chat_id] = session
             await query.answer("Page updated")
-            return
-        if callback_data.startswith("ollama_ai2ai_set:"):
-            _, slot, name = callback_data.split(":", 2)
-            key = "ai2ai_model_a" if slot == "A" else "ai2ai_model_b"
-            session[key] = name
-            self.ollama_sessions[chat_id] = session
-            await query.answer(f"Set {slot} -> {name}")
-            # Return to options view
-            await _render_options()
             return
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
