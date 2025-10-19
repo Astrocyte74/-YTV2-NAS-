@@ -1469,6 +1469,28 @@ class YouTubeTelegramBot:
             return
         if callback_data.startswith("ollama_ai2ai:"):
             action = callback_data.split(":", 1)[1]
+            if action == "enter":
+                # Explicitly enter AI↔AI selection: pick model A first
+                models = session.get("models") or []
+                if not models:
+                    raw = ollama_get_models()
+                    models = self._ollama_models_list(raw)
+                    session["models"] = models
+                kb = self._build_ollama_models_keyboard_ai2ai(models, "A", session.get("page", 0), session=session)
+                await query.edit_message_text("🤝 Select model for A:", reply_markup=kb)
+                await query.answer("AI↔AI mode")
+                self.ollama_sessions[chat_id] = session
+                return
+            if action == "clear":
+                # Clear AI↔AI selection and return to single-mode picker
+                for k in ("ai2ai_model_a", "ai2ai_model_b", "ai2ai_active", "persona_a", "persona_b", "topic", "ai2ai_turns_left"):
+                    session.pop(k, None)
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                await query.answer("Cleared AI↔AI")
+                self.ollama_sessions[chat_id] = session
+                return
             if action == "start":
                 # Initialize AI↔AI session with default personas
                 session["ai2ai_active"] = True
