@@ -926,10 +926,17 @@ class YouTubeTelegramBot:
             nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page-1}"))
         if nav:
             rows.append(nav)
-        if session and session.get('ai2ai_model_a') and session.get('ai2ai_model_b'):
-            rows.append([InlineKeyboardButton("🧠 AI↔AI Options", callback_data="ollama_ai2ai:opts"), InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
+        # Footer with AI↔AI entry/options
+        a_sel = session.get('ai2ai_model_a') if session else None
+        b_sel = session.get('ai2ai_model_b') if session else None
+        foot: List[InlineKeyboardButton] = []
+        if a_sel and b_sel:
+            foot.append(InlineKeyboardButton("🧠 AI↔AI Options", callback_data="ollama_ai2ai:opts"))
+            foot.append(InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear"))
         else:
-            rows.append([InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
+            foot.append(InlineKeyboardButton("🤝 AI↔AI Mode", callback_data="ollama_ai2ai:enter"))
+        foot.append(InlineKeyboardButton("❌ Close", callback_data="ollama_cancel"))
+        rows.append(foot)
         return InlineKeyboardMarkup(rows)
 
     def _ollama_stream_default(self) -> bool:
@@ -937,7 +944,7 @@ class YouTubeTelegramBot:
         return val not in ('0', 'false', 'no')
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
-        line = "-" * 120
+        line = "-" * 160
         # Determine mode
         a = session.get('ai2ai_model_a')
         b = session.get('ai2ai_model_b')
@@ -962,13 +969,17 @@ class YouTubeTelegramBot:
         parts.append("Tip: Select 1 model for AI→Human, or 2 models for AI↔AI. Tap a ✅ model to unselect. Type a prompt to start.")
         return "\n".join(parts)
 
-    def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9) -> InlineKeyboardMarkup:
+    def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
         start = page * page_size
         end = start + page_size
         subset = models[start:end]
         rows: List[List[InlineKeyboardButton]] = []
         row: List[InlineKeyboardButton] = []
+        chosen_a = (session or {}).get('ai2ai_model_a') if (session and slot == 'B') else None
         for name in subset:
+            if chosen_a and name == chosen_a:
+                # Skip model A in B picker to avoid unselect pattern
+                continue
             label = name
             if len(label) > 28:
                 label = f"{label[:25]}…"
