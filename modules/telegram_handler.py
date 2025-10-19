@@ -1128,22 +1128,24 @@ class YouTubeTelegramBot:
         if mode_key == "ai-ai" and session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
             session["ai2ai_active"] = True
             session["topic"] = text
-            # Initialize turns if not present
-            if not isinstance(session.get("ai2ai_turns_left"), int):
+            if not isinstance(session.get("ai2ai_turns_left"), int) or session.get("ai2ai_turns_left") <= 0:
                 try:
                     session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
                 except Exception:
                     session["ai2ai_turns_left"] = 10
+            turns = int(session.get("ai2ai_turns_left") or 1)
             await update.message.reply_text("🤝 Starting AI↔AI exchange…")
-            await self._ollama_ai2ai_continue(update.effective_chat.id)
-            # Decrement one turn (A+B considered one combined turn)
-            turns = max(0, int(session.get("ai2ai_turns_left") or 0) - 1)
-            session["ai2ai_turns_left"] = turns
-            self.ollama_sessions[update.effective_chat.id] = session
-            if turns > 0:
-                await update.message.reply_text(f"⏭️ {turns} turns remaining. Use Options → Continue exchange to proceed.")
-            else:
-                await update.message.reply_text("✅ AI↔AI session complete.")
+            for remaining in range(turns, 0, -1):
+                session["ai2ai_turns_left"] = remaining
+                self.ollama_sessions[chat_id] = session
+                await self._ollama_ai2ai_continue(chat_id)
+                session["ai2ai_turns_left"] = remaining - 1
+                self.ollama_sessions[chat_id] = session
+                if session["ai2ai_turns_left"] <= 0:
+                    break
+            await self.application.bot.send_message(chat_id=chat_id, text="✅ AI↔AI session complete. Adjust turns in Options or send a new prompt to restart.")
+            session["ai2ai_turns_left"] = 0
+            self.ollama_sessions[chat_id] = session
             return
         # Build chat payload
         history = session.get("history") or []
