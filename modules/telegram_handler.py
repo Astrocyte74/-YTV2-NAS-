@@ -1128,24 +1128,13 @@ class YouTubeTelegramBot:
         if mode_key == "ai-ai" and session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
             session["ai2ai_active"] = True
             session["topic"] = text
-            if not isinstance(session.get("ai2ai_turns_left"), int) or session.get("ai2ai_turns_left") <= 0:
+            if not isinstance(session.get("ai2ai_turns_config"), int) or session.get("ai2ai_turns_config") <= 0:
                 try:
-                    session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                    session["ai2ai_turns_config"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
                 except Exception:
-                    session["ai2ai_turns_left"] = 10
-            turns = int(session.get("ai2ai_turns_left") or 1)
+                    session["ai2ai_turns_config"] = 10
             await update.message.reply_text("🤝 Starting AI↔AI exchange…")
-            for remaining in range(turns, 0, -1):
-                session["ai2ai_turns_left"] = remaining
-                self.ollama_sessions[chat_id] = session
-                await self._ollama_ai2ai_continue(chat_id)
-                session["ai2ai_turns_left"] = remaining - 1
-                self.ollama_sessions[chat_id] = session
-                if session["ai2ai_turns_left"] <= 0:
-                    break
-            await self.application.bot.send_message(chat_id=chat_id, text="✅ AI↔AI session complete. Adjust turns in Options or send a new prompt to restart.")
-            session["ai2ai_turns_left"] = 0
-            self.ollama_sessions[chat_id] = session
+            await self._ollama_ai2ai_run(chat_id, int(session["ai2ai_turns_config"]))
             return
         # Build chat payload
         history = session.get("history") or []
@@ -1384,6 +1373,28 @@ class YouTubeTelegramBot:
         b_text = await self._ollama_stream_chat(u, model_b, b_messages, label=f"B · {model_b}")
         session["ai2ai_last_b"] = b_text
         self.ollama_sessions[chat_id] = session
+
+    async def _ollama_ai2ai_run(self, chat_id: int, turns: int):
+        session = self.ollama_sessions.get(chat_id) or {}
+        if turns <= 0:
+            return
+        session["ai2ai_turns_left"] = turns
+        self.ollama_sessions[chat_id] = session
+        for remaining in range(turns, 0, -1):
+            session["ai2ai_turns_left"] = remaining
+            self.ollama_sessions[chat_id] = session
+            await self._ollama_ai2ai_continue(chat_id)
+            session["ai2ai_turns_left"] = remaining - 1
+            self.ollama_sessions[chat_id] = session
+            if session["ai2ai_turns_left"] <= 0:
+                break
+        session["ai2ai_turns_left"] = 0
+        self.ollama_sessions[chat_id] = session
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏭️ Continue AI↔AI", callback_data="ollama_ai2ai:auto"), InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts")],
+            [InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear")]
+        ])
+        await self.application.bot.send_message(chat_id=chat_id, text="✅ AI↔AI session complete. Choose Continue to keep the exchange going, or Options to adjust turns.", reply_markup=kb)
 
     async def _send_long_text_reply(self, update: Update, text: str, parse_mode: Optional[str] = None):
         text = text or ""
@@ -1650,9 +1661,16 @@ class YouTubeTelegramBot:
                     pass
                 await _render_options()
                 return
-            if action == "continue":
+            if action in ("continue", "auto"):
+                turns_cfg = session.get("ai2ai_turns_config") or session.get("ai2ai_turns_left")
+                if not isinstance(turns_cfg, int) or turns_cfg <= 0:
+                    try:
+                        turns_cfg = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                    except Exception:
+                        turns_cfg = 10
+                    session["ai2ai_turns_config"] = turns_cfg
                 await query.answer("Continuing…")
-                await self._ollama_ai2ai_continue(query.message.chat_id)
+                await self._ollama_ai2ai_run(query.message.chat_id, turns_cfg)
                 return
             if action == "opts":
                 # Simple AI↔AI options (turns +/-)
@@ -1675,6 +1693,7 @@ class YouTubeTelegramBot:
             else:
                 turns = max(1, turns - 1)
             session['ai2ai_turns_left'] = turns
+            session['ai2ai_turns_config'] = turns
             self.ollama_sessions[chat_id] = session
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("➖ Turns", callback_data="ollama_ai2ai_turns:-"), InlineKeyboardButton(f"{turns} turns", callback_data="ollama_nop"), InlineKeyboardButton("➕ Turns", callback_data="ollama_ai2ai_turns:+")],
