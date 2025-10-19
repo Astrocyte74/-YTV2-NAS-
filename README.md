@@ -346,3 +346,6 @@ Prompts were refined for better structure and TTS quality:
 
 **Part of YTV2 Hybrid Architecture**  
 🔗 **Dashboard Component**: See YTV2-Dashboard project for web interface
+# Ollama (Local LLM via Hub)
+
+This NAS connects to Ollama running on your Mac through the same hub used for TTS. Set `TTSHUB_API_BASE` on the NAS; no `OLLAMA_URL` needed on the NAS. See docs/ollama.md for endpoints, streaming, and Telegram usage.
