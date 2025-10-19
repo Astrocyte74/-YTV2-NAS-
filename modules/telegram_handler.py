@@ -787,7 +787,7 @@ class YouTubeTelegramBot:
         if message_text and not message_text.startswith("/"):
             chat_id = update.effective_chat.id
             session = self.ollama_sessions.get(chat_id)
-            if session and session.get("active"):
+            if session and (session.get("active") or session.get("mode") == "ai-ai"):
                 await self._ollama_handle_user_text(update, session, message_text)
                 return
         logging.info(f"Received message from {user_name} ({user_id}): {message_text[:100]}...")
@@ -898,7 +898,7 @@ class YouTubeTelegramBot:
                         models.append(name)
         return models
 
-    def _build_ollama_models_keyboard(self, models: List[str], page: int = 0, page_size: int = 9, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
+    def _build_ollama_models_keyboard(self, models: List[str], page: int = 0, page_size: int = 12, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
         start = page * page_size
         end = start + page_size
         subset = models[start:end]
@@ -1008,8 +1008,8 @@ class YouTubeTelegramBot:
             nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page-1}"))
         if nav:
             rows.append(nav)
-        # Footer: entry to AI↔AI
-        rows.append([InlineKeyboardButton("🤝 AI↔AI Mode", callback_data="ollama_set_mode:ai2ai"), InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
+        # Footer: close button (mode toggle handled at top)
+        rows.append([InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
         return InlineKeyboardMarkup(rows)
 
     def _ollama_stream_default(self) -> bool:
@@ -1022,10 +1022,11 @@ class YouTubeTelegramBot:
         a = session.get('ai2ai_model_a')
         b = session.get('ai2ai_model_b')
         stream_on = True  # default on
-        mode = 'AI↔AI' if (a and b) else 'AI→Human'
+        mode_key = session.get('mode') or ('ai-ai' if (a and b) else 'ai-human')
+        mode_label = 'AI↔AI' if mode_key == 'ai-ai' else 'AI→Human'
         parts = [
             line,
-            f"🤖 Ollama Chat · Mode: {mode} · Streaming: ON",
+            f"🤖 Ollama Chat · Mode: {mode_label} · Streaming: ON",
         ]
         if a and b:
             pa = session.get('persona_a') or 'Persona A'
@@ -1039,10 +1040,16 @@ class YouTubeTelegramBot:
             model = session.get('model') or '—'
             parts.append(f"Model: {model}")
         parts.append(line)
-        parts.append("Pick a model to chat. Or toggle AI↔AI and select models A and B. Type a prompt to start.")
+        if mode_key == 'ai-ai':
+            if a and b:
+                parts.append("Type a prompt to begin the AI↔AI exchange. Use Options to adjust turns.")
+            else:
+                parts.append("Select models A and B below to enable AI↔AI chat.")
+        else:
+            parts.append("Pick a model to chat. Type a prompt to start.")
         return "\n".join(parts)
 
-    def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
+    def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 12, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
         start = page * page_size
         end = start + page_size
         subset = models[start:end]
@@ -1107,12 +1114,18 @@ class YouTubeTelegramBot:
 
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
         chat_id = update.effective_chat.id
+        mode_key = session.get("mode") or "ai-human"
         model = session.get("model")
-        if not model:
-            await update.message.reply_text("⚠️ No model selected. Send /ollama to choose one.")
-            return
+        if mode_key == "ai-ai":
+            if not (session.get("ai2ai_model_a") and session.get("ai2ai_model_b")):
+                await update.message.reply_text("⚠️ Select models A and B in the picker before starting AI↔AI chat.")
+                return
+        else:
+            if not model:
+                await update.message.reply_text("⚠️ No model selected. Pick one in the Ollama picker first.")
+                return
         # If AI↔AI is active (two models picked), treat user text as topic and run a turn
-        if session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
+        if mode_key == "ai-ai" and session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
             session["ai2ai_active"] = True
             session["topic"] = text
             # Initialize turns if not present
@@ -1135,10 +1148,10 @@ class YouTubeTelegramBot:
         # Build chat payload
         history = session.get("history") or []
         messages = history + [{"role": "user", "content": text}]
-        if bool(session.get("stream")):
+        if bool(session.get("stream")) and mode_key == "ai-human":
             # Streaming reply
             try:
-                final_text = await self._ollama_stream_chat(update, model, messages)
+                final_text = await self._ollama_stream_chat(update, model, messages, label=f"🤖 {model}")
             except Exception as exc:
                 await update.message.reply_text(f"❌ Stream error: {str(exc)[:200]}")
                 return
@@ -1241,24 +1254,33 @@ class YouTubeTelegramBot:
                     reply_text = f"(No response)\n{snippet}"
         if not reply_text:
             reply_text = "(No response)"
-        # Send safely within Telegram length limits
-        await self._send_long_text_reply(update, reply_text)
+        display_text = reply_text
+        if mode_key == "ai-human":
+            display_text = f"🤖 {model}\n\n{reply_text}"
+        await self._send_long_text_reply(update, display_text)
         # Update conversation history (keep it short)
         session["history"] = (messages + [{"role": "assistant", "content": reply_text}])[-16:]
         self.ollama_sessions[chat_id] = session
 
-    async def _ollama_stream_chat(self, update: Update, model: str, messages: List[Dict[str, str]]) -> str:
+    async def _ollama_stream_chat(self, update: Update, model: str, messages: List[Dict[str, str]], label: Optional[str] = None) -> str:
         """Stream tokens from the hub and live-edit a single message. Returns final text."""
-        from html import escape as _esc
         chat_id = update.effective_chat.id
-        # Seed message
-        msg = await update.message.reply_text("⏳ …")
+        prefix = f"{label}\n\n" if label else ""
+        msg = await update.message.reply_text(f"{prefix}⏳ …")
         message_id = msg.message_id
         app = getattr(self, 'application', None)
         bot = getattr(app, 'bot', None)
         loop = asyncio.get_running_loop()
 
-        final_text = {"buf": ""}
+        final_text: Dict[str, str] = {"buf": ""}
+
+        def _compose_text() -> str:
+            buf = final_text["buf"]
+            if label:
+                allowance = max(0, 4000 - len(prefix))
+                tail = buf[-allowance:] if len(buf) > allowance else buf
+                return f"{prefix}{tail}" if tail else prefix.rstrip()
+            return buf[-4000:] if len(buf) > 4000 else (buf or "⏳")
 
         def _run_stream():
             import time, logging
@@ -1268,36 +1290,38 @@ class YouTubeTelegramBot:
                 for data in ollama_chat_stream(messages, model):
                     if not isinstance(data, dict):
                         continue
-                    # First event is usually {"status":"starting"}
                     if data.get("status") == "starting":
                         continue
                     chunk = data.get("response")
                     if isinstance(chunk, str) and chunk:
                         final_text["buf"] += chunk
                     else:
-                        # Some hubs send tokens in message.content
                         msg = data.get("message")
                         if isinstance(msg, dict):
                             c = msg.get("content")
                             if isinstance(c, str) and c:
                                 final_text["buf"] += c
-                    # Throttle edits
+                            elif isinstance(c, list):
+                                for seg in c:
+                                    if isinstance(seg, dict):
+                                        t = seg.get("text") or seg.get("content")
+                                        if isinstance(t, str) and t:
+                                            final_text["buf"] += t
                     now = time.time()
                     if (now - last > 0.4) and final_text["buf"]:
                         last = now
-                        txt = final_text["buf"]
+                        text = _compose_text()
                         async def _upd():
                             try:
-                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
+                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
                             except Exception:
                                 pass
                         asyncio.run_coroutine_threadsafe(_upd(), loop)
                     if data.get("done"):
-                        # Final update (guard empty)
-                        txt = final_text["buf"] or "✅ Done"
+                        text = _compose_text()
                         async def _final():
                             try:
-                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=txt[-4000:])
+                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
                             except Exception:
                                 pass
                         asyncio.run_coroutine_threadsafe(_final(), loop)
@@ -1305,7 +1329,8 @@ class YouTubeTelegramBot:
             except Exception as e:
                 async def _err():
                     try:
-                        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=f"❌ Stream error: {e}")
+                        msg = f"{prefix}❌ Stream error: {e}" if label else f"❌ Stream error: {e}"
+                        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg)
                     except Exception:
                         pass
                 asyncio.run_coroutine_threadsafe(_err(), loop)
@@ -1323,6 +1348,7 @@ class YouTubeTelegramBot:
             except Exception:
                 pass
             return
+        session["active"] = True
         persona_a = session.get("persona_a", "Albert Einstein")
         persona_b = session.get("persona_b", "Isaac Newton")
         topic = session.get("topic", "The nature of space and time")
@@ -1346,14 +1372,14 @@ class YouTubeTelegramBot:
                         return await self._app.bot.send_message(chat_id=self._chat, text=text)
                 return M(self._app, chat_id)
         u = U(self.application, chat_id)
-        a_text = await self._ollama_stream_chat(u, model_a, a_messages)
+        a_text = await self._ollama_stream_chat(u, model_a, a_messages, label=f"A · {model_a}")
         session["ai2ai_last_a"] = a_text
         # Turn B
         b_messages = [
             {"role": "system", "content": f"You are {persona_b}. Respond concisely."},
             {"role": "user", "content": f"Respond to {persona_a}'s statement: {a_text[:800]}"},
         ]
-        b_text = await self._ollama_stream_chat(u, model_b, b_messages)
+        b_text = await self._ollama_stream_chat(u, model_b, b_messages, label=f"B · {model_b}")
         session["ai2ai_last_b"] = b_text
         self.ollama_sessions[chat_id] = session
 
@@ -1413,10 +1439,12 @@ class YouTubeTelegramBot:
             which = callback_data.split(":", 1)[1]
             if which == "single":
                 session["mode"] = "ai-human"
+                session["active"] = bool(session.get("model"))
             else:
                 session["mode"] = "ai-ai"
                 session.setdefault("ai2ai_page_a", 0)
                 session.setdefault("ai2ai_page_b", 0)
+                session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
             logging.info(f"Ollama UI: set mode -> {session['mode']}")
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
@@ -1428,6 +1456,7 @@ class YouTubeTelegramBot:
             name = callback_data.split(":", 1)[1]
             session["mode"] = "ai-ai"
             session["ai2ai_model_a"] = name
+            session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
             logging.info(f"Ollama UI: set model A -> {name}")
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
@@ -1439,6 +1468,12 @@ class YouTubeTelegramBot:
             name = callback_data.split(":", 1)[1]
             session["mode"] = "ai-ai"
             session["ai2ai_model_b"] = name
+            if "ai2ai_turns_left" not in session:
+                try:
+                    session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                except Exception:
+                    session["ai2ai_turns_left"] = 10
+            session["active"] = True
             logging.info(f"Ollama UI: set model B -> {name}")
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
@@ -1577,6 +1612,10 @@ class YouTubeTelegramBot:
                 # Clear AI↔AI selection and return to single-mode picker
                 for k in ("ai2ai_model_a", "ai2ai_model_b", "ai2ai_active", "persona_a", "persona_b", "topic", "ai2ai_turns_left"):
                     session.pop(k, None)
+                session.pop("ai2ai_page_a", None)
+                session.pop("ai2ai_page_b", None)
+                session["mode"] = "ai-human"
+                session["active"] = bool(session.get("model"))
                 models = session.get("models") or []
                 kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
                 await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
@@ -1600,6 +1639,7 @@ class YouTubeTelegramBot:
                     session["ai2ai_model_a"] = session.get("model")
                 if not session.get("ai2ai_model_b"):
                     session["ai2ai_model_b"] = session.get("model")
+                session["active"] = True
                 self.ollama_sessions[chat_id] = session
                 await query.answer("AI↔AI started")
                 try:
