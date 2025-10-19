@@ -966,7 +966,7 @@ class YouTubeTelegramBot:
             model = session.get('model') or '—'
             parts.append(f"Model: {model}")
         parts.append(line)
-        parts.append("Tip: Select 1 model for AI→Human, or 2 models for AI↔AI. Tap a ✅ model to unselect. Type a prompt to start.")
+        parts.append("Pick a model to chat. Or tap ‘AI↔AI Mode’ to configure two models. Type a prompt to start.")
         return "\n".join(parts)
 
     def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 9, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
@@ -1337,37 +1337,7 @@ class YouTubeTelegramBot:
             return
         if callback_data.startswith("ollama_model:"):
             model = callback_data.split(":", 1)[1]
-            mode = session.get("mode") or "ai-human"
-            if (session.get("ai2ai_model_a") and session.get("ai2ai_model_b")):
-                session["ai2ai_active"] = True
-            else:
-                session["ai2ai_active"] = False
-            mode = "ai-ai" if session.get("ai2ai_active") else "ai-human"
-            if mode == "ai-ai":
-                # Select A then B on the main picker flow
-                if not session.get("ai2ai_model_a"):
-                    session["ai2ai_model_a"] = model
-                    self.ollama_sessions[chat_id] = session
-                    kb = self._build_ollama_models_keyboard_ai2ai(session.get("models") or [], "B", session.get("page", 0))
-                    await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                    await query.answer("Model A selected")
-                    return
-                if not session.get("ai2ai_model_b"):
-                    session["ai2ai_model_b"] = model
-                    self.ollama_sessions[chat_id] = session
-                    # After both selected, show updated picker with status
-                    kb = self._build_ollama_models_keyboard(session.get("models") or [], session.get("page", 0), session=session)
-                    await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                    await query.answer("Model B selected")
-                    return
-                # If both already set, toggle A
-                session["ai2ai_model_a"] = model
-                self.ollama_sessions[chat_id] = session
-                await query.answer("Updated A")
-                kb = self._build_ollama_models_keyboard(session.get("models") or [], session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                return
-            # Default AI→Human
+            # Always select single model on main picker; AI↔AI uses dedicated flow
             session["model"] = model
             session["active"] = True
             self.ollama_sessions[chat_id] = session
