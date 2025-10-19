@@ -68,19 +68,28 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 ```
 
 ## Telegram Bot Integration
-- Command: `/ollama`
-  - Shows available models (installed on hub). Pick a model to start chatting.
-- Options:
-  - Streaming: live‑edit a single message as tokens stream in (on/off).
-  - AI↔AI mode: chat between two personas.
-    - Pick A model (first tap), then B model (second tap) directly from the main picker; start AI↔AI, then “Continue exchange” to generate turns.
+- Commands: `/ollama` or `/o`
+- Model picker:
+  - Streaming is **on by default** (tokens stream into a single message). Override with `OLLAMA_STREAM_DEFAULT=0` if you prefer JSON responses by default.
+  - Top row toggles between **Single AI Chat** and **AI↔AI Chat**. Single mode shows a 4×3 grid of installed models; tap a model and type a prompt to start.
+- AI↔AI mode:
+  - Pick model **A** and **B** in the integrated picker (model B list filters out A by default; allow same model with `OLLAMA_AI2AI_ALLOW_SAME=1`).
+  - Type a topic prompt—AI↔AI automatically runs the configured number of combined turns (default `OLLAMA_AI2AI_TURNS`, e.g. 10). Each turn is streamed with labels `A · <model>` / `B · <model>`.
+  - When the cycle completes, you’ll see “Continue AI↔AI” (runs another block) and “Options” (adjust turn count) as inline buttons, plus “Clear AI↔AI” to return to single chat.
+- Single chat responses are labelled `🤖 <model>` so you can tell which model answered.
 - Implementation:
-  - Client: `modules/ollama_client.py` (non‑stream + SSE streaming helpers)
-  - Telegram: `modules/telegram_handler.py` (model picker, sessions, streaming edits, AI↔AI scaffolding)
+  - Client: `modules/ollama_client.py` (non-stream + SSE streaming helpers, handles SSE payloads such as `data: b'…'`)
+  - Telegram: `modules/telegram_handler.py` (model picker, streaming updates, AI↔AI automation)
 
 ## Environment
-- NAS/bot: `TTSHUB_API_BASE` only.
-- Hub on Mac: (optional) `OLLAMA_URL` if not default; `OLLAMA_ALLOW_CLI` for delete fallback.
+- NAS/bot:
+  - `TTSHUB_API_BASE` (required)
+  - `OLLAMA_STREAM_DEFAULT` (`1` by default → streaming ON; set `0` to default OFF)
+  - `OLLAMA_AI2AI_TURNS` (default number of combined turns when AI↔AI runs automatically, e.g. `10`)
+  - `OLLAMA_AI2AI_ALLOW_SAME` (`0` by default; set `1` to allow the same model for both A and B)
+- Hub on Mac (optional):
+  - `OLLAMA_URL` if Ollama is not on `http://127.0.0.1:11434`
+  - `OLLAMA_ALLOW_CLI` to control delete fallback via the local `ollama` CLI
 
 ## Status & Errors
 - Non‑stream returns `200` JSON; stream returns SSE events.
@@ -91,4 +100,3 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 - For small/fast models use `tinyllama:latest` to validate end‑to‑end streaming.
 - Streaming edits are throttled (≈2–3/s) to keep within Telegram edit limits.
 - If you only list installed models in the picker, pull‑on‑demand can remain disabled on the bot.
-
