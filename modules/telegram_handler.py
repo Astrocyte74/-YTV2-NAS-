@@ -907,6 +907,88 @@ class YouTubeTelegramBot:
         sel_a = (session or {}).get('ai2ai_model_a') if session else None
         sel_b = (session or {}).get('ai2ai_model_b') if session else None
         current = (session or {}).get('model') if session else None
+        mode = (session or {}).get('mode') or ('ai-ai' if (sel_a and sel_b) else 'ai-human')
+
+        # Top mode toggle row
+        mark_single = '✅' if mode == 'ai-human' else '⬜'
+        mark_ai2ai = '✅' if mode == 'ai-ai' else '⬜'
+        rows.append([
+            InlineKeyboardButton(f"{mark_single} Single AI Chat", callback_data="ollama_set_mode:single"),
+            InlineKeyboardButton(f"{mark_ai2ai} AI↔AI Chat", callback_data="ollama_set_mode:ai2ai"),
+        ])
+
+        # AI↔AI integrated picker (two sections)
+        if mode == 'ai-ai':
+            # Ensure paging slots
+            page_a = int((session or {}).get('ai2ai_page_a') or 0)
+            page_b = int((session or {}).get('ai2ai_page_b') or 0)
+            allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
+
+            # Label A
+            rows.append([InlineKeyboardButton("Model A:", callback_data="ollama_nop")])
+            a_start = page_a * page_size
+            a_end = a_start + page_size
+            a_subset = models[a_start:a_end]
+            row = []
+            for name in a_subset:
+                label = name
+                if len(label) > 28:
+                    label = f"{label[:25]}…"
+                if sel_a == name:
+                    label = f"✅ {label}"
+                row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
+                if len(row) == 3:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            # Nav A
+            nav_a: List[InlineKeyboardButton] = []
+            if a_end < len(models):
+                nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
+            if page_a > 0:
+                nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
+            if nav_a:
+                rows.append(nav_a)
+
+            # Label B
+            rows.append([InlineKeyboardButton("Model B:", callback_data="ollama_nop")])
+            b_start = page_b * page_size
+            b_end = b_start + page_size
+            b_subset_raw = models[b_start:b_end]
+            b_subset = [n for n in b_subset_raw if (allow_same or (not sel_a or n != sel_a))]
+            row = []
+            for name in b_subset:
+                label = name
+                if len(label) > 28:
+                    label = f"{label[:25]}…"
+                if sel_b == name:
+                    label = f"✅ {label}"
+                row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
+                if len(row) == 3:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            # Nav B
+            nav_b: List[InlineKeyboardButton] = []
+            if b_end < len(models):
+                nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
+            if page_b > 0:
+                nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
+            if nav_b:
+                rows.append(nav_b)
+
+            # Footer
+            foot: List[InlineKeyboardButton] = []
+            if sel_a and sel_b:
+                foot.append(InlineKeyboardButton("🧠 AI↔AI Options", callback_data="ollama_ai2ai:opts"))
+                foot.append(InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear"))
+            foot.append(InlineKeyboardButton("❌ Close", callback_data="ollama_cancel"))
+            rows.append(foot)
+            return InlineKeyboardMarkup(rows)
+
+        # Single-mode grid
         for name in subset:
             label = name
             if len(label) > 28:
@@ -926,17 +1008,8 @@ class YouTubeTelegramBot:
             nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page-1}"))
         if nav:
             rows.append(nav)
-        # Footer with AI↔AI entry/options
-        a_sel = session.get('ai2ai_model_a') if session else None
-        b_sel = session.get('ai2ai_model_b') if session else None
-        foot: List[InlineKeyboardButton] = []
-        if a_sel and b_sel:
-            foot.append(InlineKeyboardButton("🧠 AI↔AI Options", callback_data="ollama_ai2ai:opts"))
-            foot.append(InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear"))
-        else:
-            foot.append(InlineKeyboardButton("🤝 AI↔AI Mode", callback_data="ollama_ai2ai:enter"))
-        foot.append(InlineKeyboardButton("❌ Close", callback_data="ollama_cancel"))
-        rows.append(foot)
+        # Footer: entry to AI↔AI
+        rows.append([InlineKeyboardButton("🤝 AI↔AI Mode", callback_data="ollama_set_mode:ai2ai"), InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
         return InlineKeyboardMarkup(rows)
 
     def _ollama_stream_default(self) -> bool:
