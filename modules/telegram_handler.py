@@ -1500,6 +1500,16 @@ class YouTubeTelegramBot:
             if not models:
                 await update.message.reply_text("⚠️ No models available on the hub.")
                 return
+            raw_text = update.message.text or ""
+            prompt = ""
+            if raw_text:
+                parts = raw_text.split(None, 1)
+                if len(parts) > 1:
+                    prompt = parts[1].strip()
+            if not prompt:
+                args = getattr(context, "args", None)
+                if args:
+                    prompt = " ".join(args).strip()
             # Initialize session with defaults (streaming on)
             sess = {
                 "active": False,
@@ -1519,6 +1529,8 @@ class YouTubeTelegramBot:
             # Render dynamic status above the picker
             text = self._ollama_status_text(sess)
             await update.message.reply_text(text, reply_markup=kb)
+            if prompt and sess.get("model"):
+                await self._ollama_handle_user_text(update, sess, prompt)
         except Exception as exc:
             await update.message.reply_text(f"❌ Ollama hub error: {exc}")
 
