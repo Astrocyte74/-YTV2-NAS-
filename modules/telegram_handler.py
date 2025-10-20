@@ -88,7 +88,6 @@ class YouTubeTelegramBot:
         Path("./data/reports").mkdir(parents=True, exist_ok=True)
         Path("./exports").mkdir(parents=True, exist_ok=True)
         Path("./data/tts_cache").mkdir(parents=True, exist_ok=True)
-        
         self.html_exporter = SummaryExporter("./exports")
         self.json_exporter = JSONReportGenerator("./data/reports")
         # In-memory cache for one-off TTS playback keyed by (chat_id, message_id)
@@ -684,9 +683,11 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
         self.application.add_handler(CommandHandler("tts", self.tts_command))
-        # Ollama chat commands (alias: /o)
+        # Ollama chat commands (aliases: /o, /o_stop, /stop)
         self.application.add_handler(CommandHandler("ollama", self.ollama_command))
         self.application.add_handler(CommandHandler("o", self.ollama_command))
+        self.application.add_handler(CommandHandler("o_stop", self.ollama_stop_command))
+        self.application.add_handler(CommandHandler("stop", self.ollama_stop_command))
         self.application.add_handler(CommandHandler("ollama_stop", self.ollama_stop_command))
         # (moved above)
         
@@ -924,60 +925,82 @@ class YouTubeTelegramBot:
             page_b = int((session or {}).get('ai2ai_page_b') or 0)
             allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
 
-            # Label A
-            rows.append([InlineKeyboardButton("Model A:", callback_data="ollama_nop")])
-            a_start = page_a * page_size
-            a_end = a_start + page_size
-            a_subset = models[a_start:a_end]
-            row = []
-            for name in a_subset:
-                label = name
-                if len(label) > 28:
-                    label = f"{label[:25]}…"
-                if sel_a == name:
-                    label = f"✅ {label}"
-                row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
-                if len(row) == 3:
-                    rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            # Nav A
-            nav_a: List[InlineKeyboardButton] = []
-            if a_end < len(models):
-                nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
-            if page_a > 0:
-                nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
-            if nav_a:
-                rows.append(nav_a)
+            categories = self._ollama_persona_categories()
 
-            # Label B
-            rows.append([InlineKeyboardButton("Model B:", callback_data="ollama_nop")])
-            b_start = page_b * page_size
-            b_end = b_start + page_size
-            b_subset_raw = models[b_start:b_end]
-            b_subset = [n for n in b_subset_raw if (allow_same or (not sel_a or n != sel_a))]
-            row = []
-            for name in b_subset:
-                label = name
-                if len(label) > 28:
-                    label = f"{label[:25]}…"
-                if sel_b == name:
-                    label = f"✅ {label}"
-                row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
-                if len(row) == 3:
+            # Section A
+            rows.append([InlineKeyboardButton("Model A:", callback_data="ollama_nop")])
+            view_a = (session or {}).get("ai2ai_view_a") or "models"
+            if view_a not in ("models", "persona_categories", "persona_list"):
+                view_a = "models"
+            if session is not None:
+                session["ai2ai_view_a"] = view_a
+            rows.append(self._ollama_ai2ai_view_toggle_row("A", view_a))
+            if view_a == "models":
+                a_start = page_a * page_size
+                a_end = a_start + page_size
+                a_subset = models[a_start:a_end]
+                row = []
+                for name in a_subset:
+                    label = name
+                    if len(label) > 28:
+                        label = f"{label[:25]}…"
+                    if sel_a == name:
+                        label = f"✅ {label}"
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
+                    if len(row) == 3:
+                        rows.append(row)
+                        row = []
+                if row:
                     rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            # Nav B
-            nav_b: List[InlineKeyboardButton] = []
-            if b_end < len(models):
-                nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
-            if page_b > 0:
-                nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
-            if nav_b:
-                rows.append(nav_b)
+                nav_a: List[InlineKeyboardButton] = []
+                if a_end < len(models):
+                    nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
+                if page_a > 0:
+                    nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
+                if nav_a:
+                    rows.append(nav_a)
+            elif view_a == "persona_list":
+                rows.extend(self._ollama_ai2ai_persona_list_rows("A", session or {}, page_size, categories))
+            else:
+                rows.extend(self._ollama_ai2ai_persona_categories_rows("A", session or {}, page_size, categories))
+
+            # Section B
+            rows.append([InlineKeyboardButton("Model B:", callback_data="ollama_nop")])
+            view_b = (session or {}).get("ai2ai_view_b") or "models"
+            if view_b not in ("models", "persona_categories", "persona_list"):
+                view_b = "models"
+            if session is not None:
+                session["ai2ai_view_b"] = view_b
+            rows.append(self._ollama_ai2ai_view_toggle_row("B", view_b))
+            if view_b == "models":
+                b_start = page_b * page_size
+                b_end = b_start + page_size
+                b_subset_raw = models[b_start:b_end]
+                b_subset = [n for n in b_subset_raw if (allow_same or (not sel_a or n != sel_a))]
+                row = []
+                for name in b_subset:
+                    label = name
+                    if len(label) > 28:
+                        label = f"{label[:25]}…"
+                    if sel_b == name:
+                        label = f"✅ {label}"
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
+                    if len(row) == 3:
+                        rows.append(row)
+                        row = []
+                if row:
+                    rows.append(row)
+                nav_b: List[InlineKeyboardButton] = []
+                if b_end < len(models):
+                    nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
+                if page_b > 0:
+                    nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
+                if nav_b:
+                    rows.append(nav_b)
+            elif view_b == "persona_list":
+                rows.extend(self._ollama_ai2ai_persona_list_rows("B", session or {}, page_size, categories))
+            else:
+                rows.extend(self._ollama_ai2ai_persona_categories_rows("B", session or {}, page_size, categories))
 
             # Footer
             foot: List[InlineKeyboardButton] = []
@@ -1016,6 +1039,154 @@ class YouTubeTelegramBot:
         val = os.getenv('OLLAMA_STREAM_DEFAULT', '1').lower()
         return val not in ('0', 'false', 'no')
 
+    def _ollama_persona_categories(self) -> Dict[str, Dict[str, Any]]:
+        categories: Dict[str, Dict[str, Any]] = {}
+
+        keys: List[str] = []
+        base_key = "OLLAMA_PERSONA"
+        if base_key in os.environ:
+            keys.append(base_key)
+        keys.extend(
+            sorted(
+                k for k in os.environ.keys()
+                if k.startswith("OLLAMA_PERSONA_")
+            )
+        )
+
+        def _label_from_key(key: str) -> str:
+            if key == base_key:
+                return "Default"
+            suffix = key[len("OLLAMA_PERSONA"):].lstrip("_")
+            if not suffix:
+                return "Custom"
+            human = suffix.replace("_", " ").strip()
+            return human.title() if human else "Custom"
+
+        for key in keys:
+            raw = os.getenv(key, "")
+            if not raw:
+                continue
+            names = [segment.strip() for segment in raw.split(",") if segment.strip()]
+            if not names:
+                continue
+            categories[key] = {
+                "label": _label_from_key(key),
+                "names": names,
+            }
+
+        if not categories:
+            categories["DEFAULT"] = {
+                "label": "Classic",
+                "names": ["Albert Einstein", "Isaac Newton"],
+            }
+
+        return categories
+
+    def _ollama_persona_defaults(self) -> List[str]:
+        categories = self._ollama_persona_categories()
+        for info in categories.values():
+            names = info.get("names") or []
+            if not names:
+                continue
+            if len(names) >= 2:
+                return names[:2]
+            if len(names) == 1:
+                return [names[0], "Speaker B"]
+        return ["Albert Einstein", "Isaac Newton"]
+
+    def _ollama_ai2ai_view_toggle_row(self, slot: str, view: str) -> List[InlineKeyboardButton]:
+        slot = slot.upper()
+        mark_models = "✅" if view == "models" else "⬜"
+        mark_personas = "✅" if view.startswith("persona") else "⬜"
+        return [
+            InlineKeyboardButton(f"{mark_models} Models", callback_data=f"ollama_ai2ai_view:{slot}:models"),
+            InlineKeyboardButton(f"{mark_personas} Personas", callback_data=f"ollama_ai2ai_view:{slot}:personas"),
+        ]
+
+    def _ollama_ai2ai_persona_categories_rows(
+        self,
+        slot: str,
+        session: Dict[str, Any],
+        page_size: int,
+        categories: Dict[str, Dict[str, Any]],
+    ) -> List[List[InlineKeyboardButton]]:
+        rows: List[List[InlineKeyboardButton]] = []
+        slot_lower = slot.lower()
+        current_category = (session or {}).get(f"ai2ai_persona_category_{slot_lower}")
+        page_key = f"ai2ai_persona_cat_page_{slot_lower}"
+        page = int((session or {}).get(page_key) or 0)
+        items = list(categories.items())
+        start = page * page_size
+        end = start + page_size
+        row: List[InlineKeyboardButton] = []
+        for cat_key, info in items[start:end]:
+            label = info.get("label") or cat_key
+            if len(label) > 28:
+                label = f"{label[:25]}…"
+            if cat_key == current_category:
+                label = f"✅ {label}"
+            row.append(InlineKeyboardButton(label, callback_data=f"ollama_persona_cat:{slot}:{cat_key}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        nav: List[InlineKeyboardButton] = []
+        if end < len(items):
+            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_persona_more:{slot}:cat:{page+1}"))
+        if page > 0:
+            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_persona_more:{slot}:cat:{page-1}"))
+        if nav:
+            rows.append(nav)
+        return rows
+
+    def _ollama_ai2ai_persona_list_rows(
+        self,
+        slot: str,
+        session: Dict[str, Any],
+        page_size: int,
+        categories: Dict[str, Dict[str, Any]],
+    ) -> List[List[InlineKeyboardButton]]:
+        rows: List[List[InlineKeyboardButton]] = []
+        slot_lower = slot.lower()
+        cat_key = (session or {}).get(f"ai2ai_persona_category_{slot_lower}")
+        info = categories.get(cat_key or "", {})
+        names: List[str] = info.get("names") or []
+        page_key = f"ai2ai_persona_page_{slot_lower}"
+        page = int((session or {}).get(page_key) or 0)
+        start = page * page_size
+        end = start + page_size
+        subset = list(enumerate(names))[start:end]
+        selected = (session or {}).get(f"persona_{slot_lower}")
+        row: List[InlineKeyboardButton] = []
+        for idx, name in subset:
+            label = name
+            if len(label) > 28:
+                label = f"{label[:25]}…"
+            if selected == name:
+                label = f"✅ {label}"
+            row.append(InlineKeyboardButton(label, callback_data=f"ollama_persona_pick:{slot}:{idx}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        nav: List[InlineKeyboardButton] = []
+        if end < len(names):
+            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_persona_more:{slot}:list:{page+1}"))
+        if page > 0:
+            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_persona_more:{slot}:list:{page-1}"))
+        control: List[InlineKeyboardButton] = [InlineKeyboardButton("⬅️ Categories", callback_data=f"ollama_persona_back:{slot}")]
+        if selected:
+            control.append(InlineKeyboardButton("♻️ Clear", callback_data=f"ollama_persona_clear:{slot}"))
+        if control:
+            rows.append(control)
+        if nav:
+            rows.append(nav)
+        if not names:
+            rows.append([InlineKeyboardButton("⚠️ No personas in category", callback_data="ollama_nop")])
+        return rows
+
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
         line = "--------------------------------------------------------------------------"
         # Determine mode
@@ -1029,10 +1200,28 @@ class YouTubeTelegramBot:
             f"🤖 Ollama Chat · Mode: {mode_label} · Streaming: ON",
         ]
         if a and b:
-            pa = session.get('persona_a') or 'Persona A'
-            pb = session.get('persona_b') or 'Persona B'
-            parts.append(f"A: {a} · {pa}")
-            parts.append(f"B: {b} · {pb}")
+            defaults = self._ollama_persona_defaults()
+            pa = session.get('persona_a') or defaults[0]
+            pb = session.get('persona_b') or defaults[1]
+            categories = self._ollama_persona_categories()
+            cat_a = session.get("persona_category_a")
+            if not cat_a:
+                cat_key_a = session.get("ai2ai_persona_category_a")
+                if cat_key_a:
+                    cat_a = categories.get(cat_key_a, {}).get("label")
+            cat_b = session.get("persona_category_b")
+            if not cat_b:
+                cat_key_b = session.get("ai2ai_persona_category_b")
+                if cat_key_b:
+                    cat_b = categories.get(cat_key_b, {}).get("label")
+            line_a = f"A: {a} · {pa}"
+            line_b = f"B: {b} · {pb}"
+            if cat_a:
+                line_a = f"{line_a} ({cat_a})"
+            if cat_b:
+                line_b = f"{line_b} ({cat_b})"
+            parts.append(line_a)
+            parts.append(line_b)
             turns = session.get('ai2ai_turns_left')
             if isinstance(turns, int):
                 parts.append(f"Turns remaining: {turns}")
@@ -1109,8 +1298,15 @@ class YouTubeTelegramBot:
 
     async def ollama_stop_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
-        self.ollama_sessions.pop(chat_id, None)
-        await update.message.reply_text("🛑 Closed Ollama chat session.")
+        session = self.ollama_sessions.get(chat_id)
+        if session and session.get("ai2ai_active"):
+            session["ai2ai_cancel"] = True
+            session["ai2ai_active"] = False
+            self.ollama_sessions[chat_id] = session
+            await update.message.reply_text("🛑 Stopping AI↔AI exchange after the current response…")
+        else:
+            self.ollama_sessions.pop(chat_id, None)
+            await update.message.reply_text("🛑 Closed Ollama chat session.")
 
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
         chat_id = update.effective_chat.id
@@ -1331,6 +1527,8 @@ class YouTubeTelegramBot:
 
     async def _ollama_ai2ai_continue(self, chat_id: int):
         session = self.ollama_sessions.get(chat_id) or {}
+        if session.get("ai2ai_cancel"):
+            return
         model_a = session.get("ai2ai_model_a") or session.get("model")
         model_b = session.get("ai2ai_model_b") or session.get("model")
         if not model_a or not model_b:
@@ -1340,8 +1538,9 @@ class YouTubeTelegramBot:
                 pass
             return
         session["active"] = True
-        persona_a = session.get("persona_a", "Albert Einstein")
-        persona_b = session.get("persona_b", "Isaac Newton")
+        defaults = self._ollama_persona_defaults()
+        persona_a = session.get("persona_a") or defaults[0]
+        persona_b = session.get("persona_b") or defaults[1]
         topic = session.get("topic", "The nature of space and time")
         # Turn A
         a_messages = [
@@ -1365,6 +1564,8 @@ class YouTubeTelegramBot:
         u = U(self.application, chat_id)
         a_text = await self._ollama_stream_chat(u, model_a, a_messages, label=f"A · {model_a}")
         session["ai2ai_last_a"] = a_text
+        if session.get("ai2ai_cancel"):
+            return
         # Turn B
         b_messages = [
             {"role": "system", "content": f"You are {persona_b}. Respond concisely."},
@@ -1381,15 +1582,28 @@ class YouTubeTelegramBot:
         session["ai2ai_turns_left"] = turns
         self.ollama_sessions[chat_id] = session
         for remaining in range(turns, 0, -1):
+            if session.get("ai2ai_cancel"):
+                break
             session["ai2ai_turns_left"] = remaining
             self.ollama_sessions[chat_id] = session
             await self._ollama_ai2ai_continue(chat_id)
+            if session.get("ai2ai_cancel"):
+                break
             session["ai2ai_turns_left"] = remaining - 1
             self.ollama_sessions[chat_id] = session
             if session["ai2ai_turns_left"] <= 0:
                 break
         session["ai2ai_turns_left"] = 0
         self.ollama_sessions[chat_id] = session
+        if session.get("ai2ai_cancel"):
+            session["ai2ai_active"] = False
+            session["ai2ai_cancel"] = False
+            self.ollama_sessions[chat_id] = session
+            try:
+                await self.application.bot.send_message(chat_id=chat_id, text="⏹️ AI↔AI exchange stopped.")
+            except Exception:
+                pass
+            return
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭️ Continue AI↔AI", callback_data="ollama_ai2ai:auto"), InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts")],
             [InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear")]
@@ -1448,15 +1662,142 @@ class YouTubeTelegramBot:
             self.ollama_sessions[chat_id] = session
             await query.answer("Page updated")
             return
+        if callback_data.startswith("ollama_ai2ai_view:"):
+            parts = callback_data.split(":")
+            if len(parts) >= 3:
+                slot = parts[1].upper()
+                target = parts[2]
+                slot_lower = slot.lower()
+                view_key = f"ai2ai_view_{slot_lower}"
+                if target == "models":
+                    session[view_key] = "models"
+                else:
+                    session[view_key] = "persona_categories"
+                    session.pop(f"ai2ai_persona_category_{slot_lower}", None)
+                    session[f"ai2ai_persona_cat_page_{slot_lower}"] = 0
+                    session[f"ai2ai_persona_page_{slot_lower}"] = 0
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                self.ollama_sessions[chat_id] = session
+                await query.answer("View updated")
+                return
+        if callback_data.startswith("ollama_persona_cat:"):
+            parts = callback_data.split(":", 2)
+            if len(parts) == 3:
+                slot = parts[1].upper()
+                cat_key = parts[2]
+                slot_lower = slot.lower()
+                categories = self._ollama_persona_categories()
+                if cat_key not in categories:
+                    await query.answer("Category unavailable", show_alert=False)
+                    return
+                session[f"ai2ai_persona_category_{slot_lower}"] = cat_key
+                session[f"ai2ai_view_{slot_lower}"] = "persona_list"
+                session[f"ai2ai_persona_page_{slot_lower}"] = 0
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Category selected")
+                return
+        if callback_data.startswith("ollama_persona_more:"):
+            parts = callback_data.split(":")
+            if len(parts) >= 4:
+                slot = parts[1].upper()
+                kind = parts[2]
+                try:
+                    page = max(0, int(parts[3]))
+                except Exception:
+                    page = 0
+                slot_lower = slot.lower()
+                if kind == "cat":
+                    session[f"ai2ai_persona_cat_page_{slot_lower}"] = page
+                    session[f"ai2ai_view_{slot_lower}"] = "persona_categories"
+                else:
+                    session[f"ai2ai_persona_page_{slot_lower}"] = page
+                    session.setdefault(f"ai2ai_view_{slot_lower}", "persona_list")
+                    session[f"ai2ai_view_{slot_lower}"] = "persona_list"
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Page updated")
+                return
+        if callback_data.startswith("ollama_persona_back:"):
+            parts = callback_data.split(":")
+            if len(parts) >= 2:
+                slot = parts[1].upper()
+                slot_lower = slot.lower()
+                session[f"ai2ai_view_{slot_lower}"] = "persona_categories"
+                session[f"ai2ai_persona_page_{slot_lower}"] = 0
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Select category")
+                return
+        if callback_data.startswith("ollama_persona_pick:"):
+            parts = callback_data.split(":")
+            if len(parts) >= 3:
+                slot = parts[1].upper()
+                slot_lower = slot.lower()
+                try:
+                    index = int(parts[2])
+                except Exception:
+                    index = -1
+                categories = self._ollama_persona_categories()
+                cat_key = session.get(f"ai2ai_persona_category_{slot_lower}")
+                names = []
+                if cat_key:
+                    names = categories.get(cat_key, {}).get("names") or []
+                if 0 <= index < len(names):
+                    session[f"persona_{slot_lower}"] = names[index]
+                    session[f"ai2ai_view_{slot_lower}"] = "persona_list"
+                    session[f"persona_category_{slot_lower}"] = categories.get(cat_key, {}).get("label")
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                self.ollama_sessions[chat_id] = session
+                await query.answer(f"Persona {slot} updated")
+                return
+        if callback_data.startswith("ollama_persona_clear:"):
+            parts = callback_data.split(":")
+            if len(parts) >= 2:
+                slot = parts[1].upper()
+                slot_lower = slot.lower()
+                session.pop(f"persona_{slot_lower}", None)
+                session.pop(f"persona_category_{slot_lower}", None)
+                models = session.get("models") or []
+                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Persona cleared")
+                return
         if callback_data.startswith("ollama_set_mode:"):
             which = callback_data.split(":", 1)[1]
             if which == "single":
                 session["mode"] = "ai-human"
                 session["active"] = bool(session.get("model"))
+                for key in (
+                    "ai2ai_view_a",
+                    "ai2ai_view_b",
+                    "ai2ai_persona_category_a",
+                    "ai2ai_persona_category_b",
+                    "persona_category_a",
+                    "persona_category_b",
+                    "ai2ai_persona_page_a",
+                    "ai2ai_persona_page_b",
+                    "ai2ai_persona_cat_page_a",
+                    "ai2ai_persona_cat_page_b",
+                ):
+                    session.pop(key, None)
             else:
                 session["mode"] = "ai-ai"
                 session.setdefault("ai2ai_page_a", 0)
                 session.setdefault("ai2ai_page_b", 0)
+                session.setdefault("ai2ai_view_a", "models")
+                session.setdefault("ai2ai_view_b", "models")
                 session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
             logging.info(f"Ollama UI: set mode -> {session['mode']}")
             models = session.get("models") or []
@@ -1623,7 +1964,25 @@ class YouTubeTelegramBot:
                 return
             if action == "clear":
                 # Clear AI↔AI selection and return to single-mode picker
-                for k in ("ai2ai_model_a", "ai2ai_model_b", "ai2ai_active", "persona_a", "persona_b", "topic", "ai2ai_turns_left"):
+                for k in (
+                    "ai2ai_model_a",
+                    "ai2ai_model_b",
+                    "ai2ai_active",
+                    "persona_a",
+                    "persona_b",
+                    "persona_category_a",
+                    "persona_category_b",
+                    "topic",
+                    "ai2ai_turns_left",
+                    "ai2ai_view_a",
+                    "ai2ai_view_b",
+                    "ai2ai_persona_category_a",
+                    "ai2ai_persona_category_b",
+                    "ai2ai_persona_page_a",
+                    "ai2ai_persona_page_b",
+                    "ai2ai_persona_cat_page_a",
+                    "ai2ai_persona_cat_page_b",
+                ):
                     session.pop(k, None)
                 session.pop("ai2ai_page_a", None)
                 session.pop("ai2ai_page_b", None)
@@ -1638,8 +1997,9 @@ class YouTubeTelegramBot:
             if action == "start":
                 # Initialize AI↔AI session with default personas
                 session["ai2ai_active"] = True
-                session.setdefault("persona_a", "Albert Einstein")
-                session.setdefault("persona_b", "Isaac Newton")
+                defaults = self._ollama_persona_defaults()
+                session.setdefault("persona_a", defaults[0])
+                session.setdefault("persona_b", defaults[1])
                 session.setdefault("topic", session.get("last_user") or "The nature of space and time")
                 # Default turns
                 try:

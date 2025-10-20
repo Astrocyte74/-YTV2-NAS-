@@ -68,14 +68,16 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 ```
 
 ## Telegram Bot Integration
-- Commands: `/ollama` or `/o`
+- Commands: `/ollama`, `/o`, `/o_stop` (alias `/stop`)
 - Model picker:
   - Streaming is **on by default** (tokens stream into a single message). Override with `OLLAMA_STREAM_DEFAULT=0` if you prefer JSON responses by default.
   - Top row toggles between **Single AI Chat** and **AI↔AI Chat**. Single mode shows a 4×3 grid of installed models; tap a model and type a prompt to start.
 - AI↔AI mode:
   - Pick model **A** and **B** in the integrated picker (model B list filters out A by default; allow same model with `OLLAMA_AI2AI_ALLOW_SAME=1`).
+  - Tap **Personas** under Model A or B to browse persona categories sourced from the environment (`OLLAMA_PERSONA_*`). Choose a category, then pick the persona name for that side.
   - Type a topic prompt—AI↔AI automatically runs the configured number of combined turns (default `OLLAMA_AI2AI_TURNS`, e.g. 10). Each turn is streamed with labels `A · <model>` / `B · <model>`.
   - When the cycle completes, you’ll see “Continue AI↔AI” (runs another block) and “Options” (adjust turn count) as inline buttons, plus “Clear AI↔AI” to return to single chat.
+- Personas for AI↔AI fall back to `OLLAMA_PERSONA` (comma-separated, e.g. `Albert Einstein,Isaac Newton`) if no category is chosen; unset variables use built-in defaults.
 - Single chat responses are labelled `🤖 <model>` so you can tell which model answered.
 - Implementation:
   - Client: `modules/ollama_client.py` (non-stream + SSE streaming helpers, handles SSE payloads such as `data: b'…'`)
@@ -87,6 +89,8 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - `OLLAMA_STREAM_DEFAULT` (`1` by default → streaming ON; set `0` to default OFF)
   - `OLLAMA_AI2AI_TURNS` (default number of combined turns when AI↔AI runs automatically, e.g. `10`)
   - `OLLAMA_AI2AI_ALLOW_SAME` (`0` by default; set `1` to allow the same model for both A and B)
+  - `OLLAMA_PERSONA` (optional comma-separated fallback personas for AI↔AI, first entry used for A, second for B)
+  - `OLLAMA_PERSONA_<CATEGORY>` (optional comma-separated persona lists grouped by category; the `<CATEGORY>` suffix becomes the label in the Telegram picker, e.g. `OLLAMA_PERSONA_ARTISTS`)
 - Hub on Mac (optional):
   - `OLLAMA_URL` if Ollama is not on `http://127.0.0.1:11434`
   - `OLLAMA_ALLOW_CLI` to control delete fallback via the local `ollama` CLI
