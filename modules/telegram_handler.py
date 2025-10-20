@@ -14,6 +14,7 @@ import subprocess
 import time
 import urllib.parse
 from datetime import datetime
+import random
 from typing import List, Dict, Any, Optional, Callable, Tuple
 from pathlib import Path
 
@@ -1104,17 +1105,34 @@ class YouTubeTelegramBot:
 
         return categories
 
-    def _ollama_persona_defaults(self) -> List[str]:
+    def _ollama_persona_pool(self) -> List[str]:
         categories = self._ollama_persona_categories()
+        pool: List[str] = []
         for info in categories.values():
             names = info.get("names") or []
-            if not names:
-                continue
-            if len(names) >= 2:
-                return names[:2]
-            if len(names) == 1:
-                return [names[0], "Speaker B"]
+            for name in names:
+                if isinstance(name, str) and name.strip():
+                    pool.append(name.strip())
+        if not pool:
+            pool = ["Albert Einstein", "Isaac Newton"]
+        return pool
+
+    def _ollama_persona_defaults(self) -> List[str]:
+        pool = self._ollama_persona_pool()
+        if len(pool) >= 2:
+            return pool[:2]
+        if len(pool) == 1:
+            return [pool[0], "Speaker B"]
         return ["Albert Einstein", "Isaac Newton"]
+
+    def _ollama_persona_random_pair(self) -> Tuple[str, str]:
+        pool = self._ollama_persona_pool()
+        if len(pool) >= 2:
+            return tuple(random.sample(pool, 2))  # type: ignore[return-value]
+        if len(pool) == 1:
+            return pool[0], pool[0]
+        defaults = self._ollama_persona_defaults()
+        return defaults[0], defaults[1]
 
     def _ollama_ai2ai_default_models(self, models: List[str], allow_same: bool) -> Tuple[Optional[str], Optional[str]]:
         available = list(models or [])
@@ -1795,6 +1813,10 @@ class YouTubeTelegramBot:
                 pass
             return
         session["active"] = True
+        if not (session.get("persona_a") and session.get("persona_b")):
+            rand_a, rand_b = self._ollama_persona_random_pair()
+            session.setdefault("persona_a", rand_a)
+            session.setdefault("persona_b", rand_b)
         defaults = self._ollama_persona_defaults()
         persona_a = session.get("persona_a") or defaults[0]
         persona_b = session.get("persona_b") or defaults[1]
@@ -2452,9 +2474,10 @@ class YouTubeTelegramBot:
             if action == "start":
                 # Initialize AI↔AI session with default personas
                 session["ai2ai_active"] = True
-                defaults = self._ollama_persona_defaults()
-                session.setdefault("persona_a", defaults[0])
-                session.setdefault("persona_b", defaults[1])
+                if not (session.get("persona_a") and session.get("persona_b")):
+                    rand_a, rand_b = self._ollama_persona_random_pair()
+                    session.setdefault("persona_a", rand_a)
+                    session.setdefault("persona_b", rand_b)
                 session.setdefault("persona_a_custom", False)
                 session.setdefault("persona_b_custom", False)
                 session.setdefault("persona_a_intro_pending", False)

@@ -82,7 +82,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - Type a topic prompt—AI↔AI automatically runs the configured number of combined turns (default `OLLAMA_AI2AI_TURNS`, e.g. 10). Each turn is streamed with labels `A · <model>` / `B · <model>`.
   - Use `/chat <message>` at any time to inject a fresh prompt and immediately run another AI↔AI turn with the existing models/personas.
   - When the cycle completes, you’ll see “Continue AI↔AI” (runs another block) and “Options” (adjust turn count) as inline buttons, plus “Clear AI↔AI” to return to single chat.
-  - When a custom persona is selected for either side, their opening response introduces the persona and prompts the counterpart to introduce themselves.
+  - Personas default to a random pair from your configured lists; once selected (or changed), each opening response introduces the persona and prompts the counterpart to introduce themselves.
 - Personas for AI↔AI fall back to `OLLAMA_PERSONA` (comma-separated, e.g. `Albert Einstein,Isaac Newton`) if no category is chosen; unset variables use built-in defaults.
 - Single chat responses are labelled `🤖 <model>` so you can tell which model answered.
 - Implementation:
