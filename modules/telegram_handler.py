@@ -948,11 +948,10 @@ class YouTubeTelegramBot:
                 a_subset = models[a_start:a_end]
                 row = []
                 for name in a_subset:
-                    label = name
-                    if len(label) > 28:
-                        label = f"{label[:25]}…"
-                    if sel_a == name:
-                        label = f"✅ {label}"
+                    base_label = name
+                    if len(base_label) > 28:
+                        base_label = f"{base_label[:25]}…"
+                    label = f"✅ {base_label}" if sel_a == name else base_label
                     row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
                     if len(row) == 3:
                         rows.append(row)
@@ -986,11 +985,10 @@ class YouTubeTelegramBot:
                 b_subset = [n for n in b_subset_raw if (allow_same or (not sel_a or n != sel_a))]
                 row = []
                 for name in b_subset:
-                    label = name
-                    if len(label) > 28:
-                        label = f"{label[:25]}…"
-                    if sel_b == name:
-                        label = f"✅ {label}"
+                    base_label = name
+                    if len(base_label) > 28:
+                        base_label = f"{base_label[:25]}…"
+                    label = f"✅ {base_label}" if sel_b == name else base_label
                     row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
                     if len(row) == 3:
                         rows.append(row)
@@ -1027,14 +1025,14 @@ class YouTubeTelegramBot:
             view_single = "persona_categories"
         if session is not None:
             session["single_view"] = view_single
-        rows.append(self._ollama_single_view_toggle_row(view_single))
+            rows.append(self._ollama_single_view_toggle_row(view_single))
         if view_single == "models":
             row = []
             for name in subset:
                 label = name
                 if len(label) > 28:
                     label = f"{label[:25]}…"
-                if name in (sel_a, sel_b, current):
+                if name == session.get("ai2ai_model_a") or name == session.get("ai2ai_model_b") or name == current:
                     label = f"✅ {label}"
                 row.append(InlineKeyboardButton(label, callback_data=f"ollama_model:{name}"))
                 if len(row) == 3:
