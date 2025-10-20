@@ -15,7 +15,7 @@ import time
 import urllib.parse
 from datetime import datetime
 import random
-from typing import List, Dict, Any, Optional, Callable, Tuple
+from typing import List, Dict, Any, Optional, Callable, Tuple, Awaitable
 from pathlib import Path
 
 try:
@@ -1134,6 +1134,39 @@ class YouTubeTelegramBot:
         defaults = self._ollama_persona_defaults()
         return defaults[0], defaults[1]
 
+    def _ollama_start_ai2ai_task(self, chat_id: int, coro: Awaitable[Any]) -> bool:
+        session = self.ollama_sessions.get(chat_id) or {}
+        existing = session.get("ai2ai_task")
+        if isinstance(existing, asyncio.Task) and not existing.done():
+            return False
+
+        loop = asyncio.get_running_loop()
+
+        async def runner():
+            try:
+                await coro
+            except asyncio.CancelledError:
+                logging.info("AI↔AI task cancelled for chat %s", chat_id)
+                raise
+            except Exception:
+                logging.exception("AI↔AI task failed for chat %s", chat_id)
+            finally:
+                sess = self.ollama_sessions.get(chat_id) or {}
+                current = asyncio.current_task()
+                if sess.get("ai2ai_task") is current:
+                    sess["ai2ai_task"] = None
+                sess["ai2ai_active"] = False
+                if not sess.get("ai2ai_cancel"):
+                    sess.pop("ai2ai_cancel", None)
+                self.ollama_sessions[chat_id] = sess
+
+        task = loop.create_task(runner())
+        session["ai2ai_task"] = task
+        session["ai2ai_cancel"] = False
+        session["ai2ai_active"] = True
+        self.ollama_sessions[chat_id] = session
+        return True
+
     def _ollama_ai2ai_default_models(self, models: List[str], allow_same: bool) -> Tuple[Optional[str], Optional[str]]:
         available = list(models or [])
         defaults_raw = os.getenv('OLLAMA_AI2AI_DEFAULT_MODELS', '')
@@ -1496,6 +1529,9 @@ class YouTubeTelegramBot:
             session["ai2ai_cancel"] = True
             session["ai2ai_active"] = False
             self.ollama_sessions[chat_id] = session
+            task = session.get("ai2ai_task")
+            if isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
             await update.message.reply_text("🛑 Stopping AI↔AI exchange after the current response…")
         else:
             self.ollama_sessions.pop(chat_id, None)
@@ -1520,16 +1556,14 @@ class YouTubeTelegramBot:
             await update.message.reply_text("ℹ️ Usage: /chat <new topic or instruction>")
             return
         session["topic"] = prompt
-        session["ai2ai_cancel"] = False
-        session["ai2ai_active"] = True
         self.ollama_sessions[chat_id] = session
-        await update.message.reply_text("💬 New AI↔AI turn coming up…")
         turn_total = session.get("ai2ai_turns_total")
         turn_idx = (session.get("ai2ai_round") or 0) + 1
-        try:
-            await self._ollama_ai2ai_continue(chat_id, turn_number=turn_idx, total_turns=turn_total if isinstance(turn_total, int) and turn_total > 0 else None)
-        except Exception as exc:
-            await update.message.reply_text(f"❌ Failed to run AI↔AI turn: {exc}")
+        coro = self._ollama_ai2ai_continue(chat_id, turn_number=turn_idx, total_turns=turn_total if isinstance(turn_total, int) and turn_total > 0 else None)
+        if not self._ollama_start_ai2ai_task(chat_id, coro):
+            await update.message.reply_text("⚠️ AI↔AI exchange already running. Try again after the current turn or use /stop.")
+            return
+        await update.message.reply_text("💬 New AI↔AI turn coming up…")
 
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
         chat_id = update.effective_chat.id
@@ -1545,7 +1579,6 @@ class YouTubeTelegramBot:
                 return
         # If AI↔AI is active (two models picked), treat user text as topic and run a turn
         if mode_key == "ai-ai" and session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
-            session["ai2ai_active"] = True
             session["topic"] = text
             if not isinstance(session.get("ai2ai_turns_config"), int) or session.get("ai2ai_turns_config") <= 0:
                 try:
@@ -1555,8 +1588,12 @@ class YouTubeTelegramBot:
             session["ai2ai_round"] = 0
             turns_total = int(session.get("ai2ai_turns_config") or 0)
             session["ai2ai_turns_total"] = turns_total if turns_total > 0 else None
+            self.ollama_sessions[chat_id] = session
+            turns = int(session["ai2ai_turns_config"])
+            if not self._ollama_start_ai2ai_task(chat_id, self._ollama_ai2ai_run(chat_id, turns)):
+                await update.message.reply_text("⚠️ AI↔AI exchange already running. Use /stop to interrupt.")
+                return
             await update.message.reply_text("🤝 Starting AI↔AI exchange…")
-            await self._ollama_ai2ai_run(chat_id, int(session["ai2ai_turns_config"]))
             return
         # Build chat payload
         history = list(session.get("history") or [])
