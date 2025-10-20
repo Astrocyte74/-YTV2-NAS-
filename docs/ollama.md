@@ -72,11 +72,13 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 - Model picker:
   - Streaming is **on by default** (tokens stream into a single message). Override with `OLLAMA_STREAM_DEFAULT=0` if you prefer JSON responses by default.
   - Top row toggles between **Single AI Chat** and **AI↔AI Chat**. Single mode shows a 4×3 grid of installed models; tap a model and type a prompt to start.
+  - Single chat also exposes a **Models / Personas** toggle: choose a persona category, pick a persona, and the bot will role-play that identity (first reply introduces itself and invites you to introduce yourself).
 - AI↔AI mode:
   - Pick model **A** and **B** in the integrated picker (model B list filters out A by default; allow same model with `OLLAMA_AI2AI_ALLOW_SAME=1`).
   - Tap **Personas** under Model A or B to browse persona categories sourced from the environment (`OLLAMA_PERSONA_*`). Choose a category, then pick the persona name for that side.
   - Type a topic prompt—AI↔AI automatically runs the configured number of combined turns (default `OLLAMA_AI2AI_TURNS`, e.g. 10). Each turn is streamed with labels `A · <model>` / `B · <model>`.
   - When the cycle completes, you’ll see “Continue AI↔AI” (runs another block) and “Options” (adjust turn count) as inline buttons, plus “Clear AI↔AI” to return to single chat.
+  - When a custom persona is selected for either side, their opening response introduces the persona and prompts the counterpart to introduce themselves.
 - Personas for AI↔AI fall back to `OLLAMA_PERSONA` (comma-separated, e.g. `Albert Einstein,Isaac Newton`) if no category is chosen; unset variables use built-in defaults.
 - Single chat responses are labelled `🤖 <model>` so you can tell which model answered.
 - Implementation:
