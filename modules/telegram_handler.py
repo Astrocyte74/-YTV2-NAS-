@@ -7,6 +7,7 @@ It handles all Telegram bot interactions without embedded HTML generation.
 
 import asyncio
 import json
+import io
 import logging
 import os
 import re
@@ -56,6 +57,7 @@ from modules.ollama_client import (
 )
 import hashlib
 import unicodedata
+from pydub import AudioSegment
 
 
 class YouTubeTelegramBot:
@@ -1924,6 +1926,15 @@ class YouTubeTelegramBot:
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_a"] = a_text
+        # Append transcript for TTS recap
+        try:
+            tr = session.get("ai2ai_transcript")
+            if not isinstance(tr, list):
+                tr = []
+            tr.append({"speaker": "A", "persona": persona_a, "model": model_a, "text": a_text or ""})
+            session["ai2ai_transcript"] = tr[-200:]
+        except Exception:
+            pass
         if intro_a:
             session["persona_a_intro_pending"] = False
         if session.get("ai2ai_cancel"):
@@ -1944,6 +1955,14 @@ class YouTubeTelegramBot:
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_b"] = b_text
+        try:
+            tr = session.get("ai2ai_transcript")
+            if not isinstance(tr, list):
+                tr = []
+            tr.append({"speaker": "B", "persona": persona_b, "model": model_b, "text": b_text or ""})
+            session["ai2ai_transcript"] = tr[-200:]
+        except Exception:
+            pass
         if intro_b:
             session["persona_b_intro_pending"] = False
         self.ollama_sessions[chat_id] = session
@@ -1982,6 +2001,7 @@ class YouTubeTelegramBot:
             return
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("⏭️ Continue AI↔AI", callback_data="ollama_ai2ai:auto"), InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts")],
+            [InlineKeyboardButton("🔊 AI↔AI Audio", callback_data="ollama_ai2ai:tts")],
             [InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear")]
         ])
         await self.application.bot.send_message(chat_id=chat_id, text="✅ AI↔AI session complete. Choose Continue to keep the exchange going, or Options to adjust turns.", reply_markup=kb)
@@ -2583,6 +2603,38 @@ class YouTubeTelegramBot:
                 await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
                 await query.answer("Options")
                 return
+        if callback_data == "ollama_ai2ai:tts":
+            # Generate AI↔AI audio recap using local TTS hub (or fallback)
+            try:
+                await query.answer("Generating audio…")
+            except Exception:
+                pass
+            status = None
+            try:
+                status = await query.message.reply_text("🎧 Generating AI↔AI audio…")
+            except Exception:
+                status = None
+            try:
+                path = await self._ollama_ai2ai_generate_audio(chat_id, session)
+                if not path or not Path(path).exists():
+                    raise RuntimeError("no audio produced")
+                caption = self._ai2ai_audio_caption(session)
+                with open(path, "rb") as f:
+                    await query.message.reply_voice(voice=f, caption=caption, parse_mode=ParseMode.MARKDOWN)
+                try:
+                    if status:
+                        await status.edit_text("✅ AI↔AI audio ready")
+                except Exception:
+                    pass
+            except Exception as e:
+                try:
+                    if status:
+                        await status.edit_text(f"❌ AI↔AI audio failed: {e}")
+                    else:
+                        await query.message.reply_text(f"❌ AI↔AI audio failed: {e}")
+                except Exception:
+                    pass
+            return
         if callback_data == "ollama_nop":
             await query.answer("Select an option")
             return
@@ -4954,6 +5006,187 @@ class YouTubeTelegramBot:
             escaped_text = escaped_text.replace(char, f'\\{char}')
         
         return escaped_text
+
+    def _ai2ai_audio_caption(self, session: Dict[str, Any]) -> str:
+        defaults = self._ollama_persona_defaults()
+        a = session.get("persona_a") or defaults[0]
+        b = session.get("persona_b") or defaults[1]
+        model_a = session.get("ai2ai_model_a") or session.get("model") or "?"
+        model_b = session.get("ai2ai_model_b") or session.get("model") or "?"
+        lines = [
+            "🔊 *AI↔AI Audio Recap*",
+            f"A · {self._escape_markdown(a)} ({self._escape_markdown(model_a)})",
+            f"B · {self._escape_markdown(b)} ({self._escape_markdown(model_b)})",
+        ]
+        return "\n".join(lines)
+
+    async def _ollama_ai2ai_generate_audio(self, chat_id: int, session: Dict[str, Any]) -> Optional[str]:
+        # Collect utterances
+        transcript = session.get("ai2ai_transcript") or []
+        if not isinstance(transcript, list) or not transcript:
+            raise RuntimeError("no transcript")
+        # Config
+        def truthy(val: Optional[str], default: bool = True) -> bool:
+            if val is None:
+                return default
+            v = str(val).strip().lower()
+            return v not in ("0", "false", "no", "off")
+
+        intro_enabled = truthy(os.getenv("OLLAMA_AI2AI_TTS_INTRO", "1"), True)
+        try:
+            intro_pause_ms = max(0, int(os.getenv("OLLAMA_AI2AI_TTS_INTRO_PAUSE_MS", "650")))
+        except Exception:
+            intro_pause_ms = 650
+        try:
+            turn_pause_ms = max(0, int(os.getenv("OLLAMA_AI2AI_TTS_PAUSE_MS", "650")))
+        except Exception:
+            turn_pause_ms = 650
+
+        provider = (os.getenv("OLLAMA_AI2AI_TTS_PROVIDER", "local").strip().lower())
+        use_local = provider in ("1", "true", "yes", "local", "hub")
+
+        from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
+        client = None
+        if use_local:
+            client = TTSHubClient.from_env()
+            if not client or not client.base_api_url:
+                use_local = False
+
+        # Resolve A/B voices – robustly normalize favorites/ids against hub
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (s or "").strip().lower())
+
+        async def _resolve_local(client: TTSHubClient, raw: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+            raw = (raw or "").strip()
+            if not raw:
+                return (None, None, None)
+            wanted = _norm(raw.replace("favorite--", ""))
+            # Try favorites first (tagged, then all)
+            favs: List[Dict[str, Any]] = []
+            try:
+                favs = await client.fetch_favorites(tag="ai2ai")
+            except Exception:
+                favs = []
+            if not favs:
+                try:
+                    favs = await client.fetch_favorites()
+                except Exception:
+                    favs = []
+            for fav in favs:
+                slug = (fav.get("slug") or fav.get("voiceId") or "").strip()
+                label = (fav.get("label") or "").strip()
+                if _norm(slug) == wanted or (_norm(label) == wanted and label):
+                    return (fav.get("slug") or slug, fav.get("voiceId"), fav.get("engine"))
+            # Try catalog voice ids as fallback
+            cat: Optional[Dict[str, Any]] = None
+            try:
+                cat = await client.fetch_catalog()
+            except Exception:
+                cat = None
+            for voice in (cat or {}).get("voices") or []:
+                vid = (voice.get("id") or "").strip()
+                label = (voice.get("label") or "").strip()
+                if _norm(vid) == wanted or (_norm(label) == wanted and label):
+                    eng = voice.get("engine") or voice.get("provider")
+                    return (None, vid, eng)
+            # Last resort: pass through as given, assuming it's a favorite slug
+            return (raw, None, None)
+
+        voice_a_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_A", "").strip()
+        voice_b_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_B", "").strip()
+        if use_local and not (voice_a_raw and voice_b_raw):
+            raise RuntimeError("missing OLLAMA_AI2AI_TTS_VOICE_A/B")
+        fav_a, vid_a, eng_a = (None, None, None)
+        fav_b, vid_b, eng_b = (None, None, None)
+        if use_local and client:
+            fav_a, vid_a, eng_a = await _resolve_local(client, voice_a_raw)
+            fav_b, vid_b, eng_b = await _resolve_local(client, voice_b_raw)
+            if not (fav_a or vid_a) or not (fav_b or vid_b):
+                raise RuntimeError("could not resolve A/B voices on hub")
+
+        # Prepare utterance order with optional intros
+        defaults = self._ollama_persona_defaults()
+        persona_a = session.get("persona_a") or defaults[0]
+        persona_b = session.get("persona_b") or defaults[1]
+        sequence: List[Tuple[str, str]] = []  # (speaker, text)
+        if intro_enabled:
+            sequence.append(("A", f"Hello, my name is {persona_a}."))
+            sequence.append(("__pause__", str(intro_pause_ms)))
+            sequence.append(("B", f"And my name is {persona_b}."))
+            sequence.append(("__pause__", str(intro_pause_ms)))
+        for entry in transcript:
+            sp = (entry or {}).get("speaker") or "A"
+            tx = (entry or {}).get("text") or ""
+            if isinstance(tx, str) and tx.strip():
+                sequence.append((sp, tx))
+                sequence.append(("__pause__", str(turn_pause_ms)))
+        # Remove trailing pause
+        if sequence and sequence[-1][0] == "__pause__":
+            sequence.pop()
+        if not sequence:
+            raise RuntimeError("empty sequence")
+
+        # Build combined AudioSegment
+        combined = AudioSegment.silent(duration=0)
+        tmp_segments: List[AudioSegment] = []
+        for sp, content in sequence:
+            if sp == "__pause__":
+                try:
+                    dur = max(0, int(content))
+                except Exception:
+                    dur = turn_pause_ms
+                tmp_segments.append(AudioSegment.silent(duration=dur))
+                continue
+            if use_local and client:
+                # Call hub synth
+                try:
+                    if sp == "A":
+                        if fav_a:
+                            data = await client.synthesise(content, favorite_slug=fav_a)
+                        else:
+                            data = await client.synthesise(content, voice_id=vid_a, engine=eng_a)
+                    else:
+                        if fav_b:
+                            data = await client.synthesise(content, favorite_slug=fav_b)
+                        else:
+                            data = await client.synthesise(content, voice_id=vid_b, engine=eng_b)
+                except Exception as e:
+                    raise RuntimeError(f"hub synth failed: {e}")
+                audio_bytes = data.get("audio_bytes")
+                if not audio_bytes:
+                    raise RuntimeError("hub returned no audio")
+                try:
+                    seg = AudioSegment.from_file(io.BytesIO(audio_bytes))
+                except Exception:
+                    # fallback assume wav
+                    seg = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
+                tmp_segments.append(seg)
+            else:
+                # OpenAI fallback via summarizer; single-voice limitation
+                from youtube_summarizer import YouTubeSummarizer
+                if not self.summarizer:
+                    self.summarizer = YouTubeSummarizer()
+                # Use different voice names if desired; here one voice for both as fallback
+                out_dir = Path("exports"); out_dir.mkdir(exist_ok=True)
+                out_path = out_dir / f"ai2ai_tmp_{int(time.time()*1000)}.mp3"
+                res = await self.summarizer._generate_single_tts(content, str(out_path), provider="openai")
+                if not res or not out_path.exists():
+                    raise RuntimeError("openai tts failed")
+                tmp_segments.append(AudioSegment.from_file(str(out_path)))
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+
+        for seg in tmp_segments:
+            combined += seg
+
+        # Export final mp3
+        out_dir = Path("exports"); out_dir.mkdir(exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        final_path = out_dir / f"ai2ai_chat_{ts}.mp3"
+        combined.export(str(final_path), format="mp3", bitrate="192k")
+        return str(final_path)
     
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors in the bot."""
