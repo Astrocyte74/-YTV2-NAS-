@@ -14,7 +14,7 @@ import subprocess
 import time
 import urllib.parse
 from datetime import datetime
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable, Tuple
 from pathlib import Path
 
 try:
@@ -925,7 +925,13 @@ class YouTubeTelegramBot:
             page_a = int((session or {}).get('ai2ai_page_a') or 0)
             page_b = int((session or {}).get('ai2ai_page_b') or 0)
             allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
-
+            if session is not None and models:
+                default_a, default_b = self._ollama_ai2ai_default_models(models, allow_same)
+                if not session.get('ai2ai_model_a') and default_a:
+                    session['ai2ai_model_a'] = default_a
+                if not session.get('ai2ai_model_b') and default_b:
+                    session['ai2ai_model_b'] = default_b
+                session['active'] = bool(session.get('ai2ai_model_a') and session.get('ai2ai_model_b'))
             categories = self._ollama_persona_categories()
 
             # Section A
@@ -1109,6 +1115,36 @@ class YouTubeTelegramBot:
             if len(names) == 1:
                 return [names[0], "Speaker B"]
         return ["Albert Einstein", "Isaac Newton"]
+
+    def _ollama_ai2ai_default_models(self, models: List[str], allow_same: bool) -> Tuple[Optional[str], Optional[str]]:
+        available = list(models or [])
+        defaults_raw = os.getenv('OLLAMA_AI2AI_DEFAULT_MODELS', '')
+        preferred = [item.strip() for item in defaults_raw.split(',') if item.strip()]
+        model_a: Optional[str] = None
+        model_b: Optional[str] = None
+
+        for name in preferred:
+            if name in available:
+                if model_a is None:
+                    model_a = name
+                elif model_b is None and (allow_same or name != model_a):
+                    model_b = name
+            if model_a and model_b:
+                break
+
+        if model_a is None and available:
+            model_a = available[0]
+
+        if model_b is None:
+            if allow_same and model_a is not None:
+                model_b = model_a
+            else:
+                for candidate in available:
+                    if candidate != model_a:
+                        model_b = candidate
+                        break
+
+        return model_a, model_b
 
     def _ollama_persona_system_prompt(self, persona: str, intro_target: str, intro_pending: bool) -> str:
         persona = persona or "the assistant"

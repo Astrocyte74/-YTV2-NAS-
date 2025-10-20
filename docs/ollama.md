@@ -75,6 +75,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - Single chat also exposes a **Models / Personas** toggle: choose a persona category, pick a persona, and the bot will role-play that identity (first reply introduces itself and invites you to introduce yourself).
 - AI↔AI mode:
   - Pick model **A** and **B** in the integrated picker (model B list filters out A by default; allow same model with `OLLAMA_AI2AI_ALLOW_SAME=1`).
+  - The first two available models are pre-selected automatically (override with `OLLAMA_AI2AI_DEFAULT_MODELS=ModelA,ModelB`).
   - Tap **Personas** under Model A or B to browse persona categories sourced from the environment (`OLLAMA_PERSONA_*`). Choose a category, then pick the persona name for that side.
   - Message headers show the current turn (e.g. `A · phi3:latest · Turn 3/10`) so you can follow the exchange at a glance.
   - Type a topic prompt—AI↔AI automatically runs the configured number of combined turns (default `OLLAMA_AI2AI_TURNS`, e.g. 10). Each turn is streamed with labels `A · <model>` / `B · <model>`.
@@ -93,6 +94,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - `OLLAMA_STREAM_DEFAULT` (`1` by default → streaming ON; set `0` to default OFF)
   - `OLLAMA_AI2AI_TURNS` (default number of combined turns when AI↔AI runs automatically, e.g. `10`)
   - `OLLAMA_AI2AI_ALLOW_SAME` (`0` by default; set `1` to allow the same model for both A and B)
+  - `OLLAMA_AI2AI_DEFAULT_MODELS` (optional comma-separated defaults for AI↔AI; first entry is model A, second entry model B)
   - `OLLAMA_PERSONA` (optional comma-separated fallback personas for AI↔AI, first entry used for A, second for B)
   - `OLLAMA_PERSONA_<CATEGORY>` (optional comma-separated persona lists grouped by category; the `<CATEGORY>` suffix becomes the label in the Telegram picker, e.g. `OLLAMA_PERSONA_ARTISTS`)
 - Hub on Mac (optional):
