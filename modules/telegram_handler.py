@@ -1656,7 +1656,7 @@ class YouTubeTelegramBot:
             logging.info(f"Ollama streaming start: model={model} msgs={len(messages)}")
             last = 0.0
             try:
-                stream = ollama_chat_stream(messages, model)
+                stream = ollama_chat_stream_ctx(messages, model)
                 for data in stream:
                     if cancel_checker and cancel_checker():
                         final_text["cancelled"] = True
