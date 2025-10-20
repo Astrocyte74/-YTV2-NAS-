@@ -1377,6 +1377,10 @@ class YouTubeTelegramBot:
             f"🤖 Ollama Chat · Mode: {mode_label} · Streaming: ON",
         ]
         if a and b:
+            if not (session.get('persona_a') and session.get('persona_b')):
+                rand_a, rand_b = self._ollama_persona_random_pair()
+                session.setdefault('persona_a', rand_a)
+                session.setdefault('persona_b', rand_b)
             defaults = self._ollama_persona_defaults()
             pa = session.get('persona_a') or defaults[0]
             pb = session.get('persona_b') or defaults[1]
