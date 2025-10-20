@@ -932,6 +932,8 @@ class YouTubeTelegramBot:
                 if not session.get('ai2ai_model_b') and default_b:
                     session['ai2ai_model_b'] = default_b
                 session['active'] = bool(session.get('ai2ai_model_a') and session.get('ai2ai_model_b'))
+                sel_a = session.get('ai2ai_model_a')
+                sel_b = session.get('ai2ai_model_b')
             categories = self._ollama_persona_categories()
 
             # Section A
