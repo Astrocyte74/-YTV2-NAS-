@@ -5052,11 +5052,57 @@ class YouTubeTelegramBot:
             if not client or not client.base_api_url:
                 use_local = False
 
-        # Resolve A/B voices – expect favorite slugs
-        voice_a = os.getenv("OLLAMA_AI2AI_TTS_VOICE_A", "").strip()
-        voice_b = os.getenv("OLLAMA_AI2AI_TTS_VOICE_B", "").strip()
-        if use_local and not (voice_a and voice_b):
+        # Resolve A/B voices – robustly normalize favorites/ids against hub
+        def _norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", (s or "").strip().lower())
+
+        async def _resolve_local(client: TTSHubClient, raw: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+            raw = (raw or "").strip()
+            if not raw:
+                return (None, None, None)
+            wanted = _norm(raw.replace("favorite--", ""))
+            # Try favorites first (tagged, then all)
+            favs: List[Dict[str, Any]] = []
+            try:
+                favs = await client.fetch_favorites(tag="ai2ai")
+            except Exception:
+                favs = []
+            if not favs:
+                try:
+                    favs = await client.fetch_favorites()
+                except Exception:
+                    favs = []
+            for fav in favs:
+                slug = (fav.get("slug") or fav.get("voiceId") or "").strip()
+                label = (fav.get("label") or "").strip()
+                if _norm(slug) == wanted or (_norm(label) == wanted and label):
+                    return (fav.get("slug") or slug, fav.get("voiceId"), fav.get("engine"))
+            # Try catalog voice ids as fallback
+            cat: Optional[Dict[str, Any]] = None
+            try:
+                cat = await client.fetch_catalog()
+            except Exception:
+                cat = None
+            for voice in (cat or {}).get("voices") or []:
+                vid = (voice.get("id") or "").strip()
+                label = (voice.get("label") or "").strip()
+                if _norm(vid) == wanted or (_norm(label) == wanted and label):
+                    eng = voice.get("engine") or voice.get("provider")
+                    return (None, vid, eng)
+            # Last resort: pass through as given, assuming it's a favorite slug
+            return (raw, None, None)
+
+        voice_a_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_A", "").strip()
+        voice_b_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_B", "").strip()
+        if use_local and not (voice_a_raw and voice_b_raw):
             raise RuntimeError("missing OLLAMA_AI2AI_TTS_VOICE_A/B")
+        fav_a, vid_a, eng_a = (None, None, None)
+        fav_b, vid_b, eng_b = (None, None, None)
+        if use_local and client:
+            fav_a, vid_a, eng_a = await _resolve_local(client, voice_a_raw)
+            fav_b, vid_b, eng_b = await _resolve_local(client, voice_b_raw)
+            if not (fav_a or vid_a) or not (fav_b or vid_b):
+                raise RuntimeError("could not resolve A/B voices on hub")
 
         # Prepare utterance order with optional intros
         defaults = self._ollama_persona_defaults()
@@ -5093,9 +5139,17 @@ class YouTubeTelegramBot:
                 continue
             if use_local and client:
                 # Call hub synth
-                payload = {"favorite_slug": voice_a if sp == "A" else voice_b}
                 try:
-                    data = await client.synthesise(content, favorite_slug=payload["favorite_slug"])  # type: ignore[arg-type]
+                    if sp == "A":
+                        if fav_a:
+                            data = await client.synthesise(content, favorite_slug=fav_a)
+                        else:
+                            data = await client.synthesise(content, voice_id=vid_a, engine=eng_a)
+                    else:
+                        if fav_b:
+                            data = await client.synthesise(content, favorite_slug=fav_b)
+                        else:
+                            data = await client.synthesise(content, voice_id=vid_b, engine=eng_b)
                 except Exception as e:
                     raise RuntimeError(f"hub synth failed: {e}")
                 audio_bytes = data.get("audio_bytes")
