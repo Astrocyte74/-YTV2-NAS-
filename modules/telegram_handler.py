@@ -14,7 +14,7 @@ import subprocess
 import time
 import urllib.parse
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from pathlib import Path
 
 try:
@@ -1590,7 +1590,14 @@ class YouTubeTelegramBot:
             session["persona_single_intro_pending"] = False
         self.ollama_sessions[chat_id] = session
 
-    async def _ollama_stream_chat(self, update: Update, model: str, messages: List[Dict[str, str]], label: Optional[str] = None) -> str:
+    async def _ollama_stream_chat(
+        self,
+        update: Update,
+        model: str,
+        messages: List[Dict[str, str]],
+        label: Optional[str] = None,
+        cancel_checker: Optional[Callable[[], bool]] = None,
+    ) -> str:
         """Stream tokens from the hub and live-edit a single message. Returns final text."""
         chat_id = update.effective_chat.id
         prefix = f"{label}\n\n" if label else ""
@@ -1600,7 +1607,7 @@ class YouTubeTelegramBot:
         bot = getattr(app, 'bot', None)
         loop = asyncio.get_running_loop()
 
-        final_text: Dict[str, str] = {"buf": ""}
+        final_text: Dict[str, Any] = {"buf": "", "cancelled": False}
 
         def _compose_text() -> str:
             buf = final_text["buf"]
@@ -1615,7 +1622,31 @@ class YouTubeTelegramBot:
             logging.info(f"Ollama streaming start: model={model} msgs={len(messages)}")
             last = 0.0
             try:
-                for data in ollama_chat_stream(messages, model):
+                stream = ollama_chat_stream(messages, model)
+                for data in stream:
+                    if cancel_checker and cancel_checker():
+                        final_text["cancelled"] = True
+                        text = _compose_text()
+                        if text.strip():
+                            if label:
+                                text = text.rstrip() + "\n\n⏹️ Stopped."
+                            else:
+                                text = f"{text.rstrip()}\n\n⏹️ Stopped."
+                        else:
+                            text = f"{prefix}⏹️ Stopped." if label else "⏹️ Stopped."
+                        async def _cancel_edit():
+                            try:
+                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
+                            except Exception:
+                                pass
+                        asyncio.run_coroutine_threadsafe(_cancel_edit(), loop)
+                        close = getattr(stream, "close", None)
+                        if callable(close):
+                            try:
+                                close()
+                            except Exception:
+                                pass
+                        break
                     if not isinstance(data, dict):
                         continue
                     if data.get("status") == "starting":
@@ -1710,7 +1741,13 @@ class YouTubeTelegramBot:
                         return await self._app.bot.send_message(chat_id=self._chat, text=text)
                 return M(self._app, chat_id)
         u = U(self.application, chat_id)
-        a_text = await self._ollama_stream_chat(u, model_a, a_messages, label=f"A · {model_a}")
+        a_text = await self._ollama_stream_chat(
+            u,
+            model_a,
+            a_messages,
+            label=f"A · {model_a}",
+            cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
+        )
         session["ai2ai_last_a"] = a_text
         if intro_a:
             session["persona_a_intro_pending"] = False
@@ -1724,7 +1761,13 @@ class YouTubeTelegramBot:
             },
             {"role": "user", "content": f"Respond to {persona_a}'s statement: {a_text[:800]}"},
         ]
-        b_text = await self._ollama_stream_chat(u, model_b, b_messages, label=f"B · {model_b}")
+        b_text = await self._ollama_stream_chat(
+            u,
+            model_b,
+            b_messages,
+            label=f"B · {model_b}",
+            cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
+        )
         session["ai2ai_last_b"] = b_text
         if intro_b:
             session["persona_b_intro_pending"] = False
