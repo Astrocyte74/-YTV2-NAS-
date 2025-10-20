@@ -1490,7 +1490,7 @@ class YouTubeTelegramBot:
 
         def _call():
             try:
-                return ollama_chat(messages, model, stream=False)  # returns dict
+                return ollama_chat(dispatch_messages, model, stream=False)  # returns dict
             except Exception as e:
                 return {"error": str(e)}
         # Try to indicate typing; ignore if unsupported
