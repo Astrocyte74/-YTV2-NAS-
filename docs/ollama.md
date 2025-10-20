@@ -72,6 +72,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 - Model picker:
   - Streaming is **on by default** (tokens stream into a single message). Override with `OLLAMA_STREAM_DEFAULT=0` if you prefer JSON responses by default.
   - Top row toggles between **Single AI Chat** and **AI↔AI Chat**. Single mode shows a 4×3 grid of installed models; tap a model and type a prompt to start.
+  - Single chat auto-selects the first available model (override with `OLLAMA_DEFAULT_MODEL=<model>`), so you can begin typing immediately.
   - Single chat also exposes a **Models / Personas** toggle: choose a persona category, pick a persona, and the bot will role-play that identity (first reply introduces itself and invites you to introduce yourself).
 - AI↔AI mode:
   - Pick model **A** and **B** in the integrated picker (model B list filters out A by default; allow same model with `OLLAMA_AI2AI_ALLOW_SAME=1`).
@@ -94,6 +95,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - `OLLAMA_STREAM_DEFAULT` (`1` by default → streaming ON; set `0` to default OFF)
   - `OLLAMA_AI2AI_TURNS` (default number of combined turns when AI↔AI runs automatically, e.g. `10`)
   - `OLLAMA_AI2AI_ALLOW_SAME` (`0` by default; set `1` to allow the same model for both A and B)
+  - `OLLAMA_DEFAULT_MODEL` (optional default model for single chat mode)
   - `OLLAMA_AI2AI_DEFAULT_MODELS` (optional comma-separated defaults for AI↔AI; first entry is model A, second entry model B)
   - `OLLAMA_PERSONA` (optional comma-separated fallback personas for AI↔AI, first entry used for A, second for B)
   - `OLLAMA_PERSONA_<CATEGORY>` (optional comma-separated persona lists grouped by category; the `<CATEGORY>` suffix becomes the label in the Telegram picker, e.g. `OLLAMA_PERSONA_ARTISTS`)

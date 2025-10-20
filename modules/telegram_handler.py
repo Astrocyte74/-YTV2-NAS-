@@ -1146,6 +1146,18 @@ class YouTubeTelegramBot:
 
         return model_a, model_b
 
+    def _ollama_single_default_model(self, models: List[str]) -> Optional[str]:
+        available = list(models or [])
+        if not available:
+            return None
+        preferred = os.getenv('OLLAMA_DEFAULT_MODEL', '').strip()
+        if preferred and preferred in available:
+            return preferred
+        ai2ai_a, _ = self._ollama_ai2ai_default_models(available, allow_same=True)
+        if ai2ai_a:
+            return ai2ai_a
+        return available[0]
+
     def _ollama_persona_system_prompt(self, persona: str, intro_target: str, intro_pending: bool) -> str:
         persona = persona or "the assistant"
         content = f"You are {persona}. Respond concisely and stay in character."
@@ -1444,6 +1456,10 @@ class YouTubeTelegramBot:
                 "mode": "ai-human",
                 "single_view": "models",
             }
+            default_model = self._ollama_single_default_model(models)
+            if default_model:
+                sess["model"] = default_model
+                sess["active"] = True
             self.ollama_sessions[update.effective_chat.id] = sess
             kb = self._build_ollama_models_keyboard(models, 0, session=sess)
             # Render dynamic status above the picker
