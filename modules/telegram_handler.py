@@ -689,6 +689,7 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("o_stop", self.ollama_stop_command))
         self.application.add_handler(CommandHandler("stop", self.ollama_stop_command))
         self.application.add_handler(CommandHandler("ollama_stop", self.ollama_stop_command))
+        self.application.add_handler(CommandHandler("chat", self.ollama_ai2ai_chat_command))
         # (moved above)
         
         # Message handlers
@@ -1427,6 +1428,36 @@ class YouTubeTelegramBot:
             self.ollama_sessions.pop(chat_id, None)
             await update.message.reply_text("🛑 Closed Ollama chat session.")
 
+    async def ollama_ai2ai_chat_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
+            return
+        chat_id = update.effective_chat.id
+        session = self.ollama_sessions.get(chat_id)
+        if not session or session.get("mode") != "ai-ai":
+            await update.message.reply_text("⚠️ Switch to AI↔AI mode before using /chat.")
+            return
+        if not (session.get("ai2ai_model_a") and session.get("ai2ai_model_b")):
+            await update.message.reply_text("⚠️ Select models A and B first, then try /chat again.")
+            return
+        raw_text = update.message.text or ""
+        prompt = raw_text.partition(" ")[2].strip()
+        if not prompt:
+            await update.message.reply_text("ℹ️ Usage: /chat <new topic or instruction>")
+            return
+        session["topic"] = prompt
+        session["ai2ai_cancel"] = False
+        session["ai2ai_active"] = True
+        self.ollama_sessions[chat_id] = session
+        await update.message.reply_text("💬 New AI↔AI turn coming up…")
+        turn_total = session.get("ai2ai_turns_total")
+        turn_idx = (session.get("ai2ai_round") or 0) + 1
+        try:
+            await self._ollama_ai2ai_continue(chat_id, turn_number=turn_idx, total_turns=turn_total if isinstance(turn_total, int) and turn_total > 0 else None)
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Failed to run AI↔AI turn: {exc}")
+
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
         chat_id = update.effective_chat.id
         mode_key = session.get("mode") or "ai-human"
@@ -1448,6 +1479,9 @@ class YouTubeTelegramBot:
                     session["ai2ai_turns_config"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
                 except Exception:
                     session["ai2ai_turns_config"] = 10
+            session["ai2ai_round"] = 0
+            turns_total = int(session.get("ai2ai_turns_config") or 0)
+            session["ai2ai_turns_total"] = turns_total if turns_total > 0 else None
             await update.message.reply_text("🤝 Starting AI↔AI exchange…")
             await self._ollama_ai2ai_run(chat_id, int(session["ai2ai_turns_config"]))
             return
@@ -1697,7 +1731,7 @@ class YouTubeTelegramBot:
         await loop.run_in_executor(None, _run_stream)
         return final_text["buf"]
 
-    async def _ollama_ai2ai_continue(self, chat_id: int):
+    async def _ollama_ai2ai_continue(self, chat_id: int, turn_number: Optional[int] = None, total_turns: Optional[int] = None):
         session = self.ollama_sessions.get(chat_id) or {}
         if session.get("ai2ai_cancel"):
             return
@@ -1718,6 +1752,15 @@ class YouTubeTelegramBot:
         intro_a = bool(persona_a_custom and session.get("persona_a_intro_pending"))
         intro_b = bool(persona_b_custom and session.get("persona_b_intro_pending"))
         topic = session.get("topic", "The nature of space and time")
+        turn_idx = turn_number or (session.get("ai2ai_round") or 0) + 1
+        session["ai2ai_round"] = turn_idx
+        total = total_turns or session.get("ai2ai_turns_total")
+        if total and total < turn_idx:
+            total = turn_idx
+            session["ai2ai_turns_total"] = total
+        turn_suffix = f" · Turn {turn_idx}"
+        if total:
+            turn_suffix += f"/{total}"
         # Turn A
         a_messages = [
             {
@@ -1745,7 +1788,7 @@ class YouTubeTelegramBot:
             u,
             model_a,
             a_messages,
-            label=f"A · {model_a}",
+            label=f"A · {model_a}{turn_suffix}",
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_a"] = a_text
@@ -1765,7 +1808,7 @@ class YouTubeTelegramBot:
             u,
             model_b,
             b_messages,
-            label=f"B · {model_b}",
+            label=f"B · {model_b}{turn_suffix}",
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_b"] = b_text
@@ -1777,6 +1820,8 @@ class YouTubeTelegramBot:
         session = self.ollama_sessions.get(chat_id) or {}
         if turns <= 0:
             return
+        session["ai2ai_round"] = 0
+        session["ai2ai_turns_total"] = turns
         session["ai2ai_turns_left"] = turns
         self.ollama_sessions[chat_id] = session
         for remaining in range(turns, 0, -1):
@@ -1784,7 +1829,8 @@ class YouTubeTelegramBot:
                 break
             session["ai2ai_turns_left"] = remaining
             self.ollama_sessions[chat_id] = session
-            await self._ollama_ai2ai_continue(chat_id)
+            current_turn = turns - remaining + 1
+            await self._ollama_ai2ai_continue(chat_id, turn_number=current_turn, total_turns=turns)
             if session.get("ai2ai_cancel"):
                 break
             session["ai2ai_turns_left"] = remaining - 1
@@ -2106,6 +2152,8 @@ class YouTubeTelegramBot:
                     "ai2ai_persona_page_b",
                     "ai2ai_persona_cat_page_a",
                     "ai2ai_persona_cat_page_b",
+                    "ai2ai_round",
+                    "ai2ai_turns_total",
                 ):
                     session.pop(key, None)
                 session["single_view"] = "models"
@@ -2309,6 +2357,8 @@ class YouTubeTelegramBot:
                     "persona_b_custom",
                     "persona_a_intro_pending",
                     "persona_b_intro_pending",
+                    "ai2ai_round",
+                    "ai2ai_turns_total",
                     "topic",
                     "ai2ai_turns_left",
                     "ai2ai_view_a",
@@ -2330,6 +2380,23 @@ class YouTubeTelegramBot:
                 await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
                 await query.answer("Cleared AI↔AI")
                 self.ollama_sessions[chat_id] = session
+                return
+            if action == "auto":
+                turns = session.get("ai2ai_turns_config") or session.get("ai2ai_turns_total") or os.getenv('OLLAMA_AI2AI_TURNS', '10')
+                try:
+                    turns_int = int(turns)
+                except Exception:
+                    turns_int = 10
+                if turns_int <= 0:
+                    turns_int = 10
+                session["ai2ai_cancel"] = False
+                session["ai2ai_active"] = True
+                self.ollama_sessions[chat_id] = session
+                await query.answer("Continuing AI↔AI")
+                try:
+                    await self._ollama_ai2ai_run(chat_id, turns_int)
+                except Exception as exc:
+                    await query.message.reply_text(f"❌ Failed to continue AI↔AI: {exc}")
                 return
             if action == "start":
                 # Initialize AI↔AI session with default personas
