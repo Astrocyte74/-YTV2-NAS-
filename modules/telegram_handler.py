@@ -1136,13 +1136,12 @@ class YouTubeTelegramBot:
             model_a = available[0]
 
         if model_b is None:
-            if allow_same and model_a is not None:
+            for candidate in available:
+                if candidate != model_a:
+                    model_b = candidate
+                    break
+            if model_b is None and allow_same and model_a is not None and len(available) == 1:
                 model_b = model_a
-            else:
-                for candidate in available:
-                    if candidate != model_a:
-                        model_b = candidate
-                        break
 
         return model_a, model_b
 
