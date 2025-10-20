@@ -1689,7 +1689,11 @@ class YouTubeTelegramBot:
             reply_text = "(No response)"
         display_text = reply_text
         if mode_key == "ai-human":
-            display_text = f"🤖 {model}\n\n{reply_text}"
+            persona_single = session.get("persona_single")
+            if persona_single:
+                display_text = f"{persona_single} ({model})\n\n{reply_text}"
+            else:
+                display_text = f"🤖 {model}\n\n{reply_text}"
         await self._send_long_text_reply(update, display_text)
         # Update conversation history (keep it short)
         session["history"] = (trimmed_history + [{"role": "assistant", "content": reply_text}])[-16:]
@@ -1835,6 +1839,8 @@ class YouTubeTelegramBot:
         if total and total < turn_idx:
             total = turn_idx
             session["ai2ai_turns_total"] = total
+        persona_a = session.get("persona_a") or defaults[0]
+        persona_b = session.get("persona_b") or defaults[1]
         turn_suffix = f" · Turn {turn_idx}"
         if total:
             turn_suffix += f"/{total}"
@@ -1865,7 +1871,7 @@ class YouTubeTelegramBot:
             u,
             model_a,
             a_messages,
-            label=f"A · {model_a}{turn_suffix}",
+            label=f"{persona_a} ({model_a}){turn_suffix}",
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_a"] = a_text
@@ -1885,7 +1891,7 @@ class YouTubeTelegramBot:
             u,
             model_b,
             b_messages,
-            label=f"B · {model_b}{turn_suffix}",
+            label=f"{persona_b} ({model_b}){turn_suffix}",
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_b"] = b_text
