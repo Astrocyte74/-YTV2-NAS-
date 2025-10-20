@@ -1886,17 +1886,27 @@ class YouTubeTelegramBot:
             names = []
             if cat_key:
                 names = categories.get(cat_key, {}).get("names") or []
+            response = "Persona selected"
             if 0 <= index < len(names):
-                session["persona_single"] = names[index]
-                session["persona_single_custom"] = True
-                session["persona_single_intro_pending"] = True
+                chosen = names[index]
+                current = session.get("persona_single")
+                if current == chosen and session.get("persona_single_custom"):
+                    session.pop("persona_single", None)
+                    session.pop("persona_single_custom", None)
+                    session.pop("persona_single_intro_pending", None)
+                    session.pop("persona_single_category", None)
+                    response = "Persona cleared"
+                else:
+                    session["persona_single"] = chosen
+                    session["persona_single_custom"] = True
+                    session["persona_single_intro_pending"] = True
+                    session["persona_single_category"] = categories.get(cat_key, {}).get("label")
                 session["single_view"] = "persona_list"
-                session["persona_single_category"] = categories.get(cat_key, {}).get("label")
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
             await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             self.ollama_sessions[chat_id] = session
-            await query.answer("Persona selected")
+            await query.answer(response)
             return
         if callback_data == "ollama_single_persona_clear":
             session.pop("persona_single", None)
@@ -1998,18 +2008,28 @@ class YouTubeTelegramBot:
                 names = []
                 if cat_key:
                     names = categories.get(cat_key, {}).get("names") or []
+                response = f"Persona {slot} updated"
                 if 0 <= index < len(names):
-                    session[f"persona_{slot_lower}"] = names[index]
+                    chosen = names[index]
+                    current = session.get(f"persona_{slot_lower}")
+                    if current == chosen and session.get(f"persona_{slot_lower}_custom"):
+                        session.pop(f"persona_{slot_lower}", None)
+                        session.pop(f"persona_category_{slot_lower}", None)
+                        session.pop(f"persona_{slot_lower}_custom", None)
+                        session.pop(f"persona_{slot_lower}_intro_pending", None)
+                        response = f"Persona {slot} cleared"
+                    else:
+                        session[f"persona_{slot_lower}"] = chosen
+                        session[f"persona_category_{slot_lower}"] = categories.get(cat_key, {}).get("label")
+                        if slot in ("A", "B"):
+                            session[f"persona_{slot_lower}_custom"] = True
+                            session[f"persona_{slot_lower}_intro_pending"] = True
                     session[f"ai2ai_view_{slot_lower}"] = "persona_list"
-                    session[f"persona_category_{slot_lower}"] = categories.get(cat_key, {}).get("label")
-                    if slot in ("A", "B"):
-                        session[f"persona_{slot_lower}_custom"] = True
-                        session[f"persona_{slot_lower}_intro_pending"] = True
                 models = session.get("models") or []
                 kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
                 await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
                 self.ollama_sessions[chat_id] = session
-                await query.answer(f"Persona {slot} updated")
+                await query.answer(response)
                 return
         if callback_data.startswith("ollama_persona_clear:"):
             parts = callback_data.split(":")
