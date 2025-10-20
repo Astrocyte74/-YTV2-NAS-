@@ -2083,40 +2083,56 @@ class YouTubeTelegramBot:
         if callback_data.startswith("ollama_set_a:"):
             name = callback_data.split(":", 1)[1]
             session["mode"] = "ai-ai"
-            session["ai2ai_model_a"] = name
-            session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
-            logging.info(f"Ollama UI: set model A -> {name}")
+            if session.get("ai2ai_model_a") == name:
+                session.pop("ai2ai_model_a", None)
+                session["active"] = bool(session.get("ai2ai_model_b"))
+                logging.info("Ollama UI: cleared model A")
+            else:
+                session["ai2ai_model_a"] = name
+                session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
+                logging.info(f"Ollama UI: set model A -> {name}")
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
             await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             self.ollama_sessions[chat_id] = session
-            await query.answer("Model A set")
+            await query.answer("Model A updated")
             return
         if callback_data.startswith("ollama_set_b:"):
             name = callback_data.split(":", 1)[1]
             session["mode"] = "ai-ai"
-            session["ai2ai_model_b"] = name
-            if "ai2ai_turns_left" not in session:
-                try:
-                    session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
-                except Exception:
-                    session["ai2ai_turns_left"] = 10
-            session["active"] = True
-            logging.info(f"Ollama UI: set model B -> {name}")
+            if session.get("ai2ai_model_b") == name:
+                session.pop("ai2ai_model_b", None)
+                session["active"] = bool(session.get("ai2ai_model_a"))
+                logging.info("Ollama UI: cleared model B")
+            else:
+                session["ai2ai_model_b"] = name
+                if "ai2ai_turns_left" not in session:
+                    try:
+                        session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                    except Exception:
+                        session["ai2ai_turns_left"] = 10
+                session["active"] = True
+                logging.info(f"Ollama UI: set model B -> {name}")
             models = session.get("models") or []
             kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
             await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             self.ollama_sessions[chat_id] = session
-            await query.answer("Model B set")
+            await query.answer("Model B updated")
             return
         if callback_data.startswith("ollama_model:"):
             model = callback_data.split(":", 1)[1]
             # Always select single model on main picker; AI↔AI uses dedicated flow
-            session["model"] = model
-            session["active"] = True
+            if session.get("model") == model:
+                session.pop("model", None)
+                session["active"] = False
+                logging.info("Ollama UI: cleared single model")
+            else:
+                session["model"] = model
+                session["active"] = True
+                logging.info(f"Ollama UI: set single model -> {model}")
             self.ollama_sessions[chat_id] = session
             await query.edit_message_text(self._ollama_status_text(session), reply_markup=self._build_ollama_models_keyboard(session.get("models") or [], session.get("page", 0), session=session))
-            await query.answer("Model selected")
+            await query.answer("Model updated")
             return
         if callback_data == "ollama_options":
             # Scaffold options UI (mode/stream toggles)
