@@ -10,13 +10,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+try:
+    import requests
+except ImportError:  # pragma: no cover - optional dependency
+    requests = None
+
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 from modules.metrics import metrics
 from modules import ledger, render_probe
 from modules.report_generator import create_report_from_youtube_summarizer
-from modules.summary_variants import merge_summary_variants
+from modules.summary_variants import merge_summary_variants, normalize_variant_id
 from modules.event_stream import emit_report_event
 from modules.services import sync_service
 
@@ -51,6 +56,110 @@ def _format_duration_and_savings(metadata: Dict[str, Any]) -> str:
         savings_str = f"{saved_minutes:02d}:{saved_seconds:02d}"
 
     return f"⏱️ **Duration**: {duration_str} → ~3 min read (⏰ Saves {savings_str})"
+
+
+LOCAL_REPORTS_DIR = Path("./data/reports")
+
+
+def get_dashboard_base() -> Optional[str]:
+    return (
+        os.getenv('DASHBOARD_URL')
+        or os.getenv('POSTGRES_DASHBOARD_URL')
+        or os.getenv('RENDER_DASHBOARD_URL')
+    )
+
+
+def post_dashboard_json(endpoint: str, payload: Dict[str, Any], timeout: int = 30) -> Optional[Dict[str, Any]]:
+    base = get_dashboard_base()
+    if not base or requests is None:
+        return None
+    try:
+        url = f"{base.rstrip('/')}{endpoint}"
+        response = requests.post(url, json=payload, timeout=timeout)
+        if 200 <= response.status_code < 300:
+            return response.json()
+    except Exception as exc:  # pragma: no cover - network call
+        logging.debug("Dashboard POST failed (%s): %s", endpoint, exc)
+    return None
+
+
+def fetch_report_from_dashboard(video_id: str, timeout: int = 8) -> Optional[Dict[str, Any]]:
+    base = get_dashboard_base()
+    if not base or requests is None:
+        return None
+    try:
+        url = f"{base.rstrip('/')}/api/reports/{video_id}"
+        headers: Dict[str, str] = {}
+        token = os.getenv('DASHBOARD_TOKEN')
+        if token:
+            headers['Authorization'] = f"Bearer {token}"
+        response = requests.get(url, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            return response.json()
+    except Exception as exc:  # pragma: no cover - network call
+        logging.debug("Dashboard fetch failed for %s: %s", video_id, exc)
+    return None
+
+
+def load_local_report(video_id: str, reports_dir: Path = LOCAL_REPORTS_DIR) -> Optional[Dict[str, Any]]:
+    if not reports_dir.exists():
+        return None
+    for path in sorted(reports_dir.glob(f"*{video_id}*.json")):
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except Exception:
+            continue
+    return None
+
+
+def extract_variant_text(report: Dict[str, Any], variant: str) -> Optional[str]:
+    target = normalize_variant_id(variant)
+    if not (report and target):
+        return None
+
+    summary_block = report.get('summary') or {}
+
+    variants_list = summary_block.get('variants')
+    if isinstance(variants_list, list):
+        for entry in variants_list:
+            if isinstance(entry, dict):
+                current = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                if current == target:
+                    text = entry.get('text') or entry.get('summary') or entry.get('content')
+                    if isinstance(text, str) and text.strip():
+                        return text
+
+    summary_type = normalize_variant_id(summary_block.get('summary_type') or summary_block.get('type'))
+    if summary_type == target:
+        text = summary_block.get('summary') or summary_block.get('text')
+        if isinstance(text, str) and text.strip():
+            return text
+
+    ingest_variants = report.get('summary_variants')
+    if isinstance(ingest_variants, list):
+        for entry in ingest_variants:
+            if isinstance(entry, dict):
+                current = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
+                if current == target:
+                    text = entry.get('text')
+                    if isinstance(text, str) and text.strip():
+                        return text
+
+    return None
+
+
+def resolve_summary_text(video_id: str, variant: str) -> Optional[str]:
+    report = load_local_report(video_id) or {}
+    text = extract_variant_text(report, variant)
+    if isinstance(text, str) and text.strip():
+        return text
+
+    report = fetch_report_from_dashboard(video_id) or {}
+    text = extract_variant_text(report, variant)
+    if isinstance(text, str) and text.strip():
+        return text
+
+    return None
 
 
 async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None) -> None:

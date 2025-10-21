@@ -38,7 +38,6 @@ from modules.summary_variants import merge_summary_variants, normalize_variant_i
 
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
-from modules.render_api_client import create_client_from_env as create_render_client
 from modules.tts_hub import (
     TTSHubClient,
     LocalTTSUnavailable,
@@ -67,7 +66,6 @@ from modules.telegram.ui.tts import (
     tts_prompt_text as ui_tts_prompt_text,
     tts_voice_label as ui_tts_voice_label,
 )
-from modules import render_probe
 from modules.ollama_client import (
     OllamaClientError,
     get_models as ollama_get_models,
@@ -104,7 +102,6 @@ class YouTubeTelegramBot:
         self.summarizer = None
         self.current_item: Optional[Dict[str, Any]] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        self._render_client = None
         
         # Initialize exporters and ensure directories exist
         Path("./data/reports").mkdir(parents=True, exist_ok=True)
@@ -1436,7 +1433,7 @@ class YouTubeTelegramBot:
                     if not video_id or not variant:
                         await query.answer("No summary text found", show_alert=True)
                         return
-                    text = self._resolve_summary_text(video_id, variant)
+                    text = summary_service.resolve_summary_text(video_id, variant)
 
                 if not text:
                     await query.answer("No summary text available for TTS", show_alert=True)
@@ -1495,7 +1492,7 @@ class YouTubeTelegramBot:
                     status_msg = None
 
                 # Find Key Points text, synthesize if needed
-                kp_text = self._resolve_summary_text(video_id, 'bullet-points')
+                kp_text = summary_service.resolve_summary_text(video_id, 'bullet-points')
                 if not kp_text:
                     # synthesize ephemeral Key Points using available URL
                     url = self._resolve_video_url(video_id, self._current_url())
@@ -1516,14 +1513,14 @@ class YouTubeTelegramBot:
                     return
 
                 # Get metadata for prompt
-                report = self._load_local_report(video_id) or {}
+                report = summary_service.load_local_report(video_id) or {}
                 title = (report.get('title') or report.get('video', {}).get('title') or 'Untitled').strip()
                 language = (report.get('summary', {}) or {}).get('language') or report.get('summary_language') or 'en'
                 difficulty = 'beginner'
                 prompt = self._build_quiz_prompt(title=title, keypoints=kp_text, count=10, types=["multiplechoice","truefalse"], difficulty=difficulty, language=language, explanations=True)
 
                 # Generate quiz via Dashboard
-                gen = self._post_dashboard_json('/api/generate-quiz', {
+                gen = summary_service.post_dashboard_json('/api/generate-quiz', {
                     'prompt': prompt,
                     'model': 'google/gemini-2.5-flash-lite',
                     'fallback_model': 'deepseek/deepseek-v3.1-terminus',
@@ -1544,7 +1541,7 @@ class YouTubeTelegramBot:
                     return
 
                 # Optional categorization
-                cat = self._post_dashboard_json('/api/categorize-quiz', {
+                cat = summary_service.post_dashboard_json('/api/categorize-quiz', {
                     'topic': title,
                     'quiz_content': '\n'.join([i.get('question','') for i in quiz.get('items', [])[:3]])
                 })
@@ -1569,11 +1566,11 @@ class YouTubeTelegramBot:
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 clean_vid = video_id.replace('yt:', '')
                 filename = f"{slug}_{clean_vid}_{ts}.json"
-                saved = self._post_dashboard_json('/api/save-quiz', {'filename': filename, 'quiz': quiz})
+                saved = summary_service.post_dashboard_json('/api/save-quiz', {'filename': filename, 'quiz': quiz})
                 final_name = (saved or {}).get('filename') or filename
 
                 # Reply with links
-                dash = self._get_dashboard_base() or ''
+                dash = summary_service.get_dashboard_base() or ''
                 qz = f"https://quizzernator.onrender.com/?quiz=api:{final_name}&autoplay=1"
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("▶️ Play in Quizzernator", url=qz)],
@@ -1861,13 +1858,6 @@ class YouTubeTelegramBot:
     async def _handle_tts_callback(self, query, callback_data: str):
         await tts_service.handle_callback(self, query, callback_data)
 
-    def _get_dashboard_base(self) -> Optional[str]:
-        return (
-            os.getenv('DASHBOARD_URL')
-            or os.getenv('POSTGRES_DASHBOARD_URL')
-            or os.getenv('RENDER_DASHBOARD_URL')
-        )
-
     # ------------------------- Quiz helpers -------------------------
     def _slugify(self, text: str) -> str:
         text = (text or '').strip().lower()
@@ -1979,111 +1969,6 @@ class YouTubeTelegramBot:
             logging.warning(f"Quiz validation error: {e}")
             return False
 
-    def _post_dashboard_json(self, endpoint: str, payload: dict, timeout: int = 30) -> Optional[dict]:
-        base = self._get_dashboard_base()
-        if not base or requests is None:
-            return None
-        try:
-            url = f"{base.rstrip('/')}{endpoint}"
-            r = requests.post(url, json=payload, timeout=timeout)
-            if r.status_code >= 200 and r.status_code < 300:
-                return r.json()
-        except Exception:
-            return None
-        return None
-
-    def _load_local_report(self, video_id: str) -> Optional[Dict[str, Any]]:
-        reports_dir = Path('./data/reports')
-        for path in sorted(reports_dir.glob(f'*{video_id}*.json')):
-            try:
-                return json.loads(path.read_text(encoding='utf-8'))
-            except Exception:
-                continue
-        return None
-
-    def _extract_variant_text(self, report: Dict[str, Any], variant: str) -> Optional[str]:
-        variant = normalize_variant_id(variant)
-        if not report:
-            return None
-        s = report.get('summary') or {}
-        # Check explicit variants list
-        vs = s.get('variants')
-        if isinstance(vs, list):
-            for entry in vs:
-                if isinstance(entry, dict):
-                    v = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
-                    if v == variant:
-                        txt = entry.get('text') or entry.get('summary') or entry.get('content')
-                        if isinstance(txt, str) and txt.strip():
-                            return txt
-        # Check top-level summary if types match
-        st = normalize_variant_id(s.get('summary_type') or s.get('type'))
-        if st == variant:
-            txt = s.get('summary') or s.get('text')
-            if isinstance(txt, str) and txt.strip():
-                return txt
-        # Try top-level summary_variants (ingest payloads)
-        sv = report.get('summary_variants')
-        if isinstance(sv, list):
-            for entry in sv:
-                if isinstance(entry, dict):
-                    v = normalize_variant_id(entry.get('variant') or entry.get('summary_type') or entry.get('type'))
-                    if v == variant:
-                        txt = entry.get('text')
-                        if isinstance(txt, str) and txt.strip():
-                            return txt
-        return None
-
-    @staticmethod
-    def _extract_summary_text(summary_payload: Any) -> str:
-        """Normalize various summary payload shapes into plain text."""
-        if isinstance(summary_payload, dict):
-            for key in ("summary", "text", "comprehensive", "audio", "content"):
-                value = summary_payload.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-            # Check nested variants list
-            variants = summary_payload.get("variants")
-            if isinstance(variants, list):
-                for entry in variants:
-                    if isinstance(entry, dict):
-                        text = entry.get("text") or entry.get("summary") or entry.get("content")
-                        if isinstance(text, str) and text.strip():
-                            return text.strip()
-        elif isinstance(summary_payload, str):
-            return summary_payload.strip()
-        return ""
-
-    def _fetch_report_from_dashboard(self, video_id: str) -> Optional[Dict[str, Any]]:
-        base = self._get_dashboard_base()
-        if not base or not requests:
-            return None
-        try:
-            url = f"{base.rstrip('/')}/api/reports/{video_id}"
-            headers = {}
-            token = os.getenv('DASHBOARD_TOKEN')
-            if token:
-                headers['Authorization'] = f"Bearer {token}"
-            r = requests.get(url, headers=headers, timeout=8)
-            if r.status_code == 200:
-                return r.json()
-        except Exception:
-            return None
-        return None
-
-    def _resolve_summary_text(self, video_id: str, variant: str) -> Optional[str]:
-        # 1) Local report
-        report = self._load_local_report(video_id)
-        txt = self._extract_variant_text(report or {}, variant)
-        if isinstance(txt, str) and txt.strip():
-            return txt
-        # 2) Dashboard
-        report = self._fetch_report_from_dashboard(video_id)
-        txt = self._extract_variant_text(report or {}, variant)
-        if isinstance(txt, str) and txt.strip():
-            return txt
-        return None
-    
     async def _show_proficiency_selector(self, query, summary_type: str):
         """Show proficiency level selector for language learning"""
         if summary_type == "audio-fr":
@@ -2183,32 +2068,6 @@ class YouTubeTelegramBot:
         keyboard = [row for row in keyboard if row]
 
         return InlineKeyboardMarkup(keyboard) if keyboard else None
-
-    def _get_render_client(self):
-        if self._render_client:
-            return self._render_client
-        try:
-            client = create_render_client()
-            self._render_client = client
-            return client
-        except Exception as exc:
-            logging.debug(f"Render client not available: {exc}")
-            return None
-
-    def _upload_audio_to_render(self, content_id: str, audio_path: Path) -> None:
-        client = self._get_render_client()
-        if not client:
-            return
-
-        if not audio_path.exists():
-            logging.warning(f"⚠️ Render upload skipped; audio file missing: {audio_path}")
-            return
-
-        try:
-            client.upload_audio_file(audio_path, content_id)
-            logging.info(f"✅ Uploaded audio to Render for {content_id}")
-        except Exception as exc:
-            logging.warning(f"⚠️ Render audio upload failed for {content_id}: {exc}")
 
     async def _send_long_message(self, query, header_text: str, summary_text: str, reply_markup=None):
         """Send long messages by splitting into multiple Telegram messages if needed."""
