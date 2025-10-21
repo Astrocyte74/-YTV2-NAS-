@@ -11,6 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 from modules.metrics import metrics
+from modules.services import sync_service
 from modules.tts_hub import LocalTTSUnavailable, TTSHubClient
 from modules.tts_queue import enqueue as enqueue_tts_job
 from youtube_summarizer import YouTubeSummarizer
@@ -382,7 +383,19 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
         if content_identifier and ':' not in content_identifier:
             content_identifier = f"yt:{content_identifier}"
 
-        handler._sync_audio_to_targets(normalized_id, audio_path, ledger_id, summary_type)
+        sync_result = sync_service.sync_audio_variant(
+            normalized_id,
+            summary_type,
+            audio_path,
+            ledger_id=ledger_id,
+        )
+        if not sync_result.get("success"):
+            logging.warning(
+                "⚠️ Audio dual-sync failed for %s:%s (%s)",
+                normalized_id,
+                summary_type,
+                sync_result.get("error"),
+            )
         if content_identifier:
             handler._upload_audio_to_render(content_identifier, audio_path)
 

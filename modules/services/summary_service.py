@@ -21,6 +21,38 @@ from modules.event_stream import emit_report_event
 from modules.services import sync_service
 
 
+def _format_duration_and_savings(metadata: Dict[str, Any]) -> str:
+    """Return formatted duration with estimated summary time savings."""
+    duration = int(metadata.get('duration') or 0)
+    if not duration:
+        return "⏱️ **Duration**: Unknown"
+
+    hours = duration // 3600
+    minutes = (duration % 3600) // 60
+    seconds = duration % 60
+
+    if hours > 0:
+        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    else:
+        duration_str = f"{minutes:02d}:{seconds:02d}"
+
+    reading_time_seconds = 180  # 3 minutes average summary read
+    if duration <= reading_time_seconds:
+        return f"⏱️ **Duration**: {duration_str}"
+
+    time_saved = duration - reading_time_seconds
+    saved_hours = time_saved // 3600
+    saved_minutes = (time_saved % 3600) // 60
+    saved_seconds = time_saved % 60
+
+    if saved_hours > 0:
+        savings_str = f"{saved_hours:02d}:{saved_minutes:02d}:00"
+    else:
+        savings_str = f"{saved_minutes:02d}:{saved_seconds:02d}"
+
+    return f"⏱️ **Duration**: {duration_str} → ~3 min read (⏰ Saves {savings_str})"
+
+
 async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None) -> None:
     try:
         video_info = result.get('metadata', {})
@@ -33,7 +65,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             or video_info.get('subreddit')
             or 'Unknown source'
         )
-        duration_info = handler._format_duration_and_savings(video_info)
+        duration_info = _format_duration_and_savings(video_info)
 
         universal_id = result.get('id') or video_info.get('video_id') or handler._current_content_id() or ''
         video_id = handler._normalize_content_id(universal_id)

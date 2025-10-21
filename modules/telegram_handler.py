@@ -38,7 +38,6 @@ from modules.summary_variants import merge_summary_variants, normalize_variant_i
 
 from youtube_summarizer import YouTubeSummarizer
 from llm_config import llm_config
-from nas_sync import upload_to_render, dual_sync_upload
 from modules.render_api_client import create_client_from_env as create_render_client
 from modules.tts_hub import (
     TTSHubClient,
@@ -2125,39 +2124,6 @@ class YouTubeTelegramBot:
 
     async def _prompt_tts_provider(self, query, session_payload: Dict[str, Any], title: str) -> None:
         await tts_service.prompt_provider(self, query, session_payload, title)
-    def _format_duration_and_savings(self, metadata: Dict) -> str:
-        """Format video duration and calculate time savings from summary."""
-        duration = metadata.get('duration', 0)
-        
-        if duration:
-            # Format original duration
-            hours = duration // 3600
-            minutes = (duration % 3600) // 60
-            seconds = duration % 60
-            
-            if hours > 0:
-                duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            else:
-                duration_str = f"{minutes:02d}:{seconds:02d}"
-            
-            # Calculate time savings (typical summary reading time is 2-3 minutes)
-            reading_time_seconds = 180  # 3 minutes average
-            if duration > reading_time_seconds:
-                time_saved = duration - reading_time_seconds
-                saved_hours = time_saved // 3600
-                saved_minutes = (time_saved % 3600) // 60
-                
-                if saved_hours > 0:
-                    savings_str = f"{saved_hours:02d}:{saved_minutes:02d}:00"
-                else:
-                    savings_str = f"{saved_minutes:02d}:{time_saved % 60:02d}"
-                
-                return f"⏱️ **Duration**: {duration_str} → ~3 min read (⏰ Saves {savings_str})"
-            else:
-                return f"⏱️ **Duration**: {duration_str}"
-        else:
-            return f"⏱️ **Duration**: Unknown"
-    
     def _extract_youtube_url(self, text: str) -> Optional[str]:
         """Extract YouTube URL from text."""
         match = self.youtube_url_pattern.search(text)
@@ -2243,78 +2209,6 @@ class YouTubeTelegramBot:
             logging.info(f"✅ Uploaded audio to Render for {content_id}")
         except Exception as exc:
             logging.warning(f"⚠️ Render audio upload failed for {content_id}: {exc}")
-
-    def _sync_audio_to_targets(self, video_id: str, audio_path: Path, ledger_id: Optional[str], summary_type: str) -> None:
-        try:
-            if not video_id:
-                logging.warning("⚠️ Missing video_id for audio sync")
-                return
-            if not audio_path.exists():
-                logging.warning(f"⚠️ Audio file missing for sync: {audio_path}")
-                return
-
-            logging.info("🗄️ SYNC: Syncing SQLite database (contains new record + audio metadata)...")
-
-            if ledger_id:
-                entry = ledger.get(ledger_id, summary_type)
-                if entry:
-                    entry["mp3"] = str(audio_path)
-                    entry["synced"] = True
-                    entry["last_synced"] = datetime.now().isoformat()
-                    ledger.upsert(ledger_id, summary_type, entry)
-                    logging.info(f"📊 Updated ledger: synced=True, mp3={audio_path.name}")
-            else:
-                logging.warning("⚠️ ledger_id unknown; skipping ledger mp3 update")
-
-            content_id = f"yt:{video_id}"
-            reports_dir = Path("/app/data/reports")
-            all_reports = list(reports_dir.glob("*.json"))
-            logging.info(f"🔍 Looking for pattern '*{video_id}*.json' in {reports_dir}")
-            logging.info(f"🔍 Found {len(all_reports)} JSON files in reports dir")
-
-            report_files = []
-            for file_path in all_reports:
-                fname = file_path.name
-                if (
-                    fname == f"{video_id}.json"
-                    or fname.endswith(f"_{video_id}.json")
-                    or f"_{video_id}_" in fname
-                    or (video_id in fname and len(video_id) >= 8)
-                ):
-                    report_files.append(file_path)
-
-            logging.info(f"🔍 Pattern matching complete. Found {len(report_files)} matches.")
-
-            if not report_files:
-                logging.error(f"❌ Could not find JSON report for video_id {video_id}")
-                logging.error(f"   Expected file patterns: {video_id}.json, *_{video_id}.json, *{video_id}*.json")
-                logging.error("   Will skip dual-sync for this video to avoid syncing wrong content")
-                return
-
-            report_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            logging.info(f"🔍 Found {len(report_files)} files matching video_id {video_id}")
-            for rf in report_files[:3]:
-                logging.info(f"🔍   - {rf.name}")
-
-            report_path = report_files[0]
-            logging.info(f"✅ Using report: {report_path.name}")
-
-            sync_results = dual_sync_upload(report_path, audio_path)
-            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-
-            if sqlite_ok or postgres_ok:
-                targets = []
-                if sqlite_ok:
-                    targets.append("SQLite")
-                if postgres_ok:
-                    targets.append("PostgreSQL")
-                logging.info(f"✅ CONTENT+AUDIO SYNCED: 📊+🎵 → {content_id} (targets: {', '.join(targets)})")
-            else:
-                logging.warning(f"⚠️ Content+audio sync failed for {content_id}")
-
-        except Exception as sync_e:
-            logging.error(f"❌ Audio sync error: {sync_e}")
 
     async def _send_long_message(self, query, header_text: str, summary_text: str, reply_markup=None):
         """Send long messages by splitting into multiple Telegram messages if needed."""

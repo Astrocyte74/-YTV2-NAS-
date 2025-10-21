@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 PathLike = Union[str, Path]
+REPORTS_DIR = Path("/app/data/reports")
 
 
 def _to_path(value: Optional[PathLike]) -> Optional[Path]:
@@ -105,3 +106,77 @@ def update_ledger_after_sync(
 
     ledger.upsert(video_id, summary_type, entry)
     return entry
+
+
+def _find_report_for_video(video_id: str, preferred: Optional[Path] = None) -> Optional[Path]:
+    """Locate the most recent report JSON for a given video identifier."""
+    if preferred and preferred.exists():
+        return preferred
+
+    if not REPORTS_DIR.exists():
+        logger.warning("⚠️ Reports directory missing: %s", REPORTS_DIR)
+        return None
+
+    matches: List[Path] = []
+    for path in REPORTS_DIR.glob("*.json"):
+        name = path.name
+        if (
+            name == f"{video_id}.json"
+            or name.endswith(f"_{video_id}.json")
+            or f"_{video_id}_" in name
+            or (video_id in name and len(video_id) >= 8)
+        ):
+            matches.append(path)
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return matches[0]
+
+
+def sync_audio_variant(
+    video_id: str,
+    summary_type: str,
+    audio_path: PathLike,
+    *,
+    ledger_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Sync audio variant alongside existing content metadata."""
+    audio = _to_path(audio_path)
+    if audio is None or not audio.exists():
+        logger.warning("⚠️ Audio sync skipped; file missing for %s:%s (%s)", video_id, summary_type, audio_path)
+        return {"success": False, "error": "missing-audio", "targets": []}
+
+    ledger_key = ledger_id or (f"yt:{video_id}" if video_id else video_id)
+    ledger_entry = ledger.get(ledger_key, summary_type) if ledger_key else None
+
+    preferred_json = None
+    if ledger_entry:
+        candidate = ledger_entry.get("json")
+        if candidate:
+            preferred_json = Path(candidate)
+
+    report_path = _find_report_for_video(video_id, preferred_json)
+    if not report_path:
+        logger.error("❌ Could not locate JSON report for %s:%s", video_id, summary_type)
+        return {"success": False, "error": "missing-report", "targets": []}
+
+    outcome = run_dual_sync(report_path, audio, label=f"{video_id}:{summary_type}")
+
+    if ledger_key:
+        extra_fields: Dict[str, Any] = {'json': str(report_path)}
+        update_ledger_after_sync(
+            ledger_key,
+            summary_type,
+            targets=outcome["targets"],
+            audio_path=audio,
+            extra_fields=extra_fields,
+        )
+
+    return {
+        "success": outcome["success"],
+        "error": outcome.get("error"),
+        "targets": outcome["targets"],
+        "report_path": str(report_path),
+    }
