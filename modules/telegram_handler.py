@@ -53,6 +53,11 @@ from modules.telegram.ui.formatting import (
 )
 from modules.telegram.handlers.captions import build_ai2ai_audio_caption
 from modules.telegram.ui.keyboards import build_ollama_models_keyboard as ui_build_models_keyboard
+from modules.telegram.ui.summary import (
+    build_summary_keyboard as ui_build_summary_keyboard,
+    existing_variants_message as ui_existing_variants_message,
+    friendly_variant_label as ui_friendly_variant_label,
+)
 from modules.telegram.ui.tts import (
     build_local_failure_keyboard as ui_build_local_failure_keyboard,
     build_tts_catalog_keyboard as ui_build_tts_catalog_keyboard,
@@ -239,69 +244,29 @@ class YouTubeTelegramBot:
         return (self.current_item or {}).get("url")
 
     def _friendly_variant_label(self, variant: str) -> str:
-        base, _, suffix = variant.partition(':')
-        base_label = self.VARIANT_LABELS.get(base, base.replace('-', ' ').title())
-        if suffix:
-            suffix_clean = suffix.replace('-', ' ').replace('_', ' ').title()
-            return f"{base_label} ({suffix_clean})"
-        return base_label
+        return ui_friendly_variant_label(variant, self.VARIANT_LABELS)
 
-    def _build_summary_keyboard(self, existing_variants: Optional[List[str]] = None, video_id: Optional[str] = None):
-        existing_variants = existing_variants or []
-        existing_bases = {variant.split(':', 1)[0] for variant in existing_variants}
-
-        def label_for(variant_key: str) -> str:
-            label = self.VARIANT_LABELS.get(variant_key, variant_key.replace('-', ' ').title())
-            return f"{label} ✅" if variant_key in existing_bases else label
-
-        keyboard = [
-            [
-                InlineKeyboardButton(label_for('comprehensive'), callback_data="summarize_comprehensive"),
-                InlineKeyboardButton(label_for('bullet-points'), callback_data="summarize_bullet-points")
-            ],
-            [
-                InlineKeyboardButton(label_for('key-insights'), callback_data="summarize_key-insights"),
-                InlineKeyboardButton(label_for('audio'), callback_data="summarize_audio")
-            ],
-            [
-                InlineKeyboardButton(label_for('audio-fr'), callback_data="summarize_audio-fr"),
-                InlineKeyboardButton(label_for('audio-es'), callback_data="summarize_audio-es")
-            ]
-        ]
-
-        if existing_bases and video_id:
+    def _build_summary_keyboard(
+        self,
+        existing_variants: Optional[List[str]] = None,
+        video_id: Optional[str] = None,
+    ) -> InlineKeyboardMarkup:
+        dashboard_url = None
+        if video_id:
             dashboard_url = (
                 os.getenv('DASHBOARD_URL')
                 or os.getenv('POSTGRES_DASHBOARD_URL')
                 or 'https://ytv2-dashboard-postgres.onrender.com'
             )
-            if dashboard_url:
-                report_id_encoded = urllib.parse.quote(video_id, safe='')
-                keyboard.append([
-                    InlineKeyboardButton("📄 Open summary", url=f"{dashboard_url}#report={report_id_encoded}")
-                ])
-
-        return InlineKeyboardMarkup(keyboard)
+        return ui_build_summary_keyboard(
+            self.VARIANT_LABELS,
+            existing_variants=existing_variants,
+            video_id=video_id,
+            dashboard_url=dashboard_url,
+        )
 
     def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
-        if not variants:
-            prompts = {
-                "youtube": "🎬 Processing YouTube video...\n\nChoose your summary type:",
-                "reddit": "🧵 Processing Reddit thread...\n\nChoose your summary type:",
-                "web": "📰 Processing web article...\n\nChoose your summary type:",
-            }
-            return prompts.get(source, prompts["youtube"])
-
-        variants_sorted = sorted(variants)
-        noun = {
-            "youtube": "video",
-            "reddit": "thread",
-            "web": "article",
-        }.get(source, "item")
-        lines = [f"✅ Existing summaries for this {noun}:"]
-        lines.extend(f"• {self._friendly_variant_label(variant)}" for variant in variants_sorted)
-        lines.append("\nRe-run a variant below or open the summary card.")
-        return "\n".join(lines)
+        return ui_existing_variants_message(self.VARIANT_LABELS, content_id, variants, source)
 
     async def _send_existing_summary_notice(self, query, video_id: str, summary_type: str):
         source = self._current_source()
