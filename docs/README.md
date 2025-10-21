@@ -20,7 +20,6 @@
 - After updating `.env.nas` (e.g., new Reddit refresh token), recreate the container so env vars reload.
 - Helper scripts:
   - `tools/setup_postgres_schema.py` — schema/grants bootstrapping
-  - `tools/backfill_postgres_from_reports.py --resume --audio` — resume-safe ingest from JSON
   - `tools/debug_audio_variant.py` — inspect `content.has_audio` and `<audio>` HTML
   - `tools/test_reddit_connection.py`, `tools/debug_reddit_env.py` — Reddit diagnostics
 

@@ -143,7 +143,6 @@ See `POSTGRES_UPSERT_GUIDE.md` for DDL, indexes, role grants, and UPSERT example
 | Bootstrap schema | `python tools/setup_postgres_schema.py` |
 | Connectivity test | `python tools/test_postgres_connect.py` |
 | Insert smoke test | `python tools/test_upsert_content.py <video_id>` |
-| Resume-safe report ingest | `python tools/backfill_postgres_from_reports.py --resume --audio` |
 | Inspect Postgres state | `python tools/debug_audio_variant.py <video_id>` |
 | Clean legacy prefixes | `python tools/strip_yt_prefix_in_summaries.py` |
 | Remove test data | `python tools/delete_postgres_video.py <video_id>` |
@@ -180,6 +179,7 @@ YTV2-NAS/
 ├── modules/                 # Processing utilities
 │   ├── ledger.py         # Duplicate prevention
 │   ├── render_probe.py   # Dashboard connectivity  
+│   ├── services/         # Summary/TTS/Ollama service layer
 │   └── telegram_handler.py # Bot interaction logic
 ├── tools/                  # Diagnostics & one-off scripts (see tools/README.md)
 ├── data/                   # Runtime reports/transcripts (ignored by Git)

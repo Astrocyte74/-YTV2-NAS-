@@ -124,7 +124,7 @@ This is the **processing engine** of the YTV2 hybrid architecture:
 2. **Processing** → Video downloaded, transcript fetched, summaries generated (multi-language aware)
 3. **Report Generation** → Structured JSON with summary variants & language metadata
 4. **Audio Export** → TTS audio generated, chunked if necessary, merged via ffmpeg
-5. **Dashboard Sync** → Reports/audio upserted to Postgres ingest (`/ingest/report`, `/ingest/audio`)
+5. **Dashboard Sync** → `nas_sync.dual_sync_upload` pushes reports/audio through `PostgresWriter` (SQLite path stays disabled when `POSTGRES_ONLY=true`)
 6. **User Access** → Dashboard displays new cards (WebSocket/SSE refresh recommended)
 
 ### File Structure
@@ -136,6 +136,8 @@ This is the **processing engine** of the YTV2 hybrid architecture:
 - `export_utils.py` - Content export utilities
 - `llm_config.py` - AI model configuration & provider fallbacks
 - `modules/` - Processing utilities and helpers
+  - `modules/services/summary_service.py` consolidates summary orchestration and reprocess logic
+  - `modules/services/tts_service.py`, `modules/services/ollama_service.py` keep provider workflows modular
 - `tools/` - Diagnostics/test scripts (see `tools/README.md`)
 - `data/` - Runtime reports/transcripts (ignored by Git, documented in `data/README.md`)
 - `exports/` - Generated audio files (ignored by Git)
@@ -159,14 +161,14 @@ OPENAI_API_KEY=your_key_here
 ANTHROPIC_API_KEY=your_key_here
 OPENROUTER_API_KEY=your_key_here
 
-# Dashboard Integration (Postgres ingest)
-POSTGRES_DASHBOARD_URL=https://your-dashboard.onrender.com
-INGEST_TOKEN=your_ingest_token_here
-SYNC_SECRET=your_shared_secret_here  # legacy webhook/delete actions
+# Postgres writer (direct ingest)
+DATABASE_URL=postgresql://user:pass@host:5432/ytv2?sslmode=require
+AUDIO_PUBLIC_BASE=https://your-render-host  # builds public MP3 links
+POSTGRES_ONLY=true  # disables legacy SQLite uploads
+SQLITE_SYNC_ENABLED=false  # keep false unless doing forensics
 
-# Feature Flags
-POSTGRES_ONLY=true
-SQLITE_SYNC_ENABLED=false
+# Optional legacy callbacks (Render API)
+SYNC_SECRET=your_shared_secret_here  # only needed if hitting Render /api/upload-audio
 ```
 
 #### Optional Configuration

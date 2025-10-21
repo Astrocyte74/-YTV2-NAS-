@@ -11,7 +11,6 @@ Utility scripts to assist with operations, testing, and migration tasks. Run the
 
 ## Backfill & Diagnostics
 
-- `backfill_postgres_from_reports.py --resume --audio` – Replays JSON reports into Postgres (resume-safe; optional audio insert).
 - `debug_audio_variant.py` – Prints `content.has_audio` and `<audio>` HTML for a given `video_id`.
 - `list_audio_rows.py` – Lists summary rows matching a `video_id` substring (useful for debugging legacy prefixes).
 - `strip_yt_prefix_in_summaries.py` – Cleans older `yt:`-prefixed `video_id` rows.
