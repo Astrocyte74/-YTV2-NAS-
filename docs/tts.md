@@ -37,7 +37,7 @@
 4. When you click a voice, the bot posts a “Generating …” status bubble, then replies with the audio and updates the bubble to “Generated …”. The picker remains open for more tests.
 5. Delivery and sync:
    - One‑off preview (`/tts`): sends audio with a compact caption and does NOT sync to DB/Render.
-   - Summary audio (YouTube flow): sends audio and syncs to Postgres + uploads to Render, updating dashboard playback.
+  - Summary audio (YouTube flow): sends audio and syncs to Postgres (dashboard playback reads from the synced exports plus Postgres metadata).
 
 ## Modes and Captions
 
@@ -49,7 +49,7 @@
 - Summary Audio (YouTube flow)
   - Mode key: `summary_audio`
   - Caption: `Audio Summary: {Title} • {voice}` on the first line; provider on the next line.
-  - DB/Render upload enabled (controls appear on dashboard; Listen chips stream the saved MP3).
+  - Postgres ingest enabled (controls appear on the dashboard; Listen chips stream the saved MP3 from the exports share).
 
 ## Favorites Resolution and Defaults
 

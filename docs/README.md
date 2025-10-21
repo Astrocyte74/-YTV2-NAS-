@@ -4,7 +4,7 @@
 - Unified pipeline supports YouTube videos, Reddit threads, and generic web articles (layered extractor with Readability/Trafilatura fallbacks).
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
-- Audio variants are generated on the NAS, upserted to Postgres (`content.has_audio=true`), and uploaded to Render via `/api/upload-audio` so Listen chips stream immediately.
+ - Audio variants are generated on the NAS, flagged in Postgres (`content.has_audio=true`), and then pulled by the dashboard from the synced exports share so Listen chips stream immediately.
 
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
@@ -20,7 +20,7 @@
 - After updating `.env.nas` (e.g., new Reddit refresh token), recreate the container so env vars reload.
 - Helper scripts:
   - `tools/setup_postgres_schema.py` — schema/grants bootstrapping
-  - `tools/debug_audio_variant.py` — inspect `content.has_audio` and `<audio>` HTML
+  - `tools/debug_audio_variant.py` — inspect `content.has_audio` and `<audio>` HTML served from Postgres exports
   - `tools/test_reddit_connection.py`, `tools/debug_reddit_env.py` — Reddit diagnostics
 
 ## Dashboard Notes (Postgres-only)
