@@ -349,3 +349,22 @@ Prompts were refined for better structure and TTS quality:
 # Ollama (Local LLM via Hub)
 
 This NAS connects to Ollama running on your Mac through the same hub used for TTS. Set `TTSHUB_API_BASE` on the NAS; no `OLLAMA_URL` needed on the NAS. See docs/ollama.md for endpoints, streaming, and Telegram usage.
+
+### AI↔AI Audio Recap: Gendered Voice Selection
+
+When generating AI↔AI audio recaps with the local TTS hub, personas can include a gender suffix “(M)” or “(F)” (e.g., `Sun Tzu (M)`, `Cleopatra (F)`). The bot strips the suffix for display/prompts and uses it to select voices.
+
+- Enable parsing: `OLLAMA_AI2AI_TTS_GENDER_FROM_PERSONA=1` (default)
+- Env selectors:
+  - `OLLAMA_AI2AI_TTS_VOICE_MALE` / `OLLAMA_AI2AI_TTS_VOICE_FEMALE`
+  - `OLLAMA_AI2AI_TTS_VOICE_A` / `OLLAMA_AI2AI_TTS_VOICE_B` (used when gender not detected)
+  - Values accept either a favorite slug (e.g., `favorite--my_voice`) or a catalog `voiceId`.
+- Resolution precedence (per speaker):
+  1) If gender detected: `…_VOICE_MALE/FEMALE`
+  2) First matching favorite by gender
+  3) First matching catalog voice by gender
+  4) If gender unknown: `…_VOICE_A/B`
+  5) Last resort: generic favorites/catalog
+- Collision rule: avoids assigning the same `(engine, voiceId)` to both speakers; logs any skip/choice.
+
+Display and prompts strip the “(M)/(F)” suffix for clarity (status text, persona pickers, system prompts, audio intros, captions, and transcripts).

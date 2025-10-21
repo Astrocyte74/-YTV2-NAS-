@@ -1107,6 +1107,33 @@ class YouTubeTelegramBot:
 
         return categories
 
+    # ------------------------- Persona helpers (gender/display) -------------------------
+    def _persona_parse(self, name: Optional[str]) -> Tuple[str, Optional[str]]:
+        """Parse a persona name with optional (M)/(F) suffix.
+
+        Returns (display_name, gender) where gender is 'male'/'female' or None.
+        """
+        raw = (name or "").strip()
+        if not raw:
+            return "", None
+        m = re.search(r"\s*\(([MF])\)\s*$", raw, flags=re.IGNORECASE)
+        if not m:
+            return raw, None
+        gender = m.group(1).upper()
+        display = re.sub(r"\s*\([MFmf]\)\s*$", "", raw).strip()
+        return display, ("male" if gender == "M" else "female")
+
+    def _update_persona_session_fields(self, session: Dict[str, Any], slot: str, name: Optional[str]) -> None:
+        """Update session with display and gender for a given slot ('a' or 'b' or 'single')."""
+        slot = (slot or "").lower()
+        display, gender = self._persona_parse(name)
+        if slot in ("a", "b"):
+            session[f"persona_{slot}_display"] = display or name or ""
+            session[f"persona_{slot}_gender"] = gender
+        elif slot == "single":
+            session["persona_single_display"] = display or name or ""
+            session["persona_single_gender"] = gender
+
     def _ollama_persona_pool(self) -> List[str]:
         categories = self._ollama_persona_categories()
         pool: List[str] = []
@@ -1211,8 +1238,10 @@ class YouTubeTelegramBot:
         return available[0]
 
     def _ollama_persona_system_prompt(self, persona: str, intro_target: str, intro_pending: bool) -> str:
-        persona = persona or "the assistant"
-        content = f"You are {persona}. Respond concisely and stay in character."
+        # Strip gender suffix for natural prompts
+        display, _ = self._persona_parse(persona or "the assistant")
+        persona_clean = display or (persona or "the assistant")
+        content = f"You are {persona_clean}. Respond concisely and stay in character."
         if intro_pending:
             if intro_target == "user":
                 content += " This is your first reply to the user: clearly introduce yourself in character and finish by inviting the user to introduce themselves."
@@ -1279,7 +1308,8 @@ class YouTubeTelegramBot:
         selected = (session or {}).get("persona_single")
         row: List[InlineKeyboardButton] = []
         for idx, name in subset:
-            label = name
+            # Use display-only label (strip gender suffix)
+            label, _gender = self._persona_parse(name)
             if len(label) > 28:
                 label = f"{label[:25]}…"
             if selected == name:
@@ -1372,7 +1402,8 @@ class YouTubeTelegramBot:
         selected = (session or {}).get(f"persona_{slot_lower}")
         row: List[InlineKeyboardButton] = []
         for idx, name in subset:
-            label = name
+            # Use display-only label (strip gender suffix)
+            label, _gender = self._persona_parse(name)
             if len(label) > 28:
                 label = f"{label[:25]}…"
             if selected == name:
@@ -1416,9 +1447,14 @@ class YouTubeTelegramBot:
                 rand_a, rand_b = self._ollama_persona_random_pair()
                 session.setdefault('persona_a', rand_a)
                 session.setdefault('persona_b', rand_b)
+                # Populate derived fields
+                self._update_persona_session_fields(session, 'a', session.get('persona_a'))
+                self._update_persona_session_fields(session, 'b', session.get('persona_b'))
             defaults = self._ollama_persona_defaults()
             pa = session.get('persona_a') or defaults[0]
             pb = session.get('persona_b') or defaults[1]
+            pa_disp, _ = self._persona_parse(pa)
+            pb_disp, _ = self._persona_parse(pb)
             categories = self._ollama_persona_categories()
             cat_a = session.get("persona_category_a")
             if not cat_a:
@@ -1430,8 +1466,8 @@ class YouTubeTelegramBot:
                 cat_key_b = session.get("ai2ai_persona_category_b")
                 if cat_key_b:
                     cat_b = categories.get(cat_key_b, {}).get("label")
-            line_a = f"A: {a} · {pa}"
-            line_b = f"B: {b} · {pb}"
+            line_a = f"A: {a} · {pa_disp}"
+            line_b = f"B: {b} · {pb_disp}"
             if cat_a:
                 line_a = f"{line_a} ({cat_a})"
             if cat_b:
@@ -1447,7 +1483,8 @@ class YouTubeTelegramBot:
             persona_single = session.get("persona_single")
             if persona_single:
                 cat_single = session.get("persona_single_category")
-                persona_line = f"Persona: {persona_single}"
+                single_disp, _ = self._persona_parse(persona_single)
+                persona_line = f"Persona: {single_disp}"
                 if cat_single:
                     persona_line = f"{persona_line} ({cat_single})"
                 parts.append(persona_line)
@@ -1918,20 +1955,22 @@ class YouTubeTelegramBot:
                         return await self._app.bot.send_message(chat_id=self._chat, text=text)
                 return M(self._app, chat_id)
         u = U(self.application, chat_id)
+        pa_disp, _ = self._persona_parse(persona_a)
         a_text = await self._ollama_stream_chat(
             u,
             model_a,
             a_messages,
-            label=f"{persona_a} ({model_a}){turn_suffix}",
+            label=f"{pa_disp} ({model_a}){turn_suffix}",
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_a"] = a_text
-        # Append transcript for TTS recap
+        # Append transcript for TTS recap (strip gender suffix in persona)
         try:
             tr = session.get("ai2ai_transcript")
             if not isinstance(tr, list):
                 tr = []
-            tr.append({"speaker": "A", "persona": persona_a, "model": model_a, "text": a_text or ""})
+            pa_disp, _ = self._persona_parse(persona_a)
+            tr.append({"speaker": "A", "persona": pa_disp, "model": model_a, "text": a_text or ""})
             session["ai2ai_transcript"] = tr[-200:]
         except Exception:
             pass
@@ -1947,11 +1986,12 @@ class YouTubeTelegramBot:
             },
             {"role": "user", "content": f"Respond to {persona_a}'s statement: {a_text[:800]}"},
         ]
+        pb_disp, _ = self._persona_parse(persona_b)
         b_text = await self._ollama_stream_chat(
             u,
             model_b,
             b_messages,
-            label=f"{persona_b} ({model_b}){turn_suffix}",
+            label=f"{pb_disp} ({model_b}){turn_suffix}",
             cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
         )
         session["ai2ai_last_b"] = b_text
@@ -1959,7 +1999,8 @@ class YouTubeTelegramBot:
             tr = session.get("ai2ai_transcript")
             if not isinstance(tr, list):
                 tr = []
-            tr.append({"speaker": "B", "persona": persona_b, "model": model_b, "text": b_text or ""})
+            pb_disp, _ = self._persona_parse(persona_b)
+            tr.append({"speaker": "B", "persona": pb_disp, "model": model_b, "text": b_text or ""})
             session["ai2ai_transcript"] = tr[-200:]
         except Exception:
             pass
@@ -2258,6 +2299,8 @@ class YouTubeTelegramBot:
                         session.pop(f"persona_category_{slot_lower}", None)
                         session.pop(f"persona_{slot_lower}_custom", None)
                         session.pop(f"persona_{slot_lower}_intro_pending", None)
+                        session.pop(f"persona_{slot_lower}_display", None)
+                        session.pop(f"persona_{slot_lower}_gender", None)
                         response = f"Persona {slot} cleared"
                     else:
                         session[f"persona_{slot_lower}"] = chosen
@@ -2265,6 +2308,8 @@ class YouTubeTelegramBot:
                         if slot in ("A", "B"):
                             session[f"persona_{slot_lower}_custom"] = True
                             session[f"persona_{slot_lower}_intro_pending"] = True
+                        # Store display and gender fields
+                        self._update_persona_session_fields(session, slot_lower, chosen)
                     session[f"ai2ai_view_{slot_lower}"] = "persona_list"
                 models = session.get("models") or []
                 kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
@@ -2282,6 +2327,9 @@ class YouTubeTelegramBot:
                 if slot in ("A", "B"):
                     session.pop(f"persona_{slot_lower}_custom", None)
                     session.pop(f"persona_{slot_lower}_intro_pending", None)
+                # Clear derived fields
+                session.pop(f"persona_{slot_lower}_display", None)
+                session.pop(f"persona_{slot_lower}_gender", None)
                 models = session.get("models") or []
                 kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
                 await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
@@ -2503,6 +2551,10 @@ class YouTubeTelegramBot:
                     "ai2ai_active",
                     "persona_a",
                     "persona_b",
+                    "persona_a_display",
+                    "persona_b_display",
+                    "persona_a_gender",
+                    "persona_b_gender",
                     "persona_category_a",
                     "persona_category_b",
                     "persona_a_custom",
@@ -2557,6 +2609,9 @@ class YouTubeTelegramBot:
                     rand_a, rand_b = self._ollama_persona_random_pair()
                     session.setdefault("persona_a", rand_a)
                     session.setdefault("persona_b", rand_b)
+                # Populate derived fields for display/gender
+                self._update_persona_session_fields(session, 'a', session.get('persona_a'))
+                self._update_persona_session_fields(session, 'b', session.get('persona_b'))
                 session.setdefault("persona_a_custom", False)
                 session.setdefault("persona_b_custom", False)
                 session.setdefault("persona_a_intro_pending", False)
@@ -5009,8 +5064,10 @@ class YouTubeTelegramBot:
 
     def _ai2ai_audio_caption(self, session: Dict[str, Any]) -> str:
         defaults = self._ollama_persona_defaults()
-        a = session.get("persona_a") or defaults[0]
-        b = session.get("persona_b") or defaults[1]
+        a_raw = session.get("persona_a") or defaults[0]
+        b_raw = session.get("persona_b") or defaults[1]
+        a, _ = self._persona_parse(a_raw)
+        b, _ = self._persona_parse(b_raw)
         model_a = session.get("ai2ai_model_a") or session.get("model") or "?"
         model_b = session.get("ai2ai_model_b") or session.get("model") or "?"
         lines = [
@@ -5092,27 +5149,170 @@ class YouTubeTelegramBot:
             # Last resort: pass through as given, assuming it's a favorite slug
             return (raw, None, None)
 
-        voice_a_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_A", "").strip()
-        voice_b_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_B", "").strip()
-        if use_local and not (voice_a_raw and voice_b_raw):
-            raise RuntimeError("missing OLLAMA_AI2AI_TTS_VOICE_A/B")
+        # Gender-aware voice selection for local hub
         fav_a, vid_a, eng_a = (None, None, None)
         fav_b, vid_b, eng_b = (None, None, None)
+        selection_log: List[str] = []
         if use_local and client:
-            fav_a, vid_a, eng_a = await _resolve_local(client, voice_a_raw)
-            fav_b, vid_b, eng_b = await _resolve_local(client, voice_b_raw)
-            if not (fav_a or vid_a) or not (fav_b or vid_b):
-                raise RuntimeError("could not resolve A/B voices on hub")
+            try:
+                # Fetch favorites and catalog once
+                favs: List[Dict[str, Any]] = []
+                try:
+                    favs = await client.fetch_favorites(tag="ai2ai")
+                except Exception:
+                    favs = []
+                if not favs:
+                    try:
+                        favs = await client.fetch_favorites()
+                    except Exception:
+                        favs = []
+                catalog: Optional[Dict[str, Any]] = None
+                try:
+                    catalog = await client.fetch_catalog()
+                except Exception:
+                    catalog = None
+                id_to_voice: Dict[str, Dict[str, Any]] = {v.get("id"): v for v in (catalog or {}).get("voices") or [] if v.get("id")}
+
+                def _voice_key(engine: Optional[str], vid: Optional[str]) -> Tuple[str, str]:
+                    return ((engine or "").strip().lower(), (vid or "").strip().lower())
+
+                # Pre-resolve env overrides where present
+                male_env_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_MALE", "").strip()
+                female_env_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_FEMALE", "").strip()
+                env_a_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_A", "").strip()
+                env_b_raw = os.getenv("OLLAMA_AI2AI_TTS_VOICE_B", "").strip()
+                male_env_res = await _resolve_local(client, male_env_raw) if male_env_raw else (None, None, None)
+                female_env_res = await _resolve_local(client, female_env_raw) if female_env_raw else (None, None, None)
+                env_a_res = await _resolve_local(client, env_a_raw) if env_a_raw else (None, None, None)
+                env_b_res = await _resolve_local(client, env_b_raw) if env_b_raw else (None, None, None)
+
+                def _candidates_env_gender(gender: Optional[str]) -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
+                    if gender == "male" and (male_env_res[0] or male_env_res[1]):
+                        return [(male_env_res[0], male_env_res[1], male_env_res[2], "male via env")]
+                    if gender == "female" and (female_env_res[0] or female_env_res[1]):
+                        return [(female_env_res[0], female_env_res[1], female_env_res[2], "female via env")]
+                    return []
+
+                def _candidates_favorites_by_gender(gender: Optional[str]) -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
+                    if not gender:
+                        return []
+                    results: List[Tuple[Optional[str], Optional[str], Optional[str], str]] = []
+                    for fav in favs:
+                        vid = (fav.get("voiceId") or "").strip()
+                        if not vid:
+                            continue
+                        voice_meta = id_to_voice.get(vid) or {}
+                        if (voice_meta.get("gender") or "").lower() != gender:
+                            continue
+                        slug = (fav.get("slug") or vid)
+                        eng = fav.get("engine") or voice_meta.get("engine") or voice_meta.get("provider")
+                        results.append((slug, vid, eng, f"{gender} via favorites"))
+                    return results
+
+                def _candidates_catalog_by_gender(gender: Optional[str]) -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
+                    if not gender or not catalog:
+                        return []
+                    items = filter_catalog_voices(catalog, gender=gender)
+                    results: List[Tuple[Optional[str], Optional[str], Optional[str], str]] = []
+                    for v in items:
+                        vid = (v.get("id") or "").strip()
+                        if not vid:
+                            continue
+                        eng = v.get("engine") or v.get("provider")
+                        results.append((None, vid, eng, f"{gender} via catalog"))
+                    return results
+
+                def _candidates_env_slot(slot: str) -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
+                    if slot.upper() == 'A' and (env_a_res[0] or env_a_res[1]):
+                        return [(env_a_res[0], env_a_res[1], env_a_res[2], "slot A via env")]
+                    if slot.upper() == 'B' and (env_b_res[0] or env_b_res[1]):
+                        return [(env_b_res[0], env_b_res[1], env_b_res[2], "slot B via env")]
+                    return []
+
+                def _candidates_generic() -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
+                    results: List[Tuple[Optional[str], Optional[str], Optional[str], str]] = []
+                    # any favorites first
+                    for fav in favs:
+                        vid = (fav.get("voiceId") or "").strip()
+                        slug = (fav.get("slug") or vid)
+                        eng = fav.get("engine") or (id_to_voice.get(vid) or {}).get("engine") or (id_to_voice.get(vid) or {}).get("provider")
+                        if vid or slug:
+                            results.append((slug, vid, eng, "fallback via favorites"))
+                    # then any catalog
+                    for v in (catalog or {}).get("voices") or []:
+                        vid = (v.get("id") or "").strip()
+                        if not vid:
+                            continue
+                        eng = v.get("engine") or v.get("provider")
+                        results.append((None, vid, eng, "fallback via catalog"))
+                    return results
+
+                gender_toggle = True
+                try:
+                    gender_toggle = truthy(os.getenv("OLLAMA_AI2AI_TTS_GENDER_FROM_PERSONA", "1"), True)
+                except Exception:
+                    gender_toggle = True
+
+                defaults = self._ollama_persona_defaults()
+                persona_a_raw = session.get("persona_a") or defaults[0]
+                persona_b_raw = session.get("persona_b") or defaults[1]
+                a_display, a_gender = self._persona_parse(persona_a_raw)
+                b_display, b_gender = self._persona_parse(persona_b_raw)
+                if not gender_toggle:
+                    a_gender = None
+                    b_gender = None
+
+                def _pick_for(label: str, gender: Optional[str], avoid: Optional[Tuple[str, str]] = None) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
+                    # Build candidate chain per spec
+                    chain: List[Tuple[Optional[str], Optional[str], Optional[str], str]] = []
+                    if gender:
+                        chain.extend(_candidates_env_gender(gender))
+                        chain.extend(_candidates_favorites_by_gender(gender))
+                        chain.extend(_candidates_catalog_by_gender(gender))
+                        chain.extend(_candidates_generic())
+                    else:
+                        # Gender unknown: use A/B env first, then generic
+                        chain.extend(_candidates_env_slot(label))
+                        chain.extend(_candidates_generic())
+                    # Pick first non-colliding
+                    for fa, vi, en, src in chain:
+                        key = _voice_key(en, vi)
+                        if avoid and key == avoid:
+                            selection_log.append(f"{label} skip collision with other speaker -> voiceId={vi} engine={en}")
+                            continue
+                        selection_log.append(f"{label} resolved: {src} -> fav={fa} voiceId={vi} engine={en}")
+                        return fa, vi, en, src
+                    return None, None, None, "unresolved"
+
+                # Choose A then B with collision avoidance
+                fa, vi, en, src = _pick_for('A', a_gender)
+                fav_a, vid_a, eng_a = (fa, vi, en)
+                avoid_key = _voice_key(eng_a, vid_a) if (eng_a or vid_a) else None
+                fb, vb, eb, srcb = _pick_for('B', b_gender, avoid=avoid_key)
+                fav_b, vid_b, eng_b = (fb, vb, eb)
+
+                for line in selection_log:
+                    logging.info(f"AI↔AI TTS voice: {line}")
+
+                if not (fav_a or vid_a) or not (fav_b or vid_b):
+                    logging.warning("AI↔AI TTS voice resolution fell back to generic or unresolved; switching to OpenAI fallback")
+                    # As last resort, let OpenAI path run
+                    use_local = False
+            except Exception as exc:
+                logging.exception(f"Gendered TTS voice resolution failed: {exc}")
+                use_local = False
 
         # Prepare utterance order with optional intros
         defaults = self._ollama_persona_defaults()
         persona_a = session.get("persona_a") or defaults[0]
         persona_b = session.get("persona_b") or defaults[1]
+        a_display, _ = self._persona_parse(persona_a)
+        b_display, _ = self._persona_parse(persona_b)
         sequence: List[Tuple[str, str]] = []  # (speaker, text)
         if intro_enabled:
-            sequence.append(("A", f"Hello, my name is {persona_a}."))
+            sequence.append(("A", f"Hello, my name is {a_display}."))
             sequence.append(("__pause__", str(intro_pause_ms)))
-            sequence.append(("B", f"And my name is {persona_b}."))
+            sequence.append(("B", f"And my name is {b_display}."))
             sequence.append(("__pause__", str(intro_pause_ms)))
         for entry in transcript:
             sp = (entry or {}).get("speaker") or "A"
