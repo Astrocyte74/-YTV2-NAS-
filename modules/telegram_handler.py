@@ -74,7 +74,7 @@ from modules.ollama_client import (
     get_models as ollama_get_models,
     pull as ollama_pull,
 )
-from modules.services import ollama_service
+from modules.services import ollama_service, tts_service
 import hashlib
 import unicodedata
 from pydub import AudioSegment
@@ -2023,223 +2023,16 @@ class YouTubeTelegramBot:
         return ui_build_local_failure_keyboard()
 
     async def _execute_tts_job(self, query, session: Dict[str, Any], provider: str) -> None:
-        provider_key = (provider or "openai").lower()
-        summary_text = session.get("summary_text") or session.get("text") or ""
-        if not summary_text:
-            logging.warning("TTS: session missing text; aborting")
-            await query.answer("Missing summary text", show_alert=True)
-            return
-        placeholders = session.get("placeholders") or {}
-        audio_filename = placeholders.get("audio_filename") or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-        json_placeholder = placeholders.get("json_placeholder") or f"tts_{int(time.time())}.json"
-        selected_voice = session.get("selected_voice") or {}
-        favorite_slug = selected_voice.get("favorite_slug")
-        voice_id = selected_voice.get("voice_id")
-        engine_id = selected_voice.get("engine")
-
-        await query.answer(f"Generating audio via {provider_key.title()}…")
-        provider_label = "Local TTS hub" if provider_key == "local" else "OpenAI TTS"
-
-        voice_label = session.get("last_voice") or ""
-        if not voice_label:
-            try:
-                slug_hint = None
-                if favorite_slug:
-                    slug_hint = f"fav|{favorite_slug}"
-                elif voice_id:
-                    slug_hint = f"cat|{voice_id}"
-                if slug_hint:
-                    voice_label = self._tts_voice_label(session, slug_hint)
-            except Exception:
-                voice_label = ""
-
-        status_msg = None
-        try:
-            status_text = (
-                f"⏳ Generating TTS"
-                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                + f" • {provider_label}"
-            )
-            status_msg = await query.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            status_msg = None
-
-        async def _update_status(message: str) -> None:
-            if not status_msg:
-                return
-            try:
-                await status_msg.edit_text(message, parse_mode=ParseMode.MARKDOWN)
-            except Exception:
-                pass
-
-        if not self.summarizer:
-            self.summarizer = YouTubeSummarizer()
-
-        try:
-            logging.info(
-                "🧩 Starting TTS generation via %s | title=%s",
-                provider_key,
-                session.get("title"),
-            )
-            audio_filepath = await self.summarizer.generate_tts_audio(
-                summary_text,
-                audio_filename,
-                json_placeholder,
-                provider=provider_key,
-                voice=voice_id,
-                engine=engine_id,
-                favorite_slug=favorite_slug,
-            )
-        except LocalTTSUnavailable as exc:
-            logging.warning("Local TTS unavailable during execution: %s", exc)
-            await self._handle_local_unavailable(query, session, message=str(exc))
-            await _update_status(
-                f"⚠️ Local TTS unavailable"
-                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                + f" • {provider_label}"
-            )
-            return
-        except Exception as exc:
-            logging.error("TTS synthesis error: %s", exc)
-            await query.answer("TTS failed", show_alert=True)
-            await _update_status(
-                f"❌ TTS failed"
-                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                + f" • {provider_label}"
-            )
-            return
-
-        if not audio_filepath or not Path(audio_filepath).exists():
-            logging.warning("TTS generation returned no audio")
-            await query.answer("TTS generation failed", show_alert=True)
-            await _update_status(
-                f"❌ TTS failed"
-                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                + f" • {provider_label}"
-            )
-            return
-
-        logging.info("📦 TTS file ready: %s", audio_filepath)
-        await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider_key)
-
-        try:
-            if status_msg:
-                done_text = (
-                    f"✅ Generated"
-                    + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                    + f" • {provider_label}"
-                )
-                await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
+        await tts_service.execute_job(self, query, session, provider)
 
     async def _handle_local_unavailable(self, query, session: Dict[str, Any], message: str = "") -> None:
-        logging.warning(f"Local TTS unavailable: {message}")
-        notice = "⚠️ Local TTS hub unavailable. Queue the job for later or use OpenAI now?"
-        await query.edit_message_text(notice, reply_markup=self._build_local_failure_keyboard())
-        # keep session so user can choose fallback
+        await tts_service.handle_local_unavailable(self, query, session, message=message)
 
     async def _enqueue_tts_job(self, query, session: Dict[str, Any]) -> None:
-        job = {
-            "created_at": datetime.utcnow().isoformat(),
-            "summary_type": session.get('summary_type'),
-            "summary_text": session.get('summary_text'),
-            "title": session.get('title'),
-            "video_info": session.get('video_info'),
-            "placeholders": session.get('placeholders'),
-            "preferred_provider": "local",
-            "selected_voice": session.get('selected_voice'),
-        }
-        path = enqueue_tts_job(job)
-        await query.answer("Queued for local TTS")
-        await query.edit_message_text(
-            f"📥 Queued TTS job for later processing.\n🗂️ {path.name}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Close", callback_data="tts_cancel")]])
-        )
-        logging.info(f"Queued TTS job at {path}")
-        self._remove_tts_session(query.message.chat_id, query.message.message_id)
+        await tts_service.enqueue_job(self, query, session)
 
     async def _finalize_tts_delivery(self, query, session: Dict[str, Any], audio_path: Path, provider: str) -> None:
-        provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
-        metrics.record_tts(True)
-        video_info = session.get('video_info') or {}
-        mode = session.get('mode') or 'oneoff_tts'
-        title = session.get('title') or video_info.get('title', 'Unknown Title')
-        ledger_id = session.get('ledger_id')
-        normalized_video_id = session.get('normalized_video_id') or video_info.get('video_id')
-        summary_type = session.get('summary_type') or 'audio'
-        base_variant = session.get('base_variant') or 'audio'
-
-        # Resolve voice label to display in captions
-        voice_label = session.get('last_voice') or ''
-        if not voice_label:
-            try:
-                sv = session.get('selected_voice') or {}
-                slug = None
-                if sv.get('favorite_slug'):
-                    slug = f"fav|{sv.get('favorite_slug')}"
-                elif sv.get('voice_id'):
-                    slug = f"cat|{sv.get('voice_id')}"
-                if slug:
-                    voice_label = self._tts_voice_label(session, slug)
-            except Exception:
-                voice_label = ''
-
-        audio_reply_markup = None
-        if mode == 'summary_audio':
-            normalized_id = normalized_video_id or video_info.get('video_id') or 'unknown'
-            if ledger_id and ':' not in ledger_id:
-                ledger_id = f"yt:{ledger_id}"
-
-            content_identifier = (
-                session.get('result_id')
-                or video_info.get('content_id')
-                or ledger_id
-                or normalized_id
-            )
-            if content_identifier and ':' not in content_identifier:
-                content_identifier = f"yt:{content_identifier}"
-
-            self._sync_audio_to_targets(normalized_id, audio_path, ledger_id, summary_type)
-            if content_identifier:
-                self._upload_audio_to_render(content_identifier, audio_path)
-
-            audio_reply_markup = self._build_audio_inline_keyboard(
-                normalized_id,
-                base_variant,
-                video_info.get('video_id', '')
-            )
-
-        try:
-            with audio_path.open('rb') as audio_file:
-                if mode == 'summary_audio':
-                    base = f"🎧 **Audio Summary**: {self._escape_markdown(title)}"
-                    voice_bit = f" • {self._escape_markdown(voice_label)}" if voice_label else ""
-                    caption = f"{base}{voice_bit}\n🎵 {provider_label}"
-                else:
-                    caption = (
-                        f"🎧 **TTS Preview**"
-                        + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                        + f" • {provider_label}"
-                    )
-                await query.message.reply_voice(
-                    voice=audio_file,
-                    caption=caption,
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=audio_reply_markup
-                )
-            logging.info(f"✅ Successfully sent audio summary for {title} using {provider_label}")
-        except Exception as exc:
-            logging.error(f"Failed to send voice message: {exc}")
-        # Do not close the TTS picker; refresh it (when catalog flow is active)
-        try:
-            if session.get('catalog'):
-                await self._refresh_tts_catalog(query, session)
-            else:
-                # Favorites-only flow: keep message as-is; show a brief toast
-                await query.answer("Audio sent — select another voice")
-        except Exception:
-            pass
+        await tts_service.finalize_delivery(self, query, session, audio_path, provider)
 
     def _tts_session_key(self, chat_id: int, message_id: int) -> tuple:
         return (chat_id, message_id)
@@ -3266,46 +3059,10 @@ class YouTubeTelegramBot:
             await query.edit_message_text("❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
     
     async def _prepare_tts_generation(self, query, result: Dict[str, Any], summary_text: str, summary_type: str):
-        """Store context and prompt the user to choose a TTS provider."""
-        video_info = result.get('metadata', {})
-        title = video_info.get('title', 'Unknown Title')
+        await tts_service.prepare_generation(self, query, result, summary_text, summary_type)
 
-        ledger_id = (
-            result.get('id')
-            or video_info.get('content_id')
-            or (self.current_item or {}).get('content_id')
-        )
-
-        normalized_video_id = video_info.get('video_id')
-        if not normalized_video_id and ledger_id:
-            normalized_video_id = self._normalize_content_id(ledger_id)
-
-        if not ledger_id and normalized_video_id:
-            ledger_id = f"yt:{normalized_video_id}"
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        video_id = video_info.get('video_id', 'unknown')
-        base_variant = (summary_type or "").split(":", 1)[0]
-        placeholders = {
-            "audio_filename": f"audio_{video_id}_{timestamp}.mp3",
-            "json_placeholder": f"yt_{video_id}_placeholder.json",
-        }
-
-        session_payload = {
-            "mode": "summary_audio",
-            "summary_text": summary_text,
-            "summary_type": summary_type,
-            "title": title,
-            "video_info": video_info,
-            "ledger_id": ledger_id,
-            "normalized_video_id": normalized_video_id,
-            "placeholders": placeholders,
-            "base_variant": base_variant,
-            "result_id": result.get('id'),
-        }
-
-        await self._prompt_tts_provider(query, session_payload, title)
-    
+    async def _prompt_tts_provider(self, query, session_payload: Dict[str, Any], title: str) -> None:
+        await tts_service.prompt_provider(self, query, session_payload, title)
     def _format_duration_and_savings(self, metadata: Dict) -> str:
         """Format video duration and calculate time savings from summary."""
         duration = metadata.get('duration', 0)
