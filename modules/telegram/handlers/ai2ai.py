@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from pathlib import Path
@@ -38,6 +39,42 @@ def default_models(handler, models: List[str], allow_same: bool) -> Tuple[Option
             model_b = model_a
 
     return model_a, model_b
+
+
+def build_models_keyboard(
+    models: List[str],
+    slot: str,
+    page: int = 0,
+    page_size: int = 12,
+    session: Optional[Dict[str, Any]] = None,
+) -> InlineKeyboardMarkup:
+    start = page * page_size
+    end = start + page_size
+    subset = models[start:end]
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    chosen_a = (session or {}).get('ai2ai_model_a') if (session and slot == 'B') else None
+    for name in subset:
+        if chosen_a and name == chosen_a:
+            continue
+        label = name
+        if len(label) > 28:
+            label = f"{label[:25]}…"
+        row.append(InlineKeyboardButton(label, callback_data=f"ollama_ai2ai_set:{slot}:{name}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav: List[InlineKeyboardButton] = []
+    if end < len(models):
+        nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more_ai2ai:{slot}:{page+1}"))
+    if page > 0:
+        nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more_ai2ai:{slot}:{page-1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ollama_cancel")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def run(handler, chat_id: int, turns: int) -> None:
@@ -268,7 +305,7 @@ async def handle_callback(
                 raw = ollama_get_models()
                 models = handler._ollama_models_list(raw)
                 session["models"] = models
-            kb = handler._build_ollama_models_keyboard_ai2ai(models, "A", session.get("page", 0), session=session)
+            kb = build_models_keyboard(models, "A", session.get("page", 0), session=session)
             await query.edit_message_text("🤝 Select model for A:", reply_markup=kb)
             await query.answer("AI↔AI mode")
             handler.ollama_sessions[chat_id] = session
@@ -387,7 +424,222 @@ async def handle_callback(
             await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
             await query.answer("Options")
             return True
-        return False
+
+    if callback_data.startswith("ollama_ai2ai_view:"):
+        parts = callback_data.split(":")
+        if len(parts) >= 3:
+            slot = parts[1].upper()
+            target = parts[2]
+            slot_lower = slot.lower()
+            view_key = f"ai2ai_view_{slot_lower}"
+            if target == "models":
+                session[view_key] = "models"
+            else:
+                session[view_key] = "persona_categories"
+                session.pop(f"ai2ai_persona_category_{slot_lower}", None)
+                session[f"ai2ai_persona_cat_page_{slot_lower}"] = 0
+                session[f"ai2ai_persona_page_{slot_lower}"] = 0
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("View updated")
+            return True
+
+    if callback_data.startswith("ollama_persona_cat:"):
+        parts = callback_data.split(":", 2)
+        if len(parts) == 3:
+            slot = parts[1].upper()
+            cat_key = parts[2]
+            slot_lower = slot.lower()
+            categories = handler._ollama_persona_categories()
+            if cat_key not in categories:
+                await query.answer("Category unavailable", show_alert=False)
+                return True
+            session[f"ai2ai_persona_category_{slot_lower}"] = cat_key
+            session[f"ai2ai_view_{slot_lower}"] = "persona_list"
+            session[f"ai2ai_persona_page_{slot_lower}"] = 0
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("Category selected")
+            return True
+
+    if callback_data.startswith("ollama_persona_more:"):
+        parts = callback_data.split(":")
+        if len(parts) >= 4:
+            slot = parts[1].upper()
+            kind = parts[2]
+            try:
+                page = max(0, int(parts[3]))
+            except Exception:
+                page = 0
+            slot_lower = slot.lower()
+            if kind == "cat":
+                session[f"ai2ai_persona_cat_page_{slot_lower}"] = page
+                session[f"ai2ai_view_{slot_lower}"] = "persona_categories"
+            else:
+                session[f"ai2ai_persona_page_{slot_lower}"] = page
+                session.setdefault(f"ai2ai_view_{slot_lower}", "persona_list")
+                session[f"ai2ai_view_{slot_lower}"] = "persona_list"
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("Page updated")
+            return True
+
+    if callback_data.startswith("ollama_persona_back:"):
+        parts = callback_data.split(":")
+        if len(parts) >= 2:
+            slot = parts[1].upper()
+            slot_lower = slot.lower()
+            session[f"ai2ai_view_{slot_lower}"] = "persona_categories"
+            session[f"ai2ai_persona_page_{slot_lower}"] = 0
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("Select category")
+            return True
+
+    if callback_data.startswith("ollama_persona_pick:"):
+        parts = callback_data.split(":")
+        if len(parts) >= 3:
+            slot = parts[1].upper()
+            slot_lower = slot.lower()
+            try:
+                index = int(parts[2])
+            except Exception:
+                index = -1
+            categories = handler._ollama_persona_categories()
+            cat_key = session.get(f"ai2ai_persona_category_{slot_lower}")
+            names = []
+            if cat_key:
+                names = categories.get(cat_key, {}).get("names") or []
+            response = f"Persona {slot} updated"
+            if 0 <= index < len(names):
+                chosen = names[index]
+                current = session.get(f"persona_{slot_lower}")
+                if current == chosen and session.get(f"persona_{slot_lower}_custom"):
+                    session.pop(f"persona_{slot_lower}", None)
+                    session.pop(f"persona_category_{slot_lower}", None)
+                    session.pop(f"persona_{slot_lower}_custom", None)
+                    session.pop(f"persona_{slot_lower}_intro_pending", None)
+                    session.pop(f"persona_{slot_lower}_display", None)
+                    session.pop(f"persona_{slot_lower}_gender", None)
+                    response = f"Persona {slot} cleared"
+                else:
+                    session[f"persona_{slot_lower}"] = chosen
+                    session[f"persona_category_{slot_lower}"] = categories.get(cat_key, {}).get("label")
+                    if slot in ("A", "B"):
+                        session[f"persona_{slot_lower}_custom"] = True
+                        session[f"persona_{slot_lower}_intro_pending"] = True
+                    handler._update_persona_session_fields(session, slot_lower, chosen)
+                session[f"ai2ai_view_{slot_lower}"] = "persona_list"
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            handler.ollama_sessions[chat_id] = session
+            await query.answer(response)
+            return True
+
+    if callback_data.startswith("ollama_persona_clear:"):
+        parts = callback_data.split(":")
+        if len(parts) >= 2:
+            slot = parts[1].upper()
+            slot_lower = slot.lower()
+            session.pop(f"persona_{slot_lower}", None)
+            session.pop(f"persona_category_{slot_lower}", None)
+            if slot in ("A", "B"):
+                session.pop(f"persona_{slot_lower}_custom", None)
+                session.pop(f"persona_{slot_lower}_intro_pending", None)
+            session.pop(f"persona_{slot_lower}_display", None)
+            session.pop(f"persona_{slot_lower}_gender", None)
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("Persona cleared")
+            return True
+
+    if callback_data.startswith("ollama_set_a:"):
+        name = callback_data.split(":", 1)[1]
+        session["mode"] = "ai-ai"
+        if session.get("ai2ai_model_a") == name:
+            session.pop("ai2ai_model_a", None)
+            session["active"] = bool(session.get("ai2ai_model_b"))
+            logging.info("Ollama UI: cleared model A")
+        else:
+            session["ai2ai_model_a"] = name
+            session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
+            logging.info("Ollama UI: set model A -> %s", name)
+        models = session.get("models") or []
+        kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+        await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+        handler.ollama_sessions[chat_id] = session
+        await query.answer("Model A updated")
+        return True
+
+    if callback_data.startswith("ollama_set_b:"):
+        name = callback_data.split(":", 1)[1]
+        session["mode"] = "ai-ai"
+        if session.get("ai2ai_model_b") == name:
+            session.pop("ai2ai_model_b", None)
+            session["active"] = bool(session.get("ai2ai_model_a"))
+            logging.info("Ollama UI: cleared model B")
+        else:
+            session["ai2ai_model_b"] = name
+            if "ai2ai_turns_left" not in session:
+                try:
+                    session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                except Exception:
+                    session["ai2ai_turns_left"] = 10
+            session["active"] = True
+            logging.info("Ollama UI: set model B -> %s", name)
+        models = session.get("models") or []
+        kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+        await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+        handler.ollama_sessions[chat_id] = session
+        await query.answer("Model B updated")
+        return True
+
+    if callback_data.startswith("ollama_set_mode:"):
+        which = callback_data.split(":", 1)[1]
+        if which == "single":
+            session["mode"] = "ai-human"
+            session["active"] = bool(session.get("model"))
+            for key in (
+                "ai2ai_view_a",
+                "ai2ai_view_b",
+                "ai2ai_persona_category_a",
+                "ai2ai_persona_category_b",
+                "persona_category_a",
+                "persona_category_b",
+                "ai2ai_persona_page_a",
+                "ai2ai_persona_page_b",
+                "ai2ai_persona_cat_page_a",
+                "ai2ai_persona_cat_page_b",
+                "ai2ai_round",
+                "ai2ai_turns_total",
+            ):
+                session.pop(key, None)
+            session["single_view"] = "models"
+        else:
+            session["mode"] = "ai-ai"
+            session.setdefault("ai2ai_page_a", 0)
+            session.setdefault("ai2ai_page_b", 0)
+            session.setdefault("ai2ai_view_a", "models")
+            session.setdefault("ai2ai_view_b", "models")
+            session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
+        logging.info("Ollama UI: set mode -> %s", session["mode"])
+        models = session.get("models") or []
+        kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+        await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+        handler.ollama_sessions[chat_id] = session
+        await query.answer("Mode updated")
+        return True
 
     if callback_data.startswith("ollama_ai2ai_turns:"):
         op = callback_data.split(":", 1)[1]
@@ -420,7 +672,7 @@ async def handle_callback(
         models = session.get("models") or []
         key = f"ai2ai_page_{slot.lower()}"
         session[key] = page
-        kb = handler._build_ollama_models_keyboard_ai2ai(models, slot, page, session=session)
+        kb = build_models_keyboard(models, slot, page, session=session)
         await query.edit_message_text(f"🤖 Pick model for {slot}:", reply_markup=kb)
         handler.ollama_sessions[chat_id] = session
         await query.answer("Page updated")
@@ -431,6 +683,7 @@ async def handle_callback(
 
 __all__ = [
     'default_models',
+    'build_models_keyboard',
     'run',
     'continue_exchange',
     'handle_callback',

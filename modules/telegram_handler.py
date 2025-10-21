@@ -72,9 +72,9 @@ from modules import render_probe
 from modules.ollama_client import (
     OllamaClientError,
     get_models as ollama_get_models,
-    chat as ollama_chat,
     pull as ollama_pull,
 )
+from modules.services import ollama_service
 import hashlib
 import unicodedata
 from pydub import AudioSegment
@@ -1002,37 +1002,7 @@ class YouTubeTelegramBot:
         return defaults[0], defaults[1]
 
     def _ollama_start_ai2ai_task(self, chat_id: int, coro: Awaitable[Any]) -> bool:
-        session = self.ollama_sessions.get(chat_id) or {}
-        existing = session.get("ai2ai_task")
-        if isinstance(existing, asyncio.Task) and not existing.done():
-            return False
-
-        loop = asyncio.get_running_loop()
-
-        async def runner():
-            try:
-                await coro
-            except asyncio.CancelledError:
-                logging.info("AI↔AI task cancelled for chat %s", chat_id)
-                raise
-            except Exception:
-                logging.exception("AI↔AI task failed for chat %s", chat_id)
-            finally:
-                sess = self.ollama_sessions.get(chat_id) or {}
-                current = asyncio.current_task()
-                if sess.get("ai2ai_task") is current:
-                    sess["ai2ai_task"] = None
-                sess["ai2ai_active"] = False
-                if not sess.get("ai2ai_cancel"):
-                    sess.pop("ai2ai_cancel", None)
-                self.ollama_sessions[chat_id] = sess
-
-        task = loop.create_task(runner())
-        session["ai2ai_task"] = task
-        session["ai2ai_cancel"] = False
-        session["ai2ai_active"] = True
-        self.ollama_sessions[chat_id] = session
-        return True
+        return ollama_service.start_ai2ai_task(self, chat_id, coro)
 
     def _ollama_ai2ai_default_models(self, models: List[str], allow_same: bool) -> Tuple[Optional[str], Optional[str]]:
         return ai2ai_handler.default_models(self, models, allow_same)
@@ -1190,36 +1160,6 @@ class YouTubeTelegramBot:
             parts.append("Pick a model to chat. Type a prompt to start.")
         return "\n".join(parts)
 
-    def _build_ollama_models_keyboard_ai2ai(self, models: List[str], slot: str, page: int = 0, page_size: int = 12, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
-        start = page * page_size
-        end = start + page_size
-        subset = models[start:end]
-        rows: List[List[InlineKeyboardButton]] = []
-        row: List[InlineKeyboardButton] = []
-        chosen_a = (session or {}).get('ai2ai_model_a') if (session and slot == 'B') else None
-        for name in subset:
-            if chosen_a and name == chosen_a:
-                # Skip model A in B picker to avoid unselect pattern
-                continue
-            label = name
-            if len(label) > 28:
-                label = f"{label[:25]}…"
-            row.append(InlineKeyboardButton(label, callback_data=f"ollama_ai2ai_set:{slot}:{name}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        nav: List[InlineKeyboardButton] = []
-        if end < len(models):
-            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more_ai2ai:{slot}:{page+1}"))
-        if page > 0:
-            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more_ai2ai:{slot}:{page-1}"))
-        if nav:
-            rows.append(nav)
-        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ollama_cancel")])
-        return InlineKeyboardMarkup(rows)
-
     async def ollama_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self._is_user_allowed(user_id):
@@ -1309,177 +1249,7 @@ class YouTubeTelegramBot:
         await update.message.reply_text("💬 New AI↔AI turn coming up…")
 
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
-        chat_id = update.effective_chat.id
-        mode_key = session.get("mode") or "ai-human"
-        model = session.get("model")
-        if mode_key == "ai-ai":
-            if not (session.get("ai2ai_model_a") and session.get("ai2ai_model_b")):
-                await update.message.reply_text("⚠️ Select models A and B in the picker before starting AI↔AI chat.")
-                return
-        else:
-            if not model:
-                await update.message.reply_text("⚠️ No model selected. Pick one in the Ollama picker first.")
-                return
-        # If AI↔AI is active (two models picked), treat user text as topic and run a turn
-        if mode_key == "ai-ai" and session.get("ai2ai_model_a") and session.get("ai2ai_model_b"):
-            session["topic"] = text
-            if not isinstance(session.get("ai2ai_turns_config"), int) or session.get("ai2ai_turns_config") <= 0:
-                try:
-                    session["ai2ai_turns_config"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
-                except Exception:
-                    session["ai2ai_turns_config"] = 10
-            session["ai2ai_round"] = 0
-            turns_total = int(session.get("ai2ai_turns_config") or 0)
-            session["ai2ai_turns_total"] = turns_total if turns_total > 0 else None
-            self.ollama_sessions[chat_id] = session
-            turns = int(session["ai2ai_turns_config"])
-            if not self._ollama_start_ai2ai_task(chat_id, self._ollama_ai2ai_run(chat_id, turns)):
-                await update.message.reply_text("⚠️ AI↔AI exchange already running. Use /stop to interrupt.")
-                return
-            await update.message.reply_text("🤝 Starting AI↔AI exchange…")
-            return
-        # Build chat payload
-        history = list(session.get("history") or [])
-        dispatch_messages: List[Dict[str, str]] = []
-        persona_intro_consumed = False
-        if mode_key == "ai-human":
-            persona_single = session.get("persona_single")
-            if persona_single and session.get("persona_single_custom"):
-                intro_pending = bool(session.get("persona_single_intro_pending"))
-                dispatch_messages.append({
-                    "role": "system",
-                    "content": self._ollama_persona_system_prompt(
-                        persona_single,
-                        "user",
-                        intro_pending,
-                    ),
-                })
-                if intro_pending:
-                    persona_intro_consumed = True
-        dispatch_messages.extend(history)
-        dispatch_messages.append({"role": "user", "content": text})
-        trimmed_history = (history + [{"role": "user", "content": text}])
-        if bool(session.get("stream")) and mode_key == "ai-human":
-            # Streaming reply
-            try:
-                final_text = await self._ollama_stream_chat(update, model, dispatch_messages, label=f"🤖 {model}")
-            except Exception as exc:
-                await update.message.reply_text(f"❌ Stream error: {str(exc)[:200]}")
-                return
-            # Update history
-            session["history"] = (trimmed_history + [{"role": "assistant", "content": final_text}])[-16:]
-            if persona_intro_consumed:
-                session["persona_single_intro_pending"] = False
-            self.ollama_sessions[chat_id] = session
-            return
-
-        loop = asyncio.get_running_loop()
-
-        def _call():
-            try:
-                return ollama_chat(dispatch_messages, model, stream=False)  # returns dict
-            except Exception as e:
-                return {"error": str(e)}
-        # Try to indicate typing; ignore if unsupported
-        try:
-            from telegram.constants import ChatAction
-            app = getattr(self, 'application', None)
-            if app and getattr(app, 'bot', None):
-                await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-        except Exception:
-            pass
-        logging.info(f"Ollama chat: model={model} text_len={len(text)}")
-        resp = await loop.run_in_executor(None, _call)
-        try:
-            import json as _json
-            if isinstance(resp, dict):
-                keys = list(resp.keys())
-                logging.info(f"Ollama resp keys: {keys[:8]}")
-                msg = resp.get("message")
-                if isinstance(msg, dict):
-                    logging.info(f"Ollama message keys: {list(msg.keys())}")
-            else:
-                logging.info(f"Ollama resp type: {type(resp)}")
-        except Exception:
-            pass
-        if isinstance(resp, dict) and resp.get("error"):
-            err = str(resp["error"]).lower()
-            # Offer pull if model appears missing
-            if ("404" in err or "not found" in err or "no such model" in err) and model:
-                # Persist last user text to retry after pull
-                session["last_user"] = text
-                self.ollama_sessions[chat_id] = session
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"📥 Pull {model}", callback_data=f"ollama_pull:{model}")],
-                    [InlineKeyboardButton("❌ Cancel", callback_data="ollama_cancel")],
-                ])
-                await update.message.reply_text(
-                    f"⚠️ Model `{self._escape_markdown(model)}` is not available on the hub. Pull it now?",
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=kb,
-                )
-                return
-            await update.message.reply_text(f"❌ Ollama error: {resp['error'][:200]}")
-            return
-        # Extract reply text robustly
-        reply_text = None
-        if isinstance(resp, dict):
-            # 1) Common shapes
-            val = resp.get("response")
-            if isinstance(val, str) and val.strip():
-                reply_text = val
-            if reply_text is None:
-                msg = resp.get("message")
-                if isinstance(msg, dict):
-                    c = msg.get("content")
-                    if isinstance(c, str) and c.strip():
-                        reply_text = c
-                    elif isinstance(c, list):
-                        # Some implementations surface list of segments
-                        parts = []
-                        for seg in c:
-                            if isinstance(seg, dict):
-                                t = seg.get("text") or seg.get("content")
-                                if isinstance(t, str) and t.strip():
-                                    parts.append(t)
-                        if parts:
-                            reply_text = "\n".join(parts)
-            # 2) Fallback: messages array
-            if reply_text is None:
-                msgs = resp.get("messages")
-                if isinstance(msgs, list):
-                    for m in reversed(msgs):
-                        if isinstance(m, dict) and m.get("role") == "assistant":
-                            c = m.get("content")
-                            if isinstance(c, str) and c.strip():
-                                reply_text = c
-                                break
-            # 3) Last resort: compact JSON snippet for debugging
-            if reply_text is None:
-                import json as _json
-                snippet = _json.dumps({k: resp[k] for k in list(resp.keys())[:8]})[:380]
-                reply_text = f"(No response)\n<pre>{snippet}</pre>"
-                try:
-                    await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML)
-                    return
-                except Exception:
-                    # Fall through to plain text
-                    reply_text = f"(No response)\n{snippet}"
-        if not reply_text:
-            reply_text = "(No response)"
-        display_text = reply_text
-        if mode_key == "ai-human":
-            persona_single = session.get("persona_single")
-            if persona_single:
-                display_text = f"{persona_single} ({model})\n\n{reply_text}"
-            else:
-                display_text = f"🤖 {model}\n\n{reply_text}"
-        await self._send_long_text_reply(update, display_text)
-        # Update conversation history (keep it short)
-        session["history"] = (trimmed_history + [{"role": "assistant", "content": reply_text}])[-16:]
-        if persona_intro_consumed:
-            session["persona_single_intro_pending"] = False
-        self.ollama_sessions[chat_id] = session
+        await ollama_service.handle_user_text(self, update, session, text)
 
     async def _ollama_stream_chat(
         self,
@@ -1669,141 +1439,6 @@ class YouTubeTelegramBot:
             self.ollama_sessions[chat_id] = session
             await query.answer("Persona cleared")
             return
-        if callback_data.startswith("ollama_ai2ai_view:"):
-            parts = callback_data.split(":")
-            if len(parts) >= 3:
-                slot = parts[1].upper()
-                target = parts[2]
-                slot_lower = slot.lower()
-                view_key = f"ai2ai_view_{slot_lower}"
-                if target == "models":
-                    session[view_key] = "models"
-                else:
-                    session[view_key] = "persona_categories"
-                    session.pop(f"ai2ai_persona_category_{slot_lower}", None)
-                    session[f"ai2ai_persona_cat_page_{slot_lower}"] = 0
-                    session[f"ai2ai_persona_page_{slot_lower}"] = 0
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                self.ollama_sessions[chat_id] = session
-                await query.answer("View updated")
-                return
-        if callback_data.startswith("ollama_persona_cat:"):
-            parts = callback_data.split(":", 2)
-            if len(parts) == 3:
-                slot = parts[1].upper()
-                cat_key = parts[2]
-                slot_lower = slot.lower()
-                categories = self._ollama_persona_categories()
-                if cat_key not in categories:
-                    await query.answer("Category unavailable", show_alert=False)
-                    return
-                session[f"ai2ai_persona_category_{slot_lower}"] = cat_key
-                session[f"ai2ai_view_{slot_lower}"] = "persona_list"
-                session[f"ai2ai_persona_page_{slot_lower}"] = 0
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                self.ollama_sessions[chat_id] = session
-                await query.answer("Category selected")
-                return
-        if callback_data.startswith("ollama_persona_more:"):
-            parts = callback_data.split(":")
-            if len(parts) >= 4:
-                slot = parts[1].upper()
-                kind = parts[2]
-                try:
-                    page = max(0, int(parts[3]))
-                except Exception:
-                    page = 0
-                slot_lower = slot.lower()
-                if kind == "cat":
-                    session[f"ai2ai_persona_cat_page_{slot_lower}"] = page
-                    session[f"ai2ai_view_{slot_lower}"] = "persona_categories"
-                else:
-                    session[f"ai2ai_persona_page_{slot_lower}"] = page
-                    session.setdefault(f"ai2ai_view_{slot_lower}", "persona_list")
-                    session[f"ai2ai_view_{slot_lower}"] = "persona_list"
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                self.ollama_sessions[chat_id] = session
-                await query.answer("Page updated")
-                return
-        if callback_data.startswith("ollama_persona_back:"):
-            parts = callback_data.split(":")
-            if len(parts) >= 2:
-                slot = parts[1].upper()
-                slot_lower = slot.lower()
-                session[f"ai2ai_view_{slot_lower}"] = "persona_categories"
-                session[f"ai2ai_persona_page_{slot_lower}"] = 0
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                self.ollama_sessions[chat_id] = session
-                await query.answer("Select category")
-                return
-        if callback_data.startswith("ollama_persona_pick:"):
-            parts = callback_data.split(":")
-            if len(parts) >= 3:
-                slot = parts[1].upper()
-                slot_lower = slot.lower()
-                try:
-                    index = int(parts[2])
-                except Exception:
-                    index = -1
-                categories = self._ollama_persona_categories()
-                cat_key = session.get(f"ai2ai_persona_category_{slot_lower}")
-                names = []
-                if cat_key:
-                    names = categories.get(cat_key, {}).get("names") or []
-                response = f"Persona {slot} updated"
-                if 0 <= index < len(names):
-                    chosen = names[index]
-                    current = session.get(f"persona_{slot_lower}")
-                    if current == chosen and session.get(f"persona_{slot_lower}_custom"):
-                        session.pop(f"persona_{slot_lower}", None)
-                        session.pop(f"persona_category_{slot_lower}", None)
-                        session.pop(f"persona_{slot_lower}_custom", None)
-                        session.pop(f"persona_{slot_lower}_intro_pending", None)
-                        session.pop(f"persona_{slot_lower}_display", None)
-                        session.pop(f"persona_{slot_lower}_gender", None)
-                        response = f"Persona {slot} cleared"
-                    else:
-                        session[f"persona_{slot_lower}"] = chosen
-                        session[f"persona_category_{slot_lower}"] = categories.get(cat_key, {}).get("label")
-                        if slot in ("A", "B"):
-                            session[f"persona_{slot_lower}_custom"] = True
-                            session[f"persona_{slot_lower}_intro_pending"] = True
-                        # Store display and gender fields
-                        self._update_persona_session_fields(session, slot_lower, chosen)
-                    session[f"ai2ai_view_{slot_lower}"] = "persona_list"
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                self.ollama_sessions[chat_id] = session
-                await query.answer(response)
-                return
-        if callback_data.startswith("ollama_persona_clear:"):
-            parts = callback_data.split(":")
-            if len(parts) >= 2:
-                slot = parts[1].upper()
-                slot_lower = slot.lower()
-                session.pop(f"persona_{slot_lower}", None)
-                session.pop(f"persona_category_{slot_lower}", None)
-                if slot in ("A", "B"):
-                    session.pop(f"persona_{slot_lower}_custom", None)
-                    session.pop(f"persona_{slot_lower}_intro_pending", None)
-                # Clear derived fields
-                session.pop(f"persona_{slot_lower}_display", None)
-                session.pop(f"persona_{slot_lower}_gender", None)
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                self.ollama_sessions[chat_id] = session
-                await query.answer("Persona cleared")
-                return
         if callback_data.startswith("ollama_set_mode:"):
             which = callback_data.split(":", 1)[1]
             if which == "single":
@@ -1838,45 +1473,6 @@ class YouTubeTelegramBot:
             await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             self.ollama_sessions[chat_id] = session
             await query.answer("Mode updated")
-            return
-        if callback_data.startswith("ollama_set_a:"):
-            name = callback_data.split(":", 1)[1]
-            session["mode"] = "ai-ai"
-            if session.get("ai2ai_model_a") == name:
-                session.pop("ai2ai_model_a", None)
-                session["active"] = bool(session.get("ai2ai_model_b"))
-                logging.info("Ollama UI: cleared model A")
-            else:
-                session["ai2ai_model_a"] = name
-                session["active"] = bool(session.get("ai2ai_model_a") and session.get("ai2ai_model_b"))
-                logging.info(f"Ollama UI: set model A -> {name}")
-            models = session.get("models") or []
-            kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-            self.ollama_sessions[chat_id] = session
-            await query.answer("Model A updated")
-            return
-        if callback_data.startswith("ollama_set_b:"):
-            name = callback_data.split(":", 1)[1]
-            session["mode"] = "ai-ai"
-            if session.get("ai2ai_model_b") == name:
-                session.pop("ai2ai_model_b", None)
-                session["active"] = bool(session.get("ai2ai_model_a"))
-                logging.info("Ollama UI: cleared model B")
-            else:
-                session["ai2ai_model_b"] = name
-                if "ai2ai_turns_left" not in session:
-                    try:
-                        session["ai2ai_turns_left"] = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
-                    except Exception:
-                        session["ai2ai_turns_left"] = 10
-                session["active"] = True
-                logging.info(f"Ollama UI: set model B -> {name}")
-            models = session.get("models") or []
-            kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-            self.ollama_sessions[chat_id] = session
-            await query.answer("Model B updated")
             return
         if callback_data.startswith("ollama_model:"):
             model = callback_data.split(":", 1)[1]
@@ -2468,6 +2064,14 @@ class YouTubeTelegramBot:
         except Exception:
             status_msg = None
 
+        async def _update_status(message: str) -> None:
+            if not status_msg:
+                return
+            try:
+                await status_msg.edit_text(message, parse_mode=ParseMode.MARKDOWN)
+            except Exception:
+                pass
+
         if not self.summarizer:
             self.summarizer = YouTubeSummarizer()
 
@@ -2489,15 +2093,30 @@ class YouTubeTelegramBot:
         except LocalTTSUnavailable as exc:
             logging.warning("Local TTS unavailable during execution: %s", exc)
             await self._handle_local_unavailable(query, session, message=str(exc))
+            await _update_status(
+                f"⚠️ Local TTS unavailable"
+                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                + f" • {provider_label}"
+            )
             return
         except Exception as exc:
             logging.error("TTS synthesis error: %s", exc)
             await query.answer("TTS failed", show_alert=True)
+            await _update_status(
+                f"❌ TTS failed"
+                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                + f" • {provider_label}"
+            )
             return
 
         if not audio_filepath or not Path(audio_filepath).exists():
             logging.warning("TTS generation returned no audio")
             await query.answer("TTS generation failed", show_alert=True)
+            await _update_status(
+                f"❌ TTS failed"
+                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                + f" • {provider_label}"
+            )
             return
 
         logging.info("📦 TTS file ready: %s", audio_filepath)
