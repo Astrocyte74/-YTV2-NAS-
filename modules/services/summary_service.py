@@ -18,7 +18,7 @@ from modules import ledger, render_probe
 from modules.report_generator import create_report_from_youtube_summarizer
 from modules.summary_variants import merge_summary_variants
 from modules.event_stream import emit_report_event
-from nas_sync import dual_sync_upload
+from modules.services import sync_service
 
 
 async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None) -> None:
@@ -484,83 +484,45 @@ async def process_content_summary(
             is_audio_summary = summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es")
 
             if not is_audio_summary:
-                try:
-                    json_path_obj = Path(json_path)
-                    stem = json_path_obj.stem
+                json_path_obj = Path(json_path)
+                stem = json_path_obj.stem
+                report_path = Path(f"/app/data/reports/{stem}.json")
+                result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
 
-                    logging.info("📡 DUAL-SYNC START: Uploading to configured targets...")
-
-                    video_metadata = result.get('metadata', {})
-                    result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
-
-                    report_path = Path(f"/app/data/reports/{stem}.json")
-                    sync_results = dual_sync_upload(report_path)
-
-                    sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-                    postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-                    sync_success = sqlite_ok or postgres_ok
-
-                    if sync_success:
-                        targets = []
-                        if sqlite_ok: targets.append("SQLite")
-                        if postgres_ok: targets.append("PostgreSQL")
-                        logging.info("✅ DUAL-SYNC SUCCESS: 📊 → %s (targets: %s)", result_content_id, ', '.join(targets))
-
-                        entry = ledger.get(ledger_id, summary_type)
-                        if entry:
-                            entry["synced"] = True
-                            entry["last_synced"] = datetime.now().isoformat()
-                            entry["sync_targets"] = targets
-                            ledger.upsert(ledger_id, summary_type, entry)
-                            logging.info("📊 Updated ledger: synced=True, targets=%s", targets)
-                    else:
-                        logging.error("❌ DUAL-SYNC FAILED: All targets failed for %s", stem)
-
-                except Exception as sync_e:
-                    logging.warning("⚠️ Dual-sync error: %s", sync_e)
+                logging.info("📡 DUAL-SYNC START: Uploading to configured targets...")
+                outcome = sync_service.run_dual_sync(report_path, label=result_content_id)
+                if outcome["success"]:
+                    sync_service.update_ledger_after_sync(
+                        ledger_id,
+                        summary_type,
+                        targets=outcome["targets"],
+                    )
+                # run_dual_sync logs failures; no additional handling required here.
             else:
-                try:
-                    json_path_obj = Path(json_path)
-                    stem = json_path_obj.stem
+                json_path_obj = Path(json_path)
+                stem = json_path_obj.stem
+                report_path = json_path_obj
 
-                    logging.info("📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for %s", result.get('id'))
+                logging.info("📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for %s", result.get('id'))
 
-                    report_path = json_path_obj
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        if report_path.exists():
-                            break
-                        logging.debug("📄 Waiting for file to be written (attempt %s/%s): %s", attempt + 1, max_retries, report_path)
-                        time.sleep(0.1)
-
+                max_retries = 3
+                for attempt in range(max_retries):
                     if report_path.exists():
-                        sync_results = dual_sync_upload(report_path)
-                        sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-                        postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-                        sync_success = sqlite_ok or postgres_ok
+                        break
+                    logging.debug("📄 Waiting for file to be written (attempt %s/%s): %s", attempt + 1, max_retries, report_path)
+                    time.sleep(0.1)
 
-                        if sync_success:
-                            targets = []
-                            if sqlite_ok: targets.append("SQLite")
-                            if postgres_ok: targets.append("PostgreSQL")
-                            logging.info("✅ DUAL-SYNC CONTENT: 📊 → %s (targets: %s)", result.get('id'), ', '.join(targets))
-                            logging.info("⏳ Audio sync will happen after TTS generation")
-
-                            entry = ledger.get(ledger_id, summary_type)
-                            if entry:
-                                entry["synced"] = True
-                                entry["last_synced"] = datetime.now().isoformat()
-                                entry["sync_targets"] = targets
-                                ledger.upsert(ledger_id, summary_type, entry)
-                                logging.info("📊 Updated ledger: synced=True, targets=%s", targets)
-                        else:
-                            logging.error("❌ DUAL-SYNC CONTENT FAILED: All targets failed for %s", stem)
-                    else:
-                        logging.warning("⚠️ JSON report not found for content sync: %s", report_path)
-
-                except Exception as sync_e:
-                    logging.warning("⚠️ Dual-sync content error: %s", sync_e)
-                    logging.info("⏳ Will retry full sync after TTS generation")
+                if report_path.exists():
+                    outcome = sync_service.run_dual_sync(report_path, label=result.get('id'))
+                    if outcome["success"]:
+                        sync_service.update_ledger_after_sync(
+                            ledger_id,
+                            summary_type,
+                            targets=outcome["targets"],
+                        )
+                        logging.info("⏳ Audio sync will happen after TTS generation")
+                else:
+                    logging.warning("⚠️ JSON report not found for content sync: %s", report_path)
 
         except Exception as e:
             logging.warning("⚠️ Export failed: %s", e)
@@ -649,41 +611,33 @@ async def reprocess_single_summary(
             if audio_path:
                 job_result['audio_path'] = audio_path
 
-        try:
-            audio_path_obj = Path(audio_path) if audio_path else None
-            sync_results = dual_sync_upload(json_path, audio_path_obj)
-        except Exception as sync_error:
-            job_result.update({'status': 'error', 'error': str(sync_error)})
-            metrics.record_reprocess_result(False)
-            return job_result
+        audio_path_obj = Path(audio_path) if audio_path else None
+        sync_outcome = sync_service.run_dual_sync(
+            json_path,
+            audio_path_obj,
+            label=f"{video_id}:{summary_type}",
+        )
 
-        sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-        postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-        targets = []
-        if sqlite_ok:
-            targets.append('sqlite')
-        if postgres_ok:
-            targets.append('postgres')
+        targets = sync_outcome["targets"]
         job_result['sync_targets'] = targets
 
-        success = bool(targets)
+        success = sync_outcome["success"]
         job_result['status'] = 'ok' if success else 'error'
+        if not success and sync_outcome.get("error"):
+            job_result['error'] = sync_outcome["error"]
         metrics.record_reprocess_result(success)
 
-        ledger_entry.update(
-            {
+        ledger_entry = sync_service.update_ledger_after_sync(
+            video_id,
+            summary_type,
+            targets=targets,
+            audio_path=audio_path if is_audio else None,
+            extra_fields={
                 'stem': json_path.stem,
                 'json': str(json_path),
-                'synced': success,
-                'last_synced': datetime.now().isoformat(),
                 'reprocessed_at': datetime.now().isoformat(),
-            }
+            },
         )
-        if is_audio and audio_path:
-            ledger_entry['mp3'] = audio_path
-        if targets:
-            ledger_entry['sync_targets'] = targets
-        ledger.upsert(video_id, summary_type, ledger_entry)
 
         emit_report_event(
             'reprocess-complete',
