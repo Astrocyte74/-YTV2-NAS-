@@ -65,6 +65,166 @@
   - `DATABASE_URL` – Postgres connection for direct upserts
   - `AUDIO_PUBLIC_BASE` – Base used to construct public audio URLs (e.g., `https://your-host` → `${AUDIO_PUBLIC_BASE}/exports/<file>.mp3`)
 
+## Local Hub Testing (curl one‑liners)
+
+Use these commands to verify your TTS hub favorites and synth endpoints.
+
+Setup (pick your hub)
+
+```bash
+export HUB=http://10.0.4.2:7860
+export API=$HUB/api
+# Optional (only if your hub requires favorites auth)
+# export TTSHUB_API_KEY=your_key
+```
+
+List favorites (shape and fields)
+
+```bash
+curl -sS ${API}/favorites | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
+# Filter examples
+curl -sS "${API}/favorites?tag=ai2ai" | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
+curl -sS "${API}/favorites?engine=kokoro" | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
+```
+
+Single favorite
+
+```bash
+curl -sS "${API}/favorites/<favorite_id>" | jq
+```
+
+Call formats (two valid bodies)
+
+```bash
+# By favorite (recommended)
+{"text":"Hello","favoriteSlug":"favorite--af-heart"}
+# or
+{"text":"Hello","favoriteId":"fav_6644b291e1dd"}
+
+# By engine + voice
+{"text":"Hello","engine":"kokoro","voice":"af_heart"}
+```
+
+Synthesize examples
+
+```bash
+# By slug (JSON back)
+curl -sS -X POST "${API}/synthesise" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello from hub","favoriteSlug":"favorite--af-heart"}' | jq
+
+# By id
+curl -sS -X POST "${API}/synthesise" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello","favoriteId":"fav_6644b291e1dd"}' | jq
+
+# By engine + voice
+curl -sS -X POST "${API}/synthesise" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello","engine":"kokoro","voice":"af_heart"}' | jq
+```
+
+Download the returned audio
+
+```bash
+resp=$(curl -sS -X POST "${API}/synthesise" -H 'Content-Type: application/json' -d '{"text":"Hello","favoriteSlug":"favorite--af-heart"}')
+u=$(printf %s "$resp" | jq -r '.url // .path // .filename // .file')
+curl -sS "${HUB}${u#/}" -o out.wav && echo "Saved: out.wav"
+```
+
+Notes
+
+- Favorites JSON includes: `label`, `engine`, `voiceId`, `slug`, `id`, `tags`, `notes`.
+- If the hub enforces auth on favorites, add the header to favorites/CRUD calls:
+  - `-H "Authorization: Bearer $TTSHUB_API_KEY"`
+- The audio path resolves under `${HUB}` (no `/api` prefix): combine as shown above.
+
+## In‑Container Testing (docker exec)
+
+Run these inside your NAS (host) against the running bot container to validate local hub connectivity and the AI↔AI recap flow with gendered voice selection.
+
+Prereqs
+
+- Container name: `youtube-summarizer-bot` (adjust if yours differs)
+- Hub env (on host): `export HUB=http://10.0.4.2:7860; export API=$HUB/api`
+
+Check hub from inside the container
+
+```bash
+docker exec \
+  -e TTSHUB_API_BASE=$API \
+  youtube-summarizer-bot \
+  python3 - <<'PY'
+import asyncio
+from modules.tts_hub import TTSHubClient
+
+async def main():
+    c = TTSHubClient.from_env()
+    favs = await c.fetch_favorites()
+    cat = await c.fetch_catalog()
+    print('favorites=', len(favs), 'voices=', len((cat or {}).get('voices') or []))
+    if favs:
+        slug = favs[0].get('slug')
+        r = await c.synthesise('hello from NAS', favorite_slug=slug)
+        print('synth_ok=', bool(r.get('audio_bytes')), 'path/url=', r.get('path') or r.get('url'))
+asyncio.run(main())
+PY
+```
+
+End‑to‑end AI↔AI recap (gender mapping, collision avoidance)
+
+```bash
+docker exec \
+  -e TTSHUB_API_BASE=$API \
+  -e OLLAMA_AI2AI_TTS_GENDER_FROM_PERSONA=1 \
+  youtube-summarizer-bot \
+  python3 - <<'PY'
+import os, asyncio
+from pathlib import Path
+from modules.tts_hub import TTSHubClient, filter_catalog_voices
+from modules.telegram_handler import YouTubeTelegramBot
+
+async def pick_gender_envs():
+    c = TTSHubClient.from_env()
+    cat = await c.fetch_catalog()
+    m = (filter_catalog_voices(cat, gender='male') or [])
+    f = (filter_catalog_voices(cat, gender='female') or [])
+    if m:
+        os.environ['OLLAMA_AI2AI_TTS_VOICE_MALE'] = m[0].get('id','')
+    if f:
+        os.environ['OLLAMA_AI2AI_TTS_VOICE_FEMALE'] = f[0].get('id','')
+
+async def run():
+    await pick_gender_envs()
+    bot = YouTubeTelegramBot('dummy', [0])
+    session = {
+        'persona_a': 'Sun Tzu (M)',
+        'persona_b': 'Cleopatra (F)',
+        'ai2ai_transcript': [
+            {'speaker':'A','text':'Strategy begins with information.'},
+            {'speaker':'B','text':'And leadership requires action.'},
+        ],
+        'ai2ai_model_a': 'testA',
+        'ai2ai_model_b': 'testB',
+    }
+    p = await bot._ollama_ai2ai_generate_audio(12345, session)
+    print('mp3:', p, 'exists:', Path(p).exists())
+
+asyncio.run(run())
+PY
+```
+
+View selection logs and collision handling
+
+```bash
+docker logs -f youtube-summarizer-bot | rg 'AI↔AI TTS voice|skip collision|Gendered TTS'
+```
+
+Expected
+
+- An MP3 at `exports/ai2ai_chat_*.mp3` created inside the container
+- Logs like `A resolved: male via env -> …`, `B resolved: female via env -> …`, and `skip collision …` only if the same voice was about to be re‑used
+
 ## Queue Worker (Auto‑run)
 
 - The image now starts both the Telegram bot and a background TTS queue watcher by default.
