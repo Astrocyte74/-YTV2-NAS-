@@ -47,6 +47,11 @@ from modules.tts_hub import (
     filter_catalog_voices,
 )
 from modules.tts_queue import enqueue as enqueue_tts_job
+from modules.telegram.ui.formatting import (
+    escape_markdown as ui_escape_markdown,
+    split_text_into_chunks as ui_split_chunks,
+)
+from modules.telegram.handlers.captions import build_ai2ai_audio_caption
 from modules import render_probe
 from modules.ollama_client import (
     OllamaClientError,
@@ -5030,104 +5035,34 @@ class YouTubeTelegramBot:
                 return msg
     
     def _split_text_into_chunks(self, text: str, max_chunk_size: int) -> List[str]:
-        """Split text into chunks that fit within Telegram message limits."""
-        if len(text) <= max_chunk_size:
-            return [text]
-        
-        chunks = []
-        current_pos = 0
-        
-        while current_pos < len(text):
-            # Calculate end position for this chunk
-            end_pos = current_pos + max_chunk_size
-            
-            if end_pos >= len(text):
-                # Last chunk - take the rest
-                chunks.append(text[current_pos:].strip())
-                break
-            
-            # Find a good break point (prefer paragraph breaks, then sentences)
-            break_point = end_pos
-            
-            # Look for paragraph break (double newline) within last 200 chars
-            paragraph_break = text.rfind('\n\n', current_pos, end_pos - 200)
-            if paragraph_break > current_pos:
-                break_point = paragraph_break
-            else:
-                # Look for sentence break within last 100 chars
-                sentence_break = text.rfind('. ', current_pos, end_pos - 100)
-                if sentence_break > current_pos:
-                    break_point = sentence_break + 1  # Include the period
-
-            # Avoid ending chunk on trailing backslash which would escape next chunk's first character
-            while break_point > current_pos and text[break_point - 1] == '\\':
-                break_point -= 1
-            
-            # Add this chunk
-            chunk = text[current_pos:break_point].strip()
-            if chunk:
-                chunks.append(chunk)
-            
-            current_pos = break_point
-            
-            # Skip whitespace at the start of next chunk
-            while current_pos < len(text) and text[current_pos].isspace():
-                current_pos += 1
-        
-        return chunks
+        # Delegate to UI helper for chunking
+        return ui_split_chunks(text, max_chunk_size)
     
     def _escape_markdown(self, text: str) -> str:
-        """Escape special characters for Telegram Markdown (minimal escaping)."""
-        if not text:
-            return ""
-        
-        # Only escape truly problematic characters for Telegram
-        escape_chars = ['_', '*', '[', ']', '`']
-        
-        escaped_text = text
-        for char in escape_chars:
-            escaped_text = escaped_text.replace(char, f'\\{char}')
-        
-        return escaped_text
+        # Delegate to UI helper for escaping
+        return ui_escape_markdown(text)
 
     def _ai2ai_audio_caption(self, session: Dict[str, Any]) -> str:
         defaults = self._ollama_persona_defaults()
         a_raw = session.get("persona_a") or defaults[0]
         b_raw = session.get("persona_b") or defaults[1]
-        a, _ = self._persona_parse(a_raw)
-        b, _ = self._persona_parse(b_raw)
+        a_disp, _ = self._persona_parse(a_raw)
+        b_disp, _ = self._persona_parse(b_raw)
         model_a = session.get("ai2ai_model_a") or session.get("model") or "?"
         model_b = session.get("ai2ai_model_b") or session.get("model") or "?"
         tts_a = (session.get('ai2ai_tts_a_label') or '').strip()
         tts_b = (session.get('ai2ai_tts_b_label') or '').strip()
         provider = (session.get('ai2ai_tts_provider') or '').strip()
-        # Clean provider prefix from labels, then inline after LLM model
-        def _strip_provider(label: str, prov: str) -> str:
-            if not label:
-                return ""
-            if prov and label.lower().startswith((prov + ":").lower()):
-                return label[len(prov) + 1 :]
-            return label
-
-        tts_a_disp = _strip_provider(tts_a, provider)
-        tts_b_disp = _strip_provider(tts_b, provider)
-
-        a_line = f"A · {self._escape_markdown(a)} ({self._escape_markdown(model_a)}"
-        if tts_a_disp:
-            a_line += f" · {self._escape_markdown(tts_a_disp)}"
-        a_line += ")"
-
-        b_line = f"B · {self._escape_markdown(b)} ({self._escape_markdown(model_b)}"
-        if tts_b_disp:
-            b_line += f" · {self._escape_markdown(tts_b_disp)}"
-        b_line += ")"
-
-        lines = [
-            "🔊 *AI↔AI Audio Recap*",
-            a_line,
-            b_line,
-        ]
-        return "\n".join(lines)
+        return build_ai2ai_audio_caption(
+            a_display=a_disp,
+            b_display=b_disp,
+            model_a=str(model_a),
+            model_b=str(model_b),
+            tts_a_label=tts_a,
+            tts_b_label=tts_b,
+            provider=provider,
+            escape_md=self._escape_markdown,
+        )
 
     async def _ollama_ai2ai_generate_audio(self, chat_id: int, session: Dict[str, Any]) -> Optional[str]:
         # Collect utterances
