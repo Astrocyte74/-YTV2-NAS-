@@ -53,6 +53,7 @@ from modules.telegram.ui.formatting import (
     split_text_into_chunks as ui_split_chunks,
 )
 from modules.telegram.handlers.captions import build_ai2ai_audio_caption
+from modules.telegram.handlers import ai2ai as ai2ai_handler
 from modules.telegram.ui.keyboards import build_ollama_models_keyboard as ui_build_models_keyboard
 from modules.telegram.ui.summary import (
     build_summary_keyboard as ui_build_summary_keyboard,
@@ -1034,33 +1035,7 @@ class YouTubeTelegramBot:
         return True
 
     def _ollama_ai2ai_default_models(self, models: List[str], allow_same: bool) -> Tuple[Optional[str], Optional[str]]:
-        available = list(models or [])
-        defaults_raw = os.getenv('OLLAMA_AI2AI_DEFAULT_MODELS', '')
-        preferred = [item.strip() for item in defaults_raw.split(',') if item.strip()]
-        model_a: Optional[str] = None
-        model_b: Optional[str] = None
-
-        for name in preferred:
-            if name in available:
-                if model_a is None:
-                    model_a = name
-                elif model_b is None and (allow_same or name != model_a):
-                    model_b = name
-            if model_a and model_b:
-                break
-
-        if model_a is None and available:
-            model_a = available[0]
-
-        if model_b is None:
-            for candidate in available:
-                if candidate != model_a:
-                    model_b = candidate
-                    break
-            if model_b is None and allow_same and model_a is not None and len(available) == 1:
-                model_b = model_a
-
-        return model_a, model_b
+        return ai2ai_handler.default_models(self, models, allow_same)
 
     def _ollama_single_default_model(self, models: List[str]) -> Optional[str]:
         available = list(models or [])
@@ -1529,169 +1504,16 @@ class YouTubeTelegramBot:
             cancel_checker=cancel_checker,
         )
 
-    async def _ollama_ai2ai_continue(self, chat_id: int, turn_number: Optional[int] = None, total_turns: Optional[int] = None):
-        session = self.ollama_sessions.get(chat_id) or {}
-        if session.get("ai2ai_cancel"):
-            return
-        model_a = session.get("ai2ai_model_a") or session.get("model")
-        model_b = session.get("ai2ai_model_b") or session.get("model")
-        if not model_a or not model_b:
-            try:
-                await self.application.bot.send_message(chat_id=chat_id, text="⚠️ Pick models for A and B in Options")
-            except Exception:
-                pass
-            return
-        session["active"] = True
-        if not (session.get("persona_a") and session.get("persona_b")):
-            rand_a, rand_b = self._ollama_persona_random_pair()
-            session.setdefault("persona_a", rand_a)
-            session.setdefault("persona_b", rand_b)
-        defaults = self._ollama_persona_defaults()
-        persona_a = session.get("persona_a") or defaults[0]
-        persona_b = session.get("persona_b") or defaults[1]
-        persona_a_custom = bool(session.get("persona_a_custom"))
-        persona_b_custom = bool(session.get("persona_b_custom"))
-        intro_a = bool(persona_a_custom and session.get("persona_a_intro_pending"))
-        intro_b = bool(persona_b_custom and session.get("persona_b_intro_pending"))
-        topic = session.get("topic", "The nature of space and time")
-        turn_idx = turn_number or (session.get("ai2ai_round") or 0) + 1
-        session["ai2ai_round"] = turn_idx
-        total = total_turns or session.get("ai2ai_turns_total")
-        if total and total < turn_idx:
-            total = turn_idx
-            session["ai2ai_turns_total"] = total
-        persona_a = session.get("persona_a") or defaults[0]
-        persona_b = session.get("persona_b") or defaults[1]
-        turn_suffix = f" · Turn {turn_idx}"
-        if total:
-            turn_suffix += f"/{total}"
-        # Turn A
-        a_messages = [
-            {
-                "role": "system",
-                "content": self._ollama_persona_system_prompt(persona_a, "opponent", intro_a),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Debate topic: {topic}. Present your view from your own time and culture, "
-                    "using only knowledge that would have been available in your lifetime."
-                ),
-            },
-        ]
-        # Create a tiny wrapper update-like object for streaming helper
-        from types import SimpleNamespace
-        class U:
-            def __init__(self, app, chat_id):
-                self.effective_chat = SimpleNamespace(id=chat_id)
-                self._app = app
-            @property
-            def message(self):
-                class M:
-                    def __init__(self, app, chat_id):
-                        self._app = app; self._chat = chat_id
-                    async def reply_text(self, text):
-                        return await self._app.bot.send_message(chat_id=self._chat, text=text)
-                return M(self._app, chat_id)
-        u = U(self.application, chat_id)
-        pa_disp, _ = self._persona_parse(persona_a)
-        a_text = await self._ollama_stream_chat(
-            u,
-            model_a,
-            a_messages,
-            label=f"{pa_disp} ({model_a}){turn_suffix}",
-            cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
-        )
-        session["ai2ai_last_a"] = a_text
-        # Append transcript for TTS recap (strip gender suffix in persona)
-        try:
-            tr = session.get("ai2ai_transcript")
-            if not isinstance(tr, list):
-                tr = []
-            pa_disp, _ = self._persona_parse(persona_a)
-            tr.append({"speaker": "A", "persona": pa_disp, "model": model_a, "text": a_text or ""})
-            session["ai2ai_transcript"] = tr[-200:]
-        except Exception:
-            pass
-        if intro_a:
-            session["persona_a_intro_pending"] = False
-        if session.get("ai2ai_cancel"):
-            return
-        # Turn B
-        b_messages = [
-            {
-                "role": "system",
-                "content": self._ollama_persona_system_prompt(persona_b, "opponent", intro_b),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Respond to {pa_disp}'s recent statement (they may live in a different era than you). "
-                    "Engage with their ideas from your own time and culture. If something is unfamiliar, ask a brief clarifying question.\n\n"
-                    f"{a_text[:800]}"
-                ),
-            },
-        ]
-        pb_disp, _ = self._persona_parse(persona_b)
-        b_text = await self._ollama_stream_chat(
-            u,
-            model_b,
-            b_messages,
-            label=f"{pb_disp} ({model_b}){turn_suffix}",
-            cancel_checker=lambda: bool((self.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
-        )
-        session["ai2ai_last_b"] = b_text
-        try:
-            tr = session.get("ai2ai_transcript")
-            if not isinstance(tr, list):
-                tr = []
-            pb_disp, _ = self._persona_parse(persona_b)
-            tr.append({"speaker": "B", "persona": pb_disp, "model": model_b, "text": b_text or ""})
-            session["ai2ai_transcript"] = tr[-200:]
-        except Exception:
-            pass
-        if intro_b:
-            session["persona_b_intro_pending"] = False
-        self.ollama_sessions[chat_id] = session
+    async def _ollama_ai2ai_continue(
+        self,
+        chat_id: int,
+        turn_number: Optional[int] = None,
+        total_turns: Optional[int] = None,
+    ) -> None:
+        await ai2ai_handler.continue_exchange(self, chat_id, turn_number=turn_number, total_turns=total_turns)
 
     async def _ollama_ai2ai_run(self, chat_id: int, turns: int):
-        session = self.ollama_sessions.get(chat_id) or {}
-        if turns <= 0:
-            return
-        session["ai2ai_round"] = 0
-        session["ai2ai_turns_total"] = turns
-        session["ai2ai_turns_left"] = turns
-        self.ollama_sessions[chat_id] = session
-        for remaining in range(turns, 0, -1):
-            if session.get("ai2ai_cancel"):
-                break
-            session["ai2ai_turns_left"] = remaining
-            self.ollama_sessions[chat_id] = session
-            current_turn = turns - remaining + 1
-            await self._ollama_ai2ai_continue(chat_id, turn_number=current_turn, total_turns=turns)
-            if session.get("ai2ai_cancel"):
-                break
-            session["ai2ai_turns_left"] = remaining - 1
-            self.ollama_sessions[chat_id] = session
-            if session["ai2ai_turns_left"] <= 0:
-                break
-        session["ai2ai_turns_left"] = 0
-        self.ollama_sessions[chat_id] = session
-        if session.get("ai2ai_cancel"):
-            session["ai2ai_active"] = False
-            session["ai2ai_cancel"] = False
-            self.ollama_sessions[chat_id] = session
-            try:
-                await self.application.bot.send_message(chat_id=chat_id, text="⏹️ AI↔AI exchange stopped.")
-            except Exception:
-                pass
-            return
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⏭️ Continue AI↔AI", callback_data="ollama_ai2ai:auto"), InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts")],
-            [InlineKeyboardButton("🔊 AI↔AI Audio", callback_data="ollama_ai2ai:tts")],
-            [InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear")]
-        ])
-        await self.application.bot.send_message(chat_id=chat_id, text="✅ AI↔AI session complete. Choose Continue to keep the exchange going, or Options to adjust turns.", reply_markup=kb)
+        await ai2ai_handler.run(self, chat_id, turns)
 
     async def _send_long_text_reply(self, update: Update, text: str, parse_mode: Optional[str] = None):
         text = text or ""
