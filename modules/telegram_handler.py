@@ -1241,12 +1241,27 @@ class YouTubeTelegramBot:
         # Strip gender suffix for natural prompts
         display, _ = self._persona_parse(persona or "the assistant")
         persona_clean = display or (persona or "the assistant")
-        content = f"You are {persona_clean}. Respond concisely and stay in character."
+        # Historical, context-bound persona behavior + curiosity
+        content = (
+            f"You are {persona_clean}, a historical figure. "
+            "Stay completely in character, using only the knowledge, language, and worldview available in your lifetime. "
+            "You are unaware of events, inventions, or people after your death. "
+            "When faced with unfamiliar modern concepts, express natural curiosity or skepticism and ask brief clarifying questions. "
+            "Debate respectfully and keep replies concise. Do not break character or mention being an AI."
+        )
         if intro_pending:
             if intro_target == "user":
-                content += " This is your first reply to the user: clearly introduce yourself in character and finish by inviting the user to introduce themselves."
+                content += (
+                    " This is your first reply to the user. Introduce yourself in character—state who you are, your era, and what principles guide your thinking. "
+                    "You have not heard of the user before; be curious about who they are and what world they come from. "
+                    "Finish by inviting the user to introduce themselves."
+                )
             else:
-                content += " This is your first reply in this exchange: clearly introduce yourself in character and finish by inviting your opponent to introduce themselves."
+                content += (
+                    " This is your first reply in this exchange. Introduce yourself in character—state who you are, your era, and what principles guide your thinking. "
+                    "You have never heard of your opponent before; be curious about who they are and what world they come from. "
+                    "Finish by inviting your opponent to explain themselves."
+                )
         return content
 
     def _ollama_single_view_toggle_row(self, view: str) -> List[InlineKeyboardButton]:
@@ -1938,7 +1953,13 @@ class YouTubeTelegramBot:
                 "role": "system",
                 "content": self._ollama_persona_system_prompt(persona_a, "opponent", intro_a),
             },
-            {"role": "user", "content": f"Debate topic: {topic}. Present your view."},
+            {
+                "role": "user",
+                "content": (
+                    f"Debate topic: {topic}. Present your view from your own time and culture, "
+                    "using only knowledge that would have been available in your lifetime."
+                ),
+            },
         ]
         # Create a tiny wrapper update-like object for streaming helper
         from types import SimpleNamespace
@@ -1984,7 +2005,14 @@ class YouTubeTelegramBot:
                 "role": "system",
                 "content": self._ollama_persona_system_prompt(persona_b, "opponent", intro_b),
             },
-            {"role": "user", "content": f"Respond to {persona_a}'s statement: {a_text[:800]}"},
+            {
+                "role": "user",
+                "content": (
+                    f"Respond to {pa_disp}'s recent statement (they may live in a different era than you). "
+                    "Engage with their ideas from your own time and culture. If something is unfamiliar, ask a brief clarifying question.\n\n"
+                    f"{a_text[:800]}"
+                ),
+            },
         ]
         pb_disp, _ = self._persona_parse(persona_b)
         b_text = await self._ollama_stream_chat(
