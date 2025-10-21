@@ -71,7 +71,6 @@ from modules.ollama_client import (
     OllamaClientError,
     get_models as ollama_get_models,
     chat as ollama_chat,
-    chat_stream as ollama_chat_stream,
     pull as ollama_pull,
 )
 import hashlib
@@ -1514,104 +1513,20 @@ class YouTubeTelegramBot:
         label: Optional[str] = None,
         cancel_checker: Optional[Callable[[], bool]] = None,
     ) -> str:
-        """Stream tokens from the hub and live-edit a single message. Returns final text."""
-        chat_id = update.effective_chat.id
-        prefix = f"{label}\n\n" if label else ""
-        msg = await update.message.reply_text(f"{prefix}⏳ …")
-        message_id = msg.message_id
-        app = getattr(self, 'application', None)
-        bot = getattr(app, 'bot', None)
-        loop = asyncio.get_running_loop()
+        app = getattr(self, "application", None)
+        bot = getattr(app, "bot", None)
+        if bot is None:
+            raise RuntimeError("Telegram bot instance is not available")
+        from modules.services.ollama_stream import stream_chat as service_stream_chat
 
-        final_text: Dict[str, Any] = {"buf": "", "cancelled": False}
-
-        def _compose_text() -> str:
-            buf = final_text["buf"]
-            if label:
-                allowance = max(0, 4000 - len(prefix))
-                tail = buf[-allowance:] if len(buf) > allowance else buf
-                return f"{prefix}{tail}" if tail else prefix.rstrip()
-            return buf[-4000:] if len(buf) > 4000 else (buf or "⏳")
-
-        def _run_stream():
-            import time, logging
-            logging.info(f"Ollama streaming start: model={model} msgs={len(messages)}")
-            last = 0.0
-            try:
-                stream = ollama_chat_stream(messages, model)
-                for data in stream:
-                    if cancel_checker and cancel_checker():
-                        final_text["cancelled"] = True
-                        text = _compose_text()
-                        if text.strip():
-                            if label:
-                                text = text.rstrip() + "\n\n⏹️ Stopped."
-                            else:
-                                text = f"{text.rstrip()}\n\n⏹️ Stopped."
-                        else:
-                            text = f"{prefix}⏹️ Stopped." if label else "⏹️ Stopped."
-                        async def _cancel_edit():
-                            try:
-                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-                            except Exception:
-                                pass
-                        asyncio.run_coroutine_threadsafe(_cancel_edit(), loop)
-                        close = getattr(stream, "close", None)
-                        if callable(close):
-                            try:
-                                close()
-                            except Exception:
-                                pass
-                        break
-                    if not isinstance(data, dict):
-                        continue
-                    if data.get("status") == "starting":
-                        continue
-                    chunk = data.get("response")
-                    if isinstance(chunk, str) and chunk:
-                        final_text["buf"] += chunk
-                    else:
-                        msg = data.get("message")
-                        if isinstance(msg, dict):
-                            c = msg.get("content")
-                            if isinstance(c, str) and c:
-                                final_text["buf"] += c
-                            elif isinstance(c, list):
-                                for seg in c:
-                                    if isinstance(seg, dict):
-                                        t = seg.get("text") or seg.get("content")
-                                        if isinstance(t, str) and t:
-                                            final_text["buf"] += t
-                    now = time.time()
-                    if (now - last > 0.4) and final_text["buf"]:
-                        last = now
-                        text = _compose_text()
-                        async def _upd():
-                            try:
-                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-                            except Exception:
-                                pass
-                        asyncio.run_coroutine_threadsafe(_upd(), loop)
-                    if data.get("done"):
-                        text = _compose_text()
-                        async def _final():
-                            try:
-                                await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
-                            except Exception:
-                                pass
-                        asyncio.run_coroutine_threadsafe(_final(), loop)
-                        break
-            except Exception as e:
-                async def _err():
-                    try:
-                        msg = f"{prefix}❌ Stream error: {e}" if label else f"❌ Stream error: {e}"
-                        await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=msg)
-                    except Exception:
-                        pass
-                asyncio.run_coroutine_threadsafe(_err(), loop)
-
-        await loop.run_in_executor(None, _run_stream)
-        return final_text["buf"]
+        return await service_stream_chat(
+            update,
+            bot,
+            model,
+            messages,
+            label=label,
+            cancel_checker=cancel_checker,
+        )
 
     async def _ollama_ai2ai_continue(self, chat_id: int, turn_number: Optional[int] = None, total_turns: Optional[int] = None):
         session = self.ollama_sessions.get(chat_id) or {}
