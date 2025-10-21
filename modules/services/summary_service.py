@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -15,6 +16,8 @@ from telegram.constants import ParseMode
 from modules.metrics import metrics
 from modules import ledger, render_probe
 from modules.report_generator import create_report_from_youtube_summarizer
+from modules.summary_variants import merge_summary_variants
+from modules.event_stream import emit_report_event
 from nas_sync import dual_sync_upload
 
 
@@ -567,3 +570,213 @@ async def process_content_summary(
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)
         await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
+
+
+async def reprocess_single_summary(
+    handler,
+    video_id: str,
+    video_url: str,
+    summary_type: str,
+    ledger_entry: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    regenerate_audio: bool = True,
+) -> Dict[str, Any]:
+    ledger_entry = dict(ledger_entry or {})
+    proficiency = ledger_entry.get('proficiency')
+    job_result: Dict[str, Any] = {
+        'summary_type': summary_type,
+        'status': 'pending',
+    }
+
+    try:
+        result = await handler.summarizer.process_video(
+            video_url,
+            summary_type=summary_type,
+            proficiency_level=proficiency,
+        )
+
+        if not result or result.get('error'):
+            job_result.update({'status': 'error', 'error': result.get('error') if isinstance(result, dict) else 'unknown'})
+            metrics.record_reprocess_result(False)
+            return job_result
+
+        report_dict = create_report_from_youtube_summarizer(result)
+
+        target_basename = handler.json_exporter._generate_filename(report_dict)
+        candidate_name = target_basename if target_basename.endswith('.json') else f"{target_basename}.json"
+        candidate_path = Path(handler.json_exporter.reports_dir) / candidate_name
+
+        existing_report = None
+        if candidate_path.exists():
+            try:
+                with candidate_path.open('r', encoding='utf-8') as existing_file:
+                    existing_report = json.load(existing_file)
+            except Exception as load_error:
+                logging.warning(
+                    "⚠️  Failed to load existing report for variant merge (%s): %s",
+                    candidate_path,
+                    load_error,
+                )
+
+        report_dict = merge_summary_variants(
+            new_report=report_dict,
+            requested_variant=summary_type,
+            existing_report=existing_report,
+        )
+
+        json_path = Path(
+            handler.json_exporter.save_report(
+                report_dict,
+                filename=target_basename,
+                overwrite=True,
+            )
+        )
+        job_result['report_path'] = str(json_path)
+
+        summary_meta = report_dict.get('summary') or {}
+        summary_text = summary_meta.get('summary') or ''
+
+        audio_path = None
+        is_audio = summary_type.startswith('audio')
+
+        if is_audio:
+            if regenerate_audio:
+                audio_path = await generate_tts_audio_file(handler, summary_text, video_id, json_path)
+            else:
+                existing_mp3 = ledger_entry.get('mp3')
+                if existing_mp3 and Path(existing_mp3).exists():
+                    audio_path = existing_mp3
+            if audio_path:
+                job_result['audio_path'] = audio_path
+
+        try:
+            audio_path_obj = Path(audio_path) if audio_path else None
+            sync_results = dual_sync_upload(json_path, audio_path_obj)
+        except Exception as sync_error:
+            job_result.update({'status': 'error', 'error': str(sync_error)})
+            metrics.record_reprocess_result(False)
+            return job_result
+
+        sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+        postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+        targets = []
+        if sqlite_ok:
+            targets.append('sqlite')
+        if postgres_ok:
+            targets.append('postgres')
+        job_result['sync_targets'] = targets
+
+        success = bool(targets)
+        job_result['status'] = 'ok' if success else 'error'
+        metrics.record_reprocess_result(success)
+
+        ledger_entry.update(
+            {
+                'stem': json_path.stem,
+                'json': str(json_path),
+                'synced': success,
+                'last_synced': datetime.now().isoformat(),
+                'reprocessed_at': datetime.now().isoformat(),
+            }
+        )
+        if is_audio and audio_path:
+            ledger_entry['mp3'] = audio_path
+        if targets:
+            ledger_entry['sync_targets'] = targets
+        ledger.upsert(video_id, summary_type, ledger_entry)
+
+        emit_report_event(
+            'reprocess-complete',
+            {
+                'video_id': video_id,
+                'summary_type': summary_type,
+                'status': job_result['status'],
+                'targets': targets,
+            },
+        )
+
+        return job_result
+
+    except Exception as e:
+        logging.exception("Reprocess failure for %s:%s", video_id, summary_type)
+        job_result.update({'status': 'error', 'error': str(e)})
+        metrics.record_reprocess_result(False)
+        emit_report_event(
+            'reprocess-error',
+            {
+                'video_id': video_id,
+                'summary_type': summary_type,
+                'error': str(e),
+            },
+        )
+        return job_result
+
+
+async def reprocess_video(
+    handler,
+    video_id: str,
+    summary_types: Optional[List[str]] = None,
+    force: bool = False,
+    regenerate_audio: bool = True,
+    video_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    normalized_id = handler._normalize_content_id(video_id)
+    summary_types = summary_types or handler._discover_summary_types(normalized_id)
+
+    if not summary_types:
+        metrics.record_reprocess_result(False)
+        emit_report_event(
+            'reprocess-error',
+            {
+                'video_id': normalized_id,
+                'error': 'no-summary-types',
+            },
+        )
+        raise ValueError(f"No summary types found for video {normalized_id}")
+
+    resolved_url = handler._resolve_video_url(normalized_id, provided_url=video_url)
+    if not resolved_url:
+        metrics.record_reprocess_result(False)
+        emit_report_event(
+            'reprocess-error',
+            {
+                'video_id': normalized_id,
+                'error': 'missing-url',
+            },
+        )
+        raise ValueError(f"Could not resolve URL for video {normalized_id}")
+
+    metrics.record_reprocess_request(len(summary_types))
+    emit_report_event(
+        'reprocess-requested',
+        {
+            'video_id': normalized_id,
+            'summary_types': summary_types,
+        },
+    )
+
+    ledger_data = ledger.list_all()
+    results = []
+    for current_type in summary_types:
+        ledger_entry = ledger_data.get(f"{normalized_id}:{current_type}")
+        job_result = await reprocess_single_summary(
+            handler,
+            normalized_id,
+            resolved_url,
+            current_type,
+            ledger_entry=ledger_entry,
+            force=force,
+            regenerate_audio=regenerate_audio,
+        )
+        results.append(job_result)
+        if job_result.get('status') == 'ok':
+            ledger_data[f"{normalized_id}:{current_type}"] = ledger.get(normalized_id, current_type)
+
+    failures = sum(1 for r in results if r.get('status') != 'ok')
+
+    return {
+        'video_id': normalized_id,
+        'summary_types': summary_types,
+        'results': results,
+        'failures': failures,
+    }

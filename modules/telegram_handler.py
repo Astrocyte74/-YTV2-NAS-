@@ -420,139 +420,15 @@ class YouTubeTelegramBot:
         force: bool = False,
         regenerate_audio: bool = True,
     ) -> Dict[str, Any]:
-        """Reprocess a single summary variant headlessly."""
-
-        ledger_entry = dict(ledger_entry or {})
-        proficiency = ledger_entry.get('proficiency')
-        job_result: Dict[str, Any] = {
-            'summary_type': summary_type,
-            'status': 'pending',
-        }
-
-        try:
-            result = await self.summarizer.process_video(
-                video_url,
-                summary_type=summary_type,
-                proficiency_level=proficiency,
-            )
-
-            if not result or result.get('error'):
-                job_result.update({'status': 'error', 'error': result.get('error') if isinstance(result, dict) else 'unknown'})
-                metrics.record_reprocess_result(False)
-                return job_result
-
-            report_dict = create_report_from_youtube_summarizer(result)
-
-            # Merge with existing variants (if any) before persisting
-            target_basename = self.json_exporter._generate_filename(report_dict)
-            candidate_name = target_basename if target_basename.endswith('.json') else f"{target_basename}.json"
-            candidate_path = Path(self.json_exporter.reports_dir) / candidate_name
-
-            existing_report = None
-            if candidate_path.exists():
-                try:
-                    with open(candidate_path, 'r', encoding='utf-8') as existing_file:
-                        existing_report = json.load(existing_file)
-                except Exception as load_error:
-                    logger.warning(
-                        "⚠️  Failed to load existing report for variant merge (%s): %s",
-                        candidate_path,
-                        load_error,
-                    )
-
-            report_dict = merge_summary_variants(
-                new_report=report_dict,
-                requested_variant=summary_type,
-                existing_report=existing_report,
-            )
-
-            json_path = Path(
-                self.json_exporter.save_report(
-                    report_dict,
-                    filename=target_basename,
-                    overwrite=True,
-                )
-            )
-            job_result['report_path'] = str(json_path)
-
-            summary_meta = report_dict.get('summary') or {}
-            summary_text = summary_meta.get('summary') or ''
-
-            audio_path = None
-            is_audio = summary_type.startswith('audio')
-
-            if is_audio:
-                if regenerate_audio:
-                    audio_path = await self._generate_tts_audio_file(summary_text, video_id, json_path)
-                else:
-                    existing_mp3 = ledger_entry.get('mp3')
-                    if existing_mp3 and Path(existing_mp3).exists():
-                        audio_path = existing_mp3
-                if audio_path:
-                    job_result['audio_path'] = audio_path
-
-            # Sync with dashboard (include audio if available)
-            try:
-                audio_path_obj = Path(audio_path) if audio_path else None
-                sync_results = dual_sync_upload(json_path, audio_path_obj)
-            except Exception as sync_error:
-                job_result.update({'status': 'error', 'error': str(sync_error)})
-                metrics.record_reprocess_result(False)
-                return job_result
-
-            sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
-            postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
-            targets = []
-            if sqlite_ok:
-                targets.append('sqlite')
-            if postgres_ok:
-                targets.append('postgres')
-            job_result['sync_targets'] = targets
-
-            success = bool(targets)
-            job_result['status'] = 'ok' if success else 'error'
-            metrics.record_reprocess_result(success)
-
-            ledger_entry.update(
-                {
-                    'stem': json_path.stem,
-                    'json': str(json_path),
-                    'synced': success,
-                    'last_synced': datetime.now().isoformat(),
-                    'reprocessed_at': datetime.now().isoformat(),
-                }
-            )
-            if is_audio and audio_path:
-                ledger_entry['mp3'] = audio_path
-            if targets:
-                ledger_entry['sync_targets'] = targets
-            ledger.upsert(ledger_id, summary_type, ledger_entry)
-
-            emit_report_event(
-                'reprocess-complete',
-                {
-                    'video_id': video_id,
-                    'summary_type': summary_type,
-                    'status': job_result['status'],
-                    'targets': targets,
-                },
-            )
-
-            return job_result
-
-        except Exception as e:
-            logging.exception(f"Reprocess failure for {video_id}:{summary_type}")
-            job_result.update({'status': 'error', 'error': str(e)})
-            metrics.record_reprocess_result(False)
-            emit_report_event(
-                'reprocess-error',
-                {
-                    'video_id': video_id,
-                    'summary_type': summary_type,
-                    'error': str(e),
-                },
-            )
-            return job_result
+        return await summary_service.reprocess_single_summary(
+            self,
+            video_id,
+            video_url,
+            summary_type,
+            ledger_entry=ledger_entry,
+            force=force,
+            regenerate_audio=regenerate_audio,
+        )
 
     async def reprocess_video(
         self,
@@ -562,68 +438,15 @@ class YouTubeTelegramBot:
         regenerate_audio: bool = True,
         video_url: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Public entry point to reprocess summaries for an existing video."""
-
-        normalized_id = self._normalize_content_id(video_id)
-        summary_types = summary_types or self._discover_summary_types(normalized_id)
-
-        if not summary_types:
-            metrics.record_reprocess_result(False)
-            emit_report_event(
-                'reprocess-error',
-                {
-                    'video_id': normalized_id,
-                    'error': 'no-summary-types',
-                },
-            )
-            raise ValueError(f"No summary types found for video {normalized_id}")
-
-        resolved_url = self._resolve_video_url(normalized_id, provided_url=video_url)
-        if not resolved_url:
-            metrics.record_reprocess_result(False)
-            emit_report_event(
-                'reprocess-error',
-                {
-                    'video_id': normalized_id,
-                    'error': 'missing-url',
-                },
-            )
-            raise ValueError(f"Could not resolve URL for video {normalized_id}")
-
-        metrics.record_reprocess_request(len(summary_types))
-        emit_report_event(
-            'reprocess-requested',
-            {
-                'video_id': normalized_id,
-                'summary_types': summary_types,
-            },
+        return await summary_service.reprocess_video(
+            self,
+            video_id,
+            summary_types=summary_types,
+            force=force,
+            regenerate_audio=regenerate_audio,
+            video_url=video_url,
         )
 
-        ledger_data = ledger.list_all()
-        results = []
-        for summary_type in summary_types:
-            ledger_entry = ledger_data.get(f"{normalized_id}:{summary_type}")
-            job_result = await self._reprocess_single_summary(
-                normalized_id,
-                resolved_url,
-                summary_type,
-                ledger_entry=ledger_entry,
-                force=force,
-                regenerate_audio=regenerate_audio,
-            )
-            results.append(job_result)
-            if job_result.get('status') == 'ok':
-                ledger_data[f"{normalized_id}:{summary_type}"] = ledger.get(normalized_id, summary_type)
-
-        failures = sum(1 for r in results if r.get('status') != 'ok')
-
-        return {
-            'video_id': normalized_id,
-            'summary_types': summary_types,
-            'results': results,
-            'failures': failures,
-        }
-    
     def setup_handlers(self):
         """Set up bot command and message handlers."""
         if not self.application:
