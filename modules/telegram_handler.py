@@ -16,7 +16,6 @@ import time
 import urllib.parse
 from datetime import datetime
 import random
-import secrets
 from typing import List, Dict, Any, Optional, Callable, Tuple, Awaitable
 from pathlib import Path
 
@@ -32,7 +31,7 @@ from telegram.constants import ParseMode
 
 from export_utils import SummaryExporter
 from modules.report_generator import JSONReportGenerator, create_report_from_youtube_summarizer
-from modules import ledger, render_probe
+from modules import ledger
 from modules.metrics import metrics
 from modules.event_stream import emit_report_event
 from modules.summary_variants import merge_summary_variants, normalize_variant_id
@@ -116,8 +115,6 @@ class YouTubeTelegramBot:
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
-        # Pending delete tokens mapping short callback tokens to full report IDs
-        self._pending_delete_tokens: Dict[str, str] = {}
         
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
@@ -1335,100 +1332,6 @@ class YouTubeTelegramBot:
         elif callback_data.startswith("ollama_"):
             await self._handle_ollama_callback(query, callback_data)
         
-        # Handle delete requests
-        elif callback_data.startswith('delete_'):
-            token = callback_data.replace('delete_', '', 1)
-            report_id = self._get_delete_target(token) or token
-            display_id = self._escape_markdown(self._shorten_report_id(report_id))
-
-            keyboard = InlineKeyboardMarkup([[ 
-                InlineKeyboardButton("✅ Yes, delete", callback_data=f"confirm_del_{token}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_del_{token}")
-            ]])
-            await query.edit_message_text(
-                f"⚠️ Delete this summary?\n\nID: `{display_id}`\nThis removes it from both Telegram and the Dashboard.",
-                parse_mode=ParseMode.MARKDOWN,
-                reply_markup=keyboard
-            )
-
-        elif callback_data.startswith('cancel_del_'):
-            token = callback_data.replace('cancel_del_', '', 1)
-            report_id = self._consume_delete_token(token)
-            display_id = self._shorten_report_id(report_id) if report_id else None
-            message = "🚫 Delete cancelled."
-            if display_id:
-                message = f"🚫 Delete cancelled for `{self._escape_markdown(display_id)}`."
-            await query.edit_message_text(message, parse_mode=ParseMode.MARKDOWN)
-
-        elif callback_data == 'cancel_del':
-            await query.edit_message_text("🚫 Delete cancelled.")
-
-        elif callback_data.startswith('confirm_del_'):
-            token = callback_data.replace('confirm_del_', '', 1)
-            report_id = self._consume_delete_token(token) or token
-
-            # Helper function to delete from Render
-            def delete_from_render(rid):
-                if requests is None:
-                    return False, "Dashboard (requests library not available)"
-                    
-                dashboard_url = os.getenv('DASHBOARD_URL', 'https://ytv2-dashboard-postgres.onrender.com')
-                dashboard_token = os.getenv('DASHBOARD_TOKEN', '')
-                url = f"{dashboard_url}/api/delete/{urllib.parse.quote(rid, safe='')}"
-                headers = {}
-                if dashboard_token:
-                    headers["Authorization"] = f"Bearer {dashboard_token}"
-                
-                # Try twice with small backoff
-                for attempt in range(2):
-                    try:
-                        r = requests.delete(url, headers=headers, timeout=8)
-                        if r.status_code in (200, 404):  # 404 = already gone = success
-                            return True, "Dashboard"
-                        return False, f"Dashboard (HTTP {r.status_code})"
-                    except Exception as e:
-                        if attempt == 0:
-                            time.sleep(0.6)
-                        else:
-                            return False, f"Dashboard (network error)"
-                return False, "Dashboard (timeout)"
-            
-            # Delete from both systems
-            render_ok, render_msg = delete_from_render(report_id)
-            
-            # Delete from NAS
-            nas_ok = False
-            nas_path = Path(f'/app/data/reports/{report_id}.json')
-            if nas_path.exists():
-                try:
-                    nas_path.unlink()
-                    nas_ok = True
-                    nas_msg = "NAS"
-                except Exception as e:
-                    nas_msg = f"NAS (error: {e})"
-            else:
-                nas_ok = True  # Not found = already gone = success
-                nas_msg = "NAS (already gone)"
-            
-            # Build result message
-            if render_ok and nas_ok:
-                result = "✅ Summary deleted successfully"
-            elif render_ok:
-                result = f"✅ Deleted from Dashboard\n⚠️ {nas_msg}"
-            elif nas_ok:
-                result = f"⚠️ Failed: {render_msg}\n✅ Deleted from NAS"
-            else:
-                result = f"❌ Delete failed:\n• {render_msg}\n• {nas_msg}"
-            
-            # Update message and remove buttons
-            await query.edit_message_text(result)
-            await query.answer("Deleted" if (render_ok or nas_ok) else "Failed")
-
-        elif callback_data == 'cancel_del':
-            # Just remove the confirmation buttons
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.answer("Cancelled")
-        
         elif callback_data.startswith('listen_this'):
             # One-off TTS for the exact summary on this message
             try:
@@ -1884,29 +1787,6 @@ class YouTubeTelegramBot:
     async def _handle_tts_callback(self, query, callback_data: str):
         await tts_service.handle_callback(self, query, callback_data)
 
-    # Quiz helper utilities live in modules.services.summary_service
-
-    def _register_delete_token(self, report_id: str) -> str:
-        token = secrets.token_hex(4)
-        while token in self._pending_delete_tokens:
-            token = secrets.token_hex(4)
-        self._pending_delete_tokens[token] = report_id
-        return token
-
-    def _get_delete_target(self, token: str) -> Optional[str]:
-        return self._pending_delete_tokens.get(token)
-
-    def _consume_delete_token(self, token: str) -> Optional[str]:
-        return self._pending_delete_tokens.pop(token, None)
-
-    @staticmethod
-    def _shorten_report_id(report_id: str) -> str:
-        if not report_id:
-            return "(unknown)"
-        if len(report_id) <= 40:
-            return report_id
-        return f"{report_id[:24]}…{report_id[-8:]}"
-
     async def _show_proficiency_selector(self, query, summary_type: str):
         """Show proficiency level selector for language learning"""
         if summary_type == "audio-fr":
@@ -1977,7 +1857,6 @@ class YouTubeTelegramBot:
             return None
 
         report_id_encoded = urllib.parse.quote(report_id, safe='')
-        delete_token = self._register_delete_token(report_id)
 
         listen_cb = f"listen_this:{video_id}:{base_variant}"
         gen_cb = f"gen_quiz:{video_id}"
@@ -1992,8 +1871,7 @@ class YouTubeTelegramBot:
                 InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb) if len(gen_cb.encode('utf-8')) <= 64 else None,
             ],
             [
-                InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
-                InlineKeyboardButton("🗑️ Delete…", callback_data=f"delete_{delete_token}")
+                InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")
             ]
         ]
 

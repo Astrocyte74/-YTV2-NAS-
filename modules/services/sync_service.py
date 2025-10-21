@@ -7,14 +7,12 @@ from typing import Any, Dict, List, Optional, Union
 
 from nas_sync import dual_sync_upload
 from modules import ledger
-from modules.render_api_client import create_client_from_env as create_render_client
 
 logger = logging.getLogger(__name__)
 
 
 PathLike = Union[str, Path]
 REPORTS_DIR = Path("/app/data/reports")
-_RENDER_CLIENT = None
 
 
 def _to_path(value: Optional[PathLike]) -> Optional[Path]:
@@ -182,27 +180,3 @@ def sync_audio_variant(
         "targets": outcome["targets"],
         "report_path": str(report_path),
     }
-
-
-def upload_audio_to_render(content_id: str, audio_path: PathLike) -> bool:
-    """Upload MP3 to Render via API client."""
-    global _RENDER_CLIENT
-    audio = _to_path(audio_path)
-    if audio is None or not audio.exists():
-        logger.warning("⚠️ Render upload skipped; file missing: %s", audio_path)
-        return False
-
-    try:
-        if _RENDER_CLIENT is None:
-            _RENDER_CLIENT = create_render_client()
-    except Exception as exc:
-        logger.warning("⚠️ Render client unavailable: %s", exc)
-        return False
-
-    try:
-        _RENDER_CLIENT.upload_audio_file(audio, content_id)
-        logger.info("✅ Uploaded audio to Render for %s", content_id)
-        return True
-    except Exception as exc:  # pragma: no cover - network call
-        logger.warning("⚠️ Render audio upload failed for %s: %s", content_id, exc)
-        return False

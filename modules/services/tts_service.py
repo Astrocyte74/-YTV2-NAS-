@@ -397,7 +397,7 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
                 sync_result.get("error"),
             )
         if content_identifier:
-            sync_service.upload_audio_to_render(content_identifier, audio_path)
+            logging.debug("Audio ready for %s (dashboard upload via Postgres)", content_identifier)
 
         audio_reply_markup = handler._build_audio_inline_keyboard(
             normalized_id,

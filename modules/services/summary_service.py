@@ -21,7 +21,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 from modules.metrics import metrics
-from modules import ledger, render_probe
+from modules import ledger
 from modules.report_generator import create_report_from_youtube_summarizer
 from modules.summary_variants import merge_summary_variants, normalize_variant_id
 from modules.event_stream import emit_report_event
@@ -403,10 +403,8 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     if row2:
                         keyboard.append(row2)
 
-                    delete_token = handler._register_delete_token(report_id)
                     keyboard.append([
-                        InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
-                        InlineKeyboardButton("🗑️ Delete…", callback_data=f"delete_{delete_token}")
+                        InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")
                     ])
 
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -659,12 +657,12 @@ async def process_content_summary(
         entry = ledger.get(ledger_id, summary_type)
         if entry:
             logging.info(f"📄 Found existing entry for {display_id}:{summary_type}")
-            if render_probe.render_has(entry.get("stem")):
+            if entry.get("synced"):
                 await send_existing_summary_notice(handler, query, ledger_id, summary_type)
-                logging.info(f"♻️ SKIPPED: {display_id} already on dashboard")
+                logging.info(f"♻️ SKIPPED: {display_id} already synced")
                 return
             else:
-                logging.info("🔄 Content exists in database but missing from Dashboard - processing fresh")
+                logging.info("🔄 Content exists but not marked synced - processing fresh")
 
         logging.info("🎬 PROCESSING: %s | %s | user: %s | URL: %s", display_id, summary_type, user_name, url)
         logging.info("🧠 LLM: %s/%s", handler.summarizer.llm_provider, handler.summarizer.model)
