@@ -65,6 +65,80 @@
   - `DATABASE_URL` – Postgres connection for direct upserts
   - `AUDIO_PUBLIC_BASE` – Base used to construct public audio URLs (e.g., `https://your-host` → `${AUDIO_PUBLIC_BASE}/exports/<file>.mp3`)
 
+## Local Hub Testing (curl one‑liners)
+
+Use these commands to verify your TTS hub favorites and synth endpoints.
+
+Setup (pick your hub)
+
+```bash
+export HUB=http://10.0.4.2:7860
+export API=$HUB/api
+# Optional (only if your hub requires favorites auth)
+# export TTSHUB_API_KEY=your_key
+```
+
+List favorites (shape and fields)
+
+```bash
+curl -sS ${API}/favorites | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
+# Filter examples
+curl -sS "${API}/favorites?tag=ai2ai" | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
+curl -sS "${API}/favorites?engine=kokoro" | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
+```
+
+Single favorite
+
+```bash
+curl -sS "${API}/favorites/<favorite_id>" | jq
+```
+
+Call formats (two valid bodies)
+
+```bash
+# By favorite (recommended)
+{"text":"Hello","favoriteSlug":"favorite--af-heart"}
+# or
+{"text":"Hello","favoriteId":"fav_6644b291e1dd"}
+
+# By engine + voice
+{"text":"Hello","engine":"kokoro","voice":"af_heart"}
+```
+
+Synthesize examples
+
+```bash
+# By slug (JSON back)
+curl -sS -X POST "${API}/synthesise" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello from hub","favoriteSlug":"favorite--af-heart"}' | jq
+
+# By id
+curl -sS -X POST "${API}/synthesise" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello","favoriteId":"fav_6644b291e1dd"}' | jq
+
+# By engine + voice
+curl -sS -X POST "${API}/synthesise" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello","engine":"kokoro","voice":"af_heart"}' | jq
+```
+
+Download the returned audio
+
+```bash
+resp=$(curl -sS -X POST "${API}/synthesise" -H 'Content-Type: application/json' -d '{"text":"Hello","favoriteSlug":"favorite--af-heart"}')
+u=$(printf %s "$resp" | jq -r '.url // .path // .filename // .file')
+curl -sS "${HUB}${u#/}" -o out.wav && echo "Saved: out.wav"
+```
+
+Notes
+
+- Favorites JSON includes: `label`, `engine`, `voiceId`, `slug`, `id`, `tags`, `notes`.
+- If the hub enforces auth on favorites, add the header to favorites/CRUD calls:
+  - `-H "Authorization: Bearer $TTSHUB_API_KEY"`
+- The audio path resolves under `${HUB}` (no `/api` prefix): combine as shown above.
+
 ## Queue Worker (Auto‑run)
 
 - The image now starts both the Telegram bot and a background TTS queue watcher by default.
