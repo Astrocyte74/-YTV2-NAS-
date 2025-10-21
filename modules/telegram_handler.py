@@ -5073,18 +5073,32 @@ class YouTubeTelegramBot:
         tts_a = (session.get('ai2ai_tts_a_label') or '').strip()
         tts_b = (session.get('ai2ai_tts_b_label') or '').strip()
         provider = (session.get('ai2ai_tts_provider') or '').strip()
+        # Clean provider prefix from labels, then inline after LLM model
+        def _strip_provider(label: str, prov: str) -> str:
+            if not label:
+                return ""
+            if prov and label.lower().startswith((prov + ":").lower()):
+                return label[len(prov) + 1 :]
+            return label
+
+        tts_a_disp = _strip_provider(tts_a, provider)
+        tts_b_disp = _strip_provider(tts_b, provider)
+
+        a_line = f"A · {self._escape_markdown(a)} ({self._escape_markdown(model_a)}"
+        if tts_a_disp:
+            a_line += f" · {self._escape_markdown(tts_a_disp)}"
+        a_line += ")"
+
+        b_line = f"B · {self._escape_markdown(b)} ({self._escape_markdown(model_b)}"
+        if tts_b_disp:
+            b_line += f" · {self._escape_markdown(tts_b_disp)}"
+        b_line += ")"
+
         lines = [
             "🔊 *AI↔AI Audio Recap*",
-            f"A · {self._escape_markdown(a)} ({self._escape_markdown(model_a)})",
-            f"B · {self._escape_markdown(b)} ({self._escape_markdown(model_b)})",
+            a_line,
+            b_line,
         ]
-        # Append TTS model info if available
-        if tts_a or tts_b:
-            prov = f"{provider}: " if provider else ""
-            if tts_a:
-                lines.append(f"A TTS · {self._escape_markdown(prov + tts_a)}")
-            if tts_b:
-                lines.append(f"B TTS · {self._escape_markdown(prov + tts_b)}")
         return "\n".join(lines)
 
     async def _ollama_ai2ai_generate_audio(self, chat_id: int, session: Dict[str, Any]) -> Optional[str]:
