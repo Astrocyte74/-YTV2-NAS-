@@ -74,7 +74,7 @@ from modules.ollama_client import (
     get_models as ollama_get_models,
     pull as ollama_pull,
 )
-from modules.services import ollama_service, tts_service
+from modules.services import ollama_service, summary_service, tts_service
 import hashlib
 import unicodedata
 from pydub import AudioSegment
