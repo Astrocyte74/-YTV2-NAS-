@@ -5070,11 +5070,21 @@ class YouTubeTelegramBot:
         b, _ = self._persona_parse(b_raw)
         model_a = session.get("ai2ai_model_a") or session.get("model") or "?"
         model_b = session.get("ai2ai_model_b") or session.get("model") or "?"
+        tts_a = (session.get('ai2ai_tts_a_label') or '').strip()
+        tts_b = (session.get('ai2ai_tts_b_label') or '').strip()
+        provider = (session.get('ai2ai_tts_provider') or '').strip()
         lines = [
             "🔊 *AI↔AI Audio Recap*",
             f"A · {self._escape_markdown(a)} ({self._escape_markdown(model_a)})",
             f"B · {self._escape_markdown(b)} ({self._escape_markdown(model_b)})",
         ]
+        # Append TTS model info if available
+        if tts_a or tts_b:
+            prov = f"{provider}: " if provider else ""
+            if tts_a:
+                lines.append(f"A TTS · {self._escape_markdown(prov + tts_a)}")
+            if tts_b:
+                lines.append(f"B TTS · {self._escape_markdown(prov + tts_b)}")
         return "\n".join(lines)
 
     async def _ollama_ai2ai_generate_audio(self, chat_id: int, session: Dict[str, Any]) -> Optional[str]:
@@ -5298,6 +5308,21 @@ class YouTubeTelegramBot:
                     logging.warning("AI↔AI TTS voice resolution fell back to generic or unresolved; switching to OpenAI fallback")
                     # As last resort, let OpenAI path run
                     use_local = False
+                else:
+                    # Store provider + human labels for caption
+                    def _label_for(fav: Optional[str], vid: Optional[str], eng: Optional[str]) -> str:
+                        eng_s = (eng or "").strip()
+                        if vid and vid in id_to_voice:
+                            v = id_to_voice[vid]
+                            name = (v.get('label') or vid)
+                        else:
+                            name = fav or vid or ""
+                        if eng_s and name:
+                            return f"{eng_s}:{name}"
+                        return name or eng_s
+                    session['ai2ai_tts_provider'] = 'local'
+                    session['ai2ai_tts_a_label'] = _label_for(fav_a, vid_a, eng_a)
+                    session['ai2ai_tts_b_label'] = _label_for(fav_b, vid_b, eng_b)
             except Exception as exc:
                 logging.exception(f"Gendered TTS voice resolution failed: {exc}")
                 use_local = False
@@ -5375,6 +5400,15 @@ class YouTubeTelegramBot:
                 tmp_segments.append(AudioSegment.from_file(str(out_path)))
                 try:
                     out_path.unlink()
+                except Exception:
+                    pass
+                # Store info for caption (once)
+                try:
+                    if not session.get('ai2ai_tts_provider'):
+                        session['ai2ai_tts_provider'] = 'openai'
+                        # Default OpenAI voice in summarizer is 'fable' on 'tts-1'
+                        session['ai2ai_tts_a_label'] = 'openai:tts-1:fable'
+                        session['ai2ai_tts_b_label'] = 'openai:tts-1:fable'
                 except Exception:
                     pass
 
