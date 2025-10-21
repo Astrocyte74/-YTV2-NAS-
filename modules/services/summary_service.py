@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -10,7 +13,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 from modules.metrics import metrics
-from modules.telegram.handlers import ai2ai as ai2ai_handler
+from modules import ledger, render_probe
+from modules.report_generator import create_report_from_youtube_summarizer
+from nas_sync import dual_sync_upload
 
 
 async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None) -> None:
@@ -278,3 +283,287 @@ async def handle_audio_summary(handler, query, result: Dict[str, Any], summary_t
     except Exception as exc:
         logging.error("Error handling audio summary: %s", exc)
         await query.edit_message_text(f"❌ Error generating audio summary: {str(exc)[:100]}...")
+
+
+async def send_existing_summary_notice(handler, query, video_id: str, summary_type: str) -> None:
+    variants = handler._discover_summary_types(video_id)
+    message_lines = [
+        f"✅ {handler._friendly_variant_label(summary_type)} is already on the dashboard."
+    ]
+    if variants:
+        message_lines.append("\nAvailable variants:")
+        message_lines.extend(f"• {handler._friendly_variant_label(variant)}" for variant in sorted(variants))
+    message_lines.append("\nOpen the summary or re-run a variant below.")
+
+    normalized_id = handler._normalize_content_id(video_id)
+    reply_markup = handler._build_summary_keyboard(variants, normalized_id)
+    await query.edit_message_text(
+        "\n".join(message_lines),
+        reply_markup=reply_markup
+    )
+
+
+async def generate_tts_audio_file(handler, summary_text: str, video_id: str, json_path: Path) -> Optional[str]:
+    if not summary_text:
+        return None
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    audio_filename = f"audio_{video_id}_{timestamp}.mp3"
+
+    loop = asyncio.get_running_loop()
+
+    def _run() -> Optional[str]:
+        return asyncio.run(handler.summarizer.generate_tts_audio(summary_text, audio_filename, str(json_path)))
+
+    audio_filepath = await loop.run_in_executor(None, _run)
+    if audio_filepath and Path(audio_filepath).exists():
+        metrics.record_tts(True)
+    else:
+        metrics.record_tts(False)
+    return audio_filepath if audio_filepath else None
+
+
+async def process_content_summary(
+    handler,
+    query,
+    summary_type: str,
+    user_name: str,
+    proficiency_level: Optional[str] = None,
+) -> None:
+    item = handler.current_item or {}
+    content_id = item.get("content_id")
+    source = item.get("source", "youtube")
+    url = item.get("url")
+
+    if not content_id:
+        await query.edit_message_text("❌ No content in context. Please send a link first.")
+        return
+
+    if not url:
+        url = handler._resolve_video_url(content_id)
+
+    if not url:
+        await query.edit_message_text("❌ Could not resolve the source URL. Please resend the link.")
+        return
+
+    if not handler.summarizer:
+        await query.edit_message_text("❌ Summarizer not available. Please try /status for more info.")
+        return
+
+    noun_map = {
+        "youtube": "video",
+        "reddit": "thread",
+        "web": "article",
+    }
+    noun = noun_map.get(source, "item")
+    processing_messages = {
+        "comprehensive": f"📝 Analyzing {noun} and creating comprehensive summary...",
+        "bullet-points": f"🎯 Extracting key points from the {noun}...",
+        "key-insights": f"💡 Identifying key insights and takeaways from the {noun}...",
+        "audio": "🎙️ Creating audio summary with text-to-speech...",
+        "audio-fr": "🇫🇷 Translating to French and preparing audio narration...",
+        "audio-es": "🇪🇸 Translating to Spanish and preparing audio narration..."
+    }
+
+    base_type = summary_type.split(':')[0]
+    if base_type.startswith("audio-fr"):
+        level_suffix = " (with vocabulary help)" if proficiency_level in ["beginner", "intermediate"] else ""
+        message = f"🇫🇷 Creating French audio summary{level_suffix}... This may take a moment."
+    elif base_type.startswith("audio-es"):
+        level_suffix = " (with vocabulary help)" if proficiency_level in ["beginner", "intermediate"] else ""
+        message = f"🇪🇸 Creating Spanish audio summary{level_suffix}... This may take a moment."
+    else:
+        prefix_map = {
+            "youtube": "🔄",
+            "reddit": "🧵",
+            "web": "📰",
+        }
+        default_prefix = prefix_map.get(source, "🔄")
+        message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
+
+    await query.edit_message_text(message)
+
+    try:
+        normalized_id = handler._normalize_content_id(content_id)
+        video_id = normalized_id
+        ledger_id = content_id
+        display_id = f"{source}:{normalized_id}" if source != "youtube" else normalized_id
+
+        entry = ledger.get(ledger_id, summary_type)
+        if entry:
+            logging.info(f"📄 Found existing entry for {display_id}:{summary_type}")
+            if render_probe.render_has(entry.get("stem")):
+                await send_existing_summary_notice(handler, query, ledger_id, summary_type)
+                logging.info(f"♻️ SKIPPED: {display_id} already on dashboard")
+                return
+            else:
+                logging.info("🔄 Content exists in database but missing from Dashboard - processing fresh")
+
+        logging.info("🎬 PROCESSING: %s | %s | user: %s | URL: %s", display_id, summary_type, user_name, url)
+        logging.info("🧠 LLM: %s/%s", handler.summarizer.llm_provider, handler.summarizer.model)
+
+        if source == "reddit":
+            result = await handler.summarizer.process_reddit_thread(
+                url,
+                summary_type=summary_type,
+                proficiency_level=proficiency_level
+            )
+        elif source == "web":
+            result = await handler.summarizer.process_web_page(
+                url,
+                summary_type=summary_type,
+                proficiency_level=proficiency_level
+            )
+        else:
+            result = await handler.summarizer.process_video(
+                url,
+                summary_type=summary_type,
+                proficiency_level=proficiency_level
+            )
+
+        if not result:
+            await query.edit_message_text("❌ Failed to process content. Please check the URL and try again.")
+            return
+
+        error_message = result.get('error') if isinstance(result, dict) else None
+        if error_message:
+            if 'No transcript available' in error_message:
+                await query.edit_message_text(
+                    f"⚠️ {error_message}\n\nSkipping this item to prevent empty dashboard entries."
+                )
+                logging.info("❌ ABORTED: %s", error_message)
+            else:
+                await query.edit_message_text(f"❌ {error_message}")
+                logging.info("❌ Processing error: %s", error_message)
+            return
+
+        export_info = {"html_path": None, "json_path": None}
+        try:
+            report_dict = create_report_from_youtube_summarizer(result)
+            json_path = handler.json_exporter.save_report(report_dict)
+            export_info["json_path"] = Path(json_path).name
+
+            json_path_obj = Path(json_path)
+            if json_path_obj.exists():
+                logging.info("✅ Exported JSON report: %s", json_path)
+            else:
+                logging.warning("⚠️ JSON export returned path but file not created: %s", json_path)
+                logging.warning("   This will cause dual-sync to fail!")
+
+            stem = Path(json_path).stem
+            ledger_entry = {
+                "stem": stem,
+                "json": str(json_path),
+                "mp3": None,
+                "synced": False,
+                "created_at": datetime.now().isoformat()
+            }
+
+            if proficiency_level:
+                ledger_entry["proficiency"] = proficiency_level
+                if summary_type.startswith("audio-"):
+                    lang_code = "fr" if summary_type.startswith("audio-fr") else "es"
+                    ledger_entry["target_language"] = lang_code
+                    ledger_entry["language_flag"] = "🇫🇷" if lang_code == "fr" else "🇪🇸"
+                    ledger_entry["learning_mode"] = True
+
+                    proficiency_badges = {
+                        "beginner": {"fr": "🟢 Débutant", "es": "🟢 Principiante"},
+                        "intermediate": {"fr": "🟡 Intermédiaire", "es": "🟡 Intermedio"},
+                        "advanced": {"fr": "🔵 Avancé", "es": "🔵 Avanzado"}
+                    }
+                    if proficiency_level in proficiency_badges:
+                        ledger_entry["proficiency_badge"] = proficiency_badges[proficiency_level][lang_code]
+
+            ledger.upsert(ledger_id, summary_type, ledger_entry)
+            logging.info("📊 Added to ledger: %s:%s", display_id, summary_type)
+
+            is_audio_summary = summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es")
+
+            if not is_audio_summary:
+                try:
+                    json_path_obj = Path(json_path)
+                    stem = json_path_obj.stem
+
+                    logging.info("📡 DUAL-SYNC START: Uploading to configured targets...")
+
+                    video_metadata = result.get('metadata', {})
+                    result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
+
+                    report_path = Path(f"/app/data/reports/{stem}.json")
+                    sync_results = dual_sync_upload(report_path)
+
+                    sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+                    postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+                    sync_success = sqlite_ok or postgres_ok
+
+                    if sync_success:
+                        targets = []
+                        if sqlite_ok: targets.append("SQLite")
+                        if postgres_ok: targets.append("PostgreSQL")
+                        logging.info("✅ DUAL-SYNC SUCCESS: 📊 → %s (targets: %s)", result_content_id, ', '.join(targets))
+
+                        entry = ledger.get(ledger_id, summary_type)
+                        if entry:
+                            entry["synced"] = True
+                            entry["last_synced"] = datetime.now().isoformat()
+                            entry["sync_targets"] = targets
+                            ledger.upsert(ledger_id, summary_type, entry)
+                            logging.info("📊 Updated ledger: synced=True, targets=%s", targets)
+                    else:
+                        logging.error("❌ DUAL-SYNC FAILED: All targets failed for %s", stem)
+
+                except Exception as sync_e:
+                    logging.warning("⚠️ Dual-sync error: %s", sync_e)
+            else:
+                try:
+                    json_path_obj = Path(json_path)
+                    stem = json_path_obj.stem
+
+                    logging.info("📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for %s", result.get('id'))
+
+                    report_path = json_path_obj
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        if report_path.exists():
+                            break
+                        logging.debug("📄 Waiting for file to be written (attempt %s/%s): %s", attempt + 1, max_retries, report_path)
+                        time.sleep(0.1)
+
+                    if report_path.exists():
+                        sync_results = dual_sync_upload(report_path)
+                        sqlite_ok = bool(sync_results.get('sqlite', {}).get('report')) if isinstance(sync_results, dict) else False
+                        postgres_ok = bool(sync_results.get('postgres', {}).get('report')) if isinstance(sync_results, dict) else False
+                        sync_success = sqlite_ok or postgres_ok
+
+                        if sync_success:
+                            targets = []
+                            if sqlite_ok: targets.append("SQLite")
+                            if postgres_ok: targets.append("PostgreSQL")
+                            logging.info("✅ DUAL-SYNC CONTENT: 📊 → %s (targets: %s)", result.get('id'), ', '.join(targets))
+                            logging.info("⏳ Audio sync will happen after TTS generation")
+
+                            entry = ledger.get(ledger_id, summary_type)
+                            if entry:
+                                entry["synced"] = True
+                                entry["last_synced"] = datetime.now().isoformat()
+                                entry["sync_targets"] = targets
+                                ledger.upsert(ledger_id, summary_type, entry)
+                                logging.info("📊 Updated ledger: synced=True, targets=%s", targets)
+                        else:
+                            logging.error("❌ DUAL-SYNC CONTENT FAILED: All targets failed for %s", stem)
+                    else:
+                        logging.warning("⚠️ JSON report not found for content sync: %s", report_path)
+
+                except Exception as sync_e:
+                    logging.warning("⚠️ Dual-sync content error: %s", sync_e)
+                    logging.info("⏳ Will retry full sync after TTS generation")
+
+        except Exception as e:
+            logging.warning("⚠️ Export failed: %s", e)
+
+        await send_formatted_response(handler, query, result, summary_type, export_info)
+
+    except Exception as e:
+        logging.error("Error processing content %s: %s", url, e)
+        await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
