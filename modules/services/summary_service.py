@@ -4,11 +4,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import unicodedata
 
 try:
     import requests
@@ -162,6 +164,131 @@ def resolve_summary_text(video_id: str, variant: str) -> Optional[str]:
     return None
 
 
+def slugify(text: str) -> str:
+    text = (text or '').strip().lower()
+    text = unicodedata.normalize('NFKD', text)
+    text = re.sub(r'[^a-z0-9\-\_\s]+', '', text)
+    text = re.sub(r'\s+', '_', text)
+    text = re.sub(r'_+', '_', text).strip('_')
+    return text or 'quiz'
+
+
+def build_quiz_prompt(
+    *,
+    title: str,
+    keypoints: str,
+    count: int = 10,
+    types: Optional[List[str]] = None,
+    difficulty: str = 'beginner',
+    language: str = 'en',
+    explanations: bool = True,
+) -> str:
+    allowed = types or ["multiplechoice", "truefalse"]
+    type_list = ', '.join(allowed)
+    explain_rule = 'Provide a brief explanation (1–2 sentences) for each item.' if explanations else 'Do not include explanations.'
+    return (
+        f"Create {count} quiz questions in {language}.\n"
+        f"Topic: {title}\n\n"
+        f"Use ONLY these key points (no outside facts):\n{keypoints}\n\n"
+        f"Rules:\n"
+        f"- Allowed types: {type_list}\n"
+        f"- Only one unambiguous correct answer per question\n"
+        f"- {explain_rule}\n"
+        f"- Respond ONLY as a JSON object with this shape (no text outside JSON):\n"
+        '{"count": number, "meta": {"topic": string, "difficulty": "beginner|intermediate|advanced", "language": '
+        + f'"{language}"' + '}, '
+        '"items": [{"question": string, "type": "multiplechoice|truefalse|yesno|shortanswer", '
+        '"options": [string, ...] (omit for shortanswer), "correct": number (omit for shortanswer), '
+        '"answer": string (only for shortanswer), "explanation": string}]}'
+    )
+
+
+def validate_quiz_payload(data: dict, explanations: bool = True) -> bool:
+    try:
+        if not isinstance(data, dict):
+            return False
+        items = data.get('items')
+        if not isinstance(items, list) or not items:
+            return False
+        try:
+            data['count'] = int(data.get('count') or len(items))
+        except Exception:
+            data['count'] = len(items)
+
+        alias_map = {
+            'multiplechoice': 'multiplechoice',
+            'multiple-choice': 'multiplechoice',
+            'multiple choice': 'multiplechoice',
+            'mcq': 'multiplechoice',
+            'truefalse': 'truefalse',
+            'true/false': 'truefalse',
+            'true false': 'truefalse',
+            'boolean': 'truefalse',
+            'yesno': 'yesno',
+            'yes/no': 'yesno',
+            'yes no': 'yesno',
+            'shortanswer': 'shortanswer',
+            'short answer': 'shortanswer',
+        }
+
+        def norm_type(raw: str) -> str:
+            key = re.sub(r'[^a-z/ ]+', '', (raw or '').strip().lower())
+            return alias_map.get(key, key)
+
+        seen = set()
+        normalized_items = []
+        for q in items:
+            if not isinstance(q, dict):
+                return False
+            qtext = re.sub(r'\s+', ' ', (q.get('question') or '').strip())
+            if not qtext:
+                return False
+            qnorm = qtext.lower()
+            if qnorm in seen:
+                continue
+            seen.add(qnorm)
+
+            qtype = norm_type(q.get('type'))
+            if qtype in ('multiplechoice', 'truefalse', 'yesno'):
+                opts = q.get('options')
+                if qtype == 'truefalse' and not isinstance(opts, list):
+                    opts = ["True", "False"]
+                    q['options'] = opts
+                if qtype == 'yesno' and not isinstance(opts, list):
+                    opts = ["Yes", "No"]
+                    q['options'] = opts
+                if not isinstance(opts, list):
+                    return False
+                min_opts = 3 if qtype == 'multiplechoice' else 2
+                if len(opts) < min_opts:
+                    return False
+                ci = q.get('correct')
+                if not isinstance(ci, int) or ci < 0 or ci >= len(opts):
+                    return False
+            elif qtype == 'shortanswer':
+                ans = q.get('answer')
+                if not isinstance(ans, str) or not ans.strip():
+                    return False
+            else:
+                return False
+
+            if explanations and not isinstance(q.get('explanation'), str):
+                q['explanation'] = q.get('explanation') or ""
+
+            q['type'] = qtype
+            q['question'] = qtext
+            normalized_items.append(q)
+
+        if not normalized_items:
+            return False
+        data['items'] = normalized_items
+        data['count'] = len(normalized_items)
+        return True
+    except Exception as exc:
+        logging.warning("Quiz validation error: %s", exc)
+        return False
+
+
 async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None) -> None:
     try:
         video_info = result.get('metadata', {})
@@ -276,14 +403,10 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     if row2:
                         keyboard.append(row2)
 
-                    del_cb = f"delete_{report_id}"
-                    if len(del_cb.encode('utf-8')) > 64:
-                        max_id_len = 64 - len("delete_")
-                        truncated_id = report_id[:max_id_len]
-                        del_cb = f"delete_{truncated_id}"
+                    delete_token = handler._register_delete_token(report_id)
                     keyboard.append([
                         InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
-                        InlineKeyboardButton("🗑️ Delete…", callback_data=del_cb)
+                        InlineKeyboardButton("🗑️ Delete…", callback_data=f"delete_{delete_token}")
                     ])
 
                 reply_markup = InlineKeyboardMarkup(keyboard)

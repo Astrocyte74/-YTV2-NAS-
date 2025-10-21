@@ -16,6 +16,7 @@ import time
 import urllib.parse
 from datetime import datetime
 import random
+import secrets
 from typing import List, Dict, Any, Optional, Callable, Tuple, Awaitable
 from pathlib import Path
 
@@ -73,7 +74,6 @@ from modules.ollama_client import (
 )
 from modules.services import ollama_service, summary_service, tts_service
 import hashlib
-import unicodedata
 from pydub import AudioSegment
 
 
@@ -116,6 +116,8 @@ class YouTubeTelegramBot:
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
+        # Pending delete tokens mapping short callback tokens to full report IDs
+        self._pending_delete_tokens: Dict[str, str] = {}
         
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
@@ -1335,20 +1337,36 @@ class YouTubeTelegramBot:
         
         # Handle delete requests
         elif callback_data.startswith('delete_'):
-            report_id = callback_data.replace('delete_', '')
-            # Show confirmation with two-button layout
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Yes, delete", callback_data=f"confirm_del_{report_id}"),
-                InlineKeyboardButton("❌ Cancel", callback_data="cancel_del")
+            token = callback_data.replace('delete_', '', 1)
+            report_id = self._get_delete_target(token) or token
+            display_id = self._escape_markdown(self._shorten_report_id(report_id))
+
+            keyboard = InlineKeyboardMarkup([[ 
+                InlineKeyboardButton("✅ Yes, delete", callback_data=f"confirm_del_{token}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_del_{token}")
             ]])
             await query.edit_message_text(
-                "⚠️ Delete this summary?\n\nThis will remove it from both Telegram and the Dashboard.",
+                f"⚠️ Delete this summary?\n\nID: `{display_id}`\nThis removes it from both Telegram and the Dashboard.",
+                parse_mode=ParseMode.MARKDOWN,
                 reply_markup=keyboard
             )
 
+        elif callback_data.startswith('cancel_del_'):
+            token = callback_data.replace('cancel_del_', '', 1)
+            report_id = self._consume_delete_token(token)
+            display_id = self._shorten_report_id(report_id) if report_id else None
+            message = "🚫 Delete cancelled."
+            if display_id:
+                message = f"🚫 Delete cancelled for `{self._escape_markdown(display_id)}`."
+            await query.edit_message_text(message, parse_mode=ParseMode.MARKDOWN)
+
+        elif callback_data == 'cancel_del':
+            await query.edit_message_text("🚫 Delete cancelled.")
+
         elif callback_data.startswith('confirm_del_'):
-            report_id = callback_data.replace('confirm_del_', '')
-            
+            token = callback_data.replace('confirm_del_', '', 1)
+            report_id = self._consume_delete_token(token) or token
+
             # Helper function to delete from Render
             def delete_from_render(rid):
                 if requests is None:
@@ -1517,7 +1535,15 @@ class YouTubeTelegramBot:
                 title = (report.get('title') or report.get('video', {}).get('title') or 'Untitled').strip()
                 language = (report.get('summary', {}) or {}).get('language') or report.get('summary_language') or 'en'
                 difficulty = 'beginner'
-                prompt = self._build_quiz_prompt(title=title, keypoints=kp_text, count=10, types=["multiplechoice","truefalse"], difficulty=difficulty, language=language, explanations=True)
+                prompt = summary_service.build_quiz_prompt(
+                    title=title,
+                    keypoints=kp_text,
+                    count=10,
+                    types=["multiplechoice", "truefalse"],
+                    difficulty=difficulty,
+                    language=language,
+                    explanations=True,
+                )
 
                 # Generate quiz via Dashboard
                 gen = summary_service.post_dashboard_json('/api/generate-quiz', {
@@ -1536,7 +1562,7 @@ class YouTubeTelegramBot:
                 except Exception:
                     await query.edit_message_text("❌ Invalid quiz JSON returned by generator.")
                     return
-                if not self._validate_quiz_payload(quiz, explanations=True):
+                if not summary_service.validate_quiz_payload(quiz, explanations=True):
                     await query.edit_message_text("❌ Generated quiz did not pass validation.")
                     return
 
@@ -1562,7 +1588,7 @@ class YouTubeTelegramBot:
                         meta['categorization_confidence'] = cat['confidence']
 
                 # Save
-                slug = self._slugify(title)
+                slug = summary_service.slugify(title)
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 clean_vid = video_id.replace('yt:', '')
                 filename = f"{slug}_{clean_vid}_{ts}.json"
@@ -1858,116 +1884,28 @@ class YouTubeTelegramBot:
     async def _handle_tts_callback(self, query, callback_data: str):
         await tts_service.handle_callback(self, query, callback_data)
 
-    # ------------------------- Quiz helpers -------------------------
-    def _slugify(self, text: str) -> str:
-        text = (text or '').strip().lower()
-        text = unicodedata.normalize('NFKD', text)
-        text = re.sub(r'[^a-z0-9\-\_\s]+', '', text)
-        text = re.sub(r'\s+', '_', text)
-        text = re.sub(r'_+', '_', text).strip('_')
-        return text or 'quiz'
+    # Quiz helper utilities live in modules.services.summary_service
 
-    def _build_quiz_prompt(self, *, title: str, keypoints: str, count: int = 10,
-                           types: Optional[List[str]] = None, difficulty: str = 'beginner', language: str = 'en', explanations: bool = True) -> str:
-        allowed = types or ["multiplechoice", "truefalse"]
-        type_list = ', '.join(allowed)
-        explain_rule = 'Provide a brief explanation (1–2 sentences) for each item.' if explanations else 'Do not include explanations.'
-        return (
-            f"Create {count} quiz questions in {language}.\n"
-            f"Topic: {title}\n\n"
-            f"Use ONLY these key points (no outside facts):\n{keypoints}\n\n"
-            f"Rules:\n"
-            f"- Allowed types: {type_list}\n"
-            f"- Only one unambiguous correct answer per question\n"
-            f"- {explain_rule}\n"
-            f"- Respond ONLY as a JSON object with this shape (no text outside JSON):\n"
-            '{"count": number, "meta": {"topic": string, "difficulty": "beginner|intermediate|advanced", "language": ' + f'"{language}"' + '}, '
-            '"items": [{"question": string, "type": "multiplechoice|truefalse|yesno|shortanswer", '
-            '"options": [string, ...] (omit for shortanswer), "correct": number (omit for shortanswer), '
-            '"answer": string (only for shortanswer), "explanation": string}]}'
-        )
+    def _register_delete_token(self, report_id: str) -> str:
+        token = secrets.token_hex(4)
+        while token in self._pending_delete_tokens:
+            token = secrets.token_hex(4)
+        self._pending_delete_tokens[token] = report_id
+        return token
 
-    def _validate_quiz_payload(self, data: dict, explanations: bool = True) -> bool:
-        """Validate and lightly normalize quiz JSON for storage.
-        Accepts common type aliases and fixes trivial omissions for TF/YesNo.
-        """
-        try:
-            if not isinstance(data, dict):
-                return False
-            items = data.get('items')
-            if not isinstance(items, list) or not items:
-                return False
-            # Normalize count
-            try:
-                data['count'] = int(data.get('count') or len(items))
-            except Exception:
-                data['count'] = len(items)
+    def _get_delete_target(self, token: str) -> Optional[str]:
+        return self._pending_delete_tokens.get(token)
 
-            alias_map = {
-                'multiplechoice': 'multiplechoice', 'multiple-choice': 'multiplechoice', 'multiple choice': 'multiplechoice', 'mcq': 'multiplechoice',
-                'truefalse': 'truefalse', 'true/false': 'truefalse', 'true false': 'truefalse', 'boolean': 'truefalse',
-                'yesno': 'yesno', 'yes/no': 'yesno', 'yes no': 'yesno',
-                'shortanswer': 'shortanswer', 'short answer': 'shortanswer'
-            }
+    def _consume_delete_token(self, token: str) -> Optional[str]:
+        return self._pending_delete_tokens.pop(token, None)
 
-            def norm_type(t: str) -> str:
-                key = re.sub(r'[^a-z/ ]+', '', (t or '').strip().lower())
-                return alias_map.get(key, key)
-
-            seen = set()
-            normalized_items = []
-            for q in items:
-                if not isinstance(q, dict):
-                    return False
-                # Question text unique check
-                qtext = re.sub(r'\s+', ' ', (q.get('question') or '').strip())
-                if not qtext:
-                    return False
-                qnorm = qtext.lower()
-                if qnorm in seen:
-                    continue  # drop duplicates silently
-                seen.add(qnorm)
-
-                qtype = norm_type(q.get('type'))
-                if qtype in ('multiplechoice', 'truefalse', 'yesno'):
-                    opts = q.get('options')
-                    # Provide defaults for TF/YesNo if missing
-                    if qtype == 'truefalse' and not isinstance(opts, list):
-                        opts = ["True", "False"]
-                        q['options'] = opts
-                    if qtype == 'yesno' and not isinstance(opts, list):
-                        opts = ["Yes", "No"]
-                        q['options'] = opts
-                    if not isinstance(opts, list):
-                        return False
-                    min_opts = 3 if qtype == 'multiplechoice' else 2
-                    if len(opts) < min_opts:
-                        return False
-                    ci = q.get('correct')
-                    if not isinstance(ci, int) or ci < 0 or ci >= len(opts):
-                        return False
-                elif qtype == 'shortanswer':
-                    ans = q.get('answer')
-                    if not isinstance(ans, str) or not ans.strip():
-                        return False
-                else:
-                    return False
-
-                if explanations and not isinstance(q.get('explanation'), str):
-                    q['explanation'] = q.get('explanation') or ""
-
-                q['type'] = qtype  # write back normalized type
-                q['question'] = qtext
-                normalized_items.append(q)
-
-            if not normalized_items:
-                return False
-            data['items'] = normalized_items
-            data['count'] = len(normalized_items)
-            return True
-        except Exception as e:
-            logging.warning(f"Quiz validation error: {e}")
-            return False
+    @staticmethod
+    def _shorten_report_id(report_id: str) -> str:
+        if not report_id:
+            return "(unknown)"
+        if len(report_id) <= 40:
+            return report_id
+        return f"{report_id[:24]}…{report_id[-8:]}"
 
     async def _show_proficiency_selector(self, query, summary_type: str):
         """Show proficiency level selector for language learning"""
@@ -2039,11 +1977,7 @@ class YouTubeTelegramBot:
             return None
 
         report_id_encoded = urllib.parse.quote(report_id, safe='')
-        callback_data = f"delete_{report_id}"
-        if len(callback_data.encode('utf-8')) > 64:
-            max_id_len = 64 - len("delete_")
-            truncated_id = report_id[:max_id_len]
-            callback_data = f"delete_{truncated_id}"
+        delete_token = self._register_delete_token(report_id)
 
         listen_cb = f"listen_this:{video_id}:{base_variant}"
         gen_cb = f"gen_quiz:{video_id}"
@@ -2059,7 +1993,7 @@ class YouTubeTelegramBot:
             ],
             [
                 InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main"),
-                InlineKeyboardButton("🗑️ Delete…", callback_data=callback_data)
+                InlineKeyboardButton("🗑️ Delete…", callback_data=f"delete_{delete_token}")
             ]
         ]
 
