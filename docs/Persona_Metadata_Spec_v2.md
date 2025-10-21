@@ -2,6 +2,10 @@ Here’s the Unified Spec v2 you can drop into your repo as
 docs/Persona_Metadata_Spec_v2.md.
 It merges your original behavioural memo and Codex CLI’s engineering plan so you have one authoritative document.
 
+2025-10-22 update: the Telegram bot has been modularized into service layers (`modules/services/...`).
+This revision aligns the persona plan with that structure—persona loading lives in a new service
+module that the handlers consume, while the CLI helper remains an optional future add-on.
+
 ⸻
 
 🧭 Persona Metadata Integration & Behavioural Framework (Unified Spec v2)
@@ -10,8 +14,9 @@ Author: Mark Darby
 Branch: feature/ai2ai-prompt-optimization
 Primary Files:
     •    /data/persona_data.json  → canonical registry
-    •    /modules/telegram_handler.py  → prompt builder / behaviour logic
-    •    /cli/persona_loader.py, /cli/persona_cli.py  → Codex CLI layer
+    •    /modules/services/persona_service.py  → loader + prompt builder (new)
+    •    /modules/telegram/...    → handlers consume persona_service
+    •    /cli/persona_loader.py, /cli/persona_cli.py  → optional CLI layer (future)
 
 ⸻
 
@@ -28,14 +33,14 @@ This replaces multiple OLLAMA_PERSONA_* env lists with a single, schema-rich JSO
 
 2  Architecture Overview
 
-persona_data.json  →  persona_loader.py  →  telegram_handler.py
+persona_data.json  →  persona_service.py  →  telegram handlers/UI
                              ↑
-                       persona_cli.py (Codex CLI)
+                       persona_cli.py (optional CLI)
 
     •    Registry (JSON) holds identity and traits.
-    •    Loader Module parses and caches data.
-    •    Prompt Builder uses era, beliefs, temperament to craft system prompts.
-    •    CLI provides list/info/prompt/test commands for developers.
+    •    Persona service loads, caches, and exposes persona metadata to handlers.
+    •    Prompt helpers (within the service) use era, beliefs, temperament to craft system prompts.
+    •    CLI tooling can wrap the service for inspection/testing when needed.
 
 ⸻
 
@@ -168,9 +173,9 @@ This allows later tuning of which trait mixes yield best debate quality.
 ⸻
 
 11  Next Steps
-    1.    Add /cli/persona_loader.py and /cli/persona_cli.py per this spec.
-    2.    Refactor telegram_handler.py to load from JSON and use asymmetry logic.
-    3.    Integrate Codex CLI commands for persona inspection and prompt testing.
+    1.    Implement `modules/services/persona_service.py` (JSON loader + env fallback).
+    2.    Refactor Telegram handlers to consume persona_service for selection, prompts, and defaults.
+    3.    (Optional) Add CLI wrappers (`persona_loader.py` / `persona_cli.py`) for inspection.
     4.    Enable logging for analytics fields (archetype, temperament, curiosity).
     5.    Document env toggles in README and Portainer template.
 
@@ -200,4 +205,3 @@ This unified spec combines:
     •    Codex’s engineering plan → how data is stored, loaded, and controlled
 
 Together they deliver a fully metadata-driven, CLI-testable persona ecosystem powering authentic historical AI↔AI debates.
-
