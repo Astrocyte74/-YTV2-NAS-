@@ -1270,12 +1270,8 @@ class YouTubeTelegramBot:
         return content
 
     def _ollama_single_view_toggle_row(self, view: str) -> List[InlineKeyboardButton]:
-        mark_models = "✅" if view == "models" else "⬜"
-        mark_personas = "✅" if view.startswith("persona") else "⬜"
-        return [
-            InlineKeyboardButton(f"{mark_models} Models", callback_data="ollama_single_view:models"),
-            InlineKeyboardButton(f"{mark_personas} Personas", callback_data="ollama_single_view:personas"),
-        ]
+        from modules.telegram.ui.keyboards import single_view_toggle_row
+        return single_view_toggle_row(view)
 
     def _ollama_single_persona_categories_rows(
         self,
@@ -1283,33 +1279,8 @@ class YouTubeTelegramBot:
         page_size: int,
         categories: Dict[str, Dict[str, Any]],
     ) -> List[List[InlineKeyboardButton]]:
-        rows: List[List[InlineKeyboardButton]] = []
-        current = (session or {}).get("single_persona_category")
-        page = int((session or {}).get("single_persona_cat_page") or 0)
-        items = list(categories.items())
-        start = page * page_size
-        end = start + page_size
-        row: List[InlineKeyboardButton] = []
-        for cat_key, info in items[start:end]:
-            label = info.get("label") or cat_key
-            if len(label) > 28:
-                label = f"{label[:25]}…"
-            if cat_key == current:
-                label = f"✅ {label}"
-            row.append(InlineKeyboardButton(label, callback_data=f"ollama_single_persona_cat:{cat_key}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        nav: List[InlineKeyboardButton] = []
-        if end < len(items):
-            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_single_persona_more:cat:{page+1}"))
-        if page > 0:
-            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_single_persona_more:cat:{page-1}"))
-        if nav:
-            rows.append(nav)
-        return rows
+        from modules.telegram.ui.keyboards import single_persona_categories_rows
+        return single_persona_categories_rows(session or {}, page_size, categories)
 
     def _ollama_single_persona_list_rows(
         self,
@@ -1317,53 +1288,12 @@ class YouTubeTelegramBot:
         page_size: int,
         categories: Dict[str, Dict[str, Any]],
     ) -> List[List[InlineKeyboardButton]]:
-        rows: List[List[InlineKeyboardButton]] = []
-        cat_key = (session or {}).get("single_persona_category")
-        info = categories.get(cat_key or "", {})
-        names: List[str] = info.get("names") or []
-        page = int((session or {}).get("single_persona_page") or 0)
-        start = page * page_size
-        end = start + page_size
-        subset = list(enumerate(names))[start:end]
-        selected = (session or {}).get("persona_single")
-        row: List[InlineKeyboardButton] = []
-        for idx, name in subset:
-            # Use display-only label (strip gender suffix)
-            label, _gender = self._persona_parse(name)
-            if len(label) > 28:
-                label = f"{label[:25]}…"
-            if selected == name:
-                label = f"✅ {label}"
-            row.append(InlineKeyboardButton(label, callback_data=f"ollama_single_persona_pick:{idx}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        nav: List[InlineKeyboardButton] = []
-        if end < len(names):
-            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_single_persona_more:list:{page+1}"))
-        if page > 0:
-            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_single_persona_more:list:{page-1}"))
-        control: List[InlineKeyboardButton] = [InlineKeyboardButton("⬅️ Categories", callback_data="ollama_single_persona_back")]
-        if selected:
-            control.append(InlineKeyboardButton("♻️ Clear", callback_data="ollama_single_persona_clear"))
-        if control:
-            rows.append(control)
-        if nav:
-            rows.append(nav)
-        if not names:
-            rows.append([InlineKeyboardButton("⚠️ No personas in category", callback_data="ollama_nop")])
-        return rows
+        from modules.telegram.ui.keyboards import single_persona_list_rows
+        return single_persona_list_rows(session or {}, page_size, categories, self._persona_parse)
 
     def _ollama_ai2ai_view_toggle_row(self, slot: str, view: str) -> List[InlineKeyboardButton]:
-        slot = slot.upper()
-        mark_models = "✅" if view == "models" else "⬜"
-        mark_personas = "✅" if view.startswith("persona") else "⬜"
-        return [
-            InlineKeyboardButton(f"{mark_models} Models", callback_data=f"ollama_ai2ai_view:{slot}:models"),
-            InlineKeyboardButton(f"{mark_personas} Personas", callback_data=f"ollama_ai2ai_view:{slot}:personas"),
-        ]
+        from modules.telegram.ui.keyboards import ai2ai_view_toggle_row
+        return ai2ai_view_toggle_row(slot, view)
 
     def _ollama_ai2ai_persona_categories_rows(
         self,
@@ -1372,35 +1302,8 @@ class YouTubeTelegramBot:
         page_size: int,
         categories: Dict[str, Dict[str, Any]],
     ) -> List[List[InlineKeyboardButton]]:
-        rows: List[List[InlineKeyboardButton]] = []
-        slot_lower = slot.lower()
-        current_category = (session or {}).get(f"ai2ai_persona_category_{slot_lower}")
-        page_key = f"ai2ai_persona_cat_page_{slot_lower}"
-        page = int((session or {}).get(page_key) or 0)
-        items = list(categories.items())
-        start = page * page_size
-        end = start + page_size
-        row: List[InlineKeyboardButton] = []
-        for cat_key, info in items[start:end]:
-            label = info.get("label") or cat_key
-            if len(label) > 28:
-                label = f"{label[:25]}…"
-            if cat_key == current_category:
-                label = f"✅ {label}"
-            row.append(InlineKeyboardButton(label, callback_data=f"ollama_persona_cat:{slot}:{cat_key}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        nav: List[InlineKeyboardButton] = []
-        if end < len(items):
-            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_persona_more:{slot}:cat:{page+1}"))
-        if page > 0:
-            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_persona_more:{slot}:cat:{page-1}"))
-        if nav:
-            rows.append(nav)
-        return rows
+        from modules.telegram.ui.keyboards import ai2ai_persona_categories_rows
+        return ai2ai_persona_categories_rows(slot, session or {}, page_size, categories)
 
     def _ollama_ai2ai_persona_list_rows(
         self,
@@ -1409,46 +1312,8 @@ class YouTubeTelegramBot:
         page_size: int,
         categories: Dict[str, Dict[str, Any]],
     ) -> List[List[InlineKeyboardButton]]:
-        rows: List[List[InlineKeyboardButton]] = []
-        slot_lower = slot.lower()
-        cat_key = (session or {}).get(f"ai2ai_persona_category_{slot_lower}")
-        info = categories.get(cat_key or "", {})
-        names: List[str] = info.get("names") or []
-        page_key = f"ai2ai_persona_page_{slot_lower}"
-        page = int((session or {}).get(page_key) or 0)
-        start = page * page_size
-        end = start + page_size
-        subset = list(enumerate(names))[start:end]
-        selected = (session or {}).get(f"persona_{slot_lower}")
-        row: List[InlineKeyboardButton] = []
-        for idx, name in subset:
-            # Use display-only label (strip gender suffix)
-            label, _gender = self._persona_parse(name)
-            if len(label) > 28:
-                label = f"{label[:25]}…"
-            if selected == name:
-                label = f"✅ {label}"
-            row.append(InlineKeyboardButton(label, callback_data=f"ollama_persona_pick:{slot}:{idx}"))
-            if len(row) == 3:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        nav: List[InlineKeyboardButton] = []
-        if end < len(names):
-            nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_persona_more:{slot}:list:{page+1}"))
-        if page > 0:
-            nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_persona_more:{slot}:list:{page-1}"))
-        control: List[InlineKeyboardButton] = [InlineKeyboardButton("⬅️ Categories", callback_data=f"ollama_persona_back:{slot}")]
-        if selected:
-            control.append(InlineKeyboardButton("♻️ Clear", callback_data=f"ollama_persona_clear:{slot}"))
-        if control:
-            rows.append(control)
-        if nav:
-            rows.append(nav)
-        if not names:
-            rows.append([InlineKeyboardButton("⚠️ No personas in category", callback_data="ollama_nop")])
-        return rows
+        from modules.telegram.ui.keyboards import ai2ai_persona_list_rows
+        return ai2ai_persona_list_rows(slot, session or {}, page_size, categories, self._persona_parse)
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
         line = "--------------------------------------------------------------------------"
