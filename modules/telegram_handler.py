@@ -25,6 +25,7 @@ except ImportError:
     requests = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
 
@@ -4252,6 +4253,14 @@ class YouTubeTelegramBot:
             safe_summary = self._escape_markdown(summary_text)
             safe_header = header_text or ""
 
+            async def _edit_with_retry(text: str, markup=None):
+                while True:
+                    try:
+                        return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+                    except RetryAfter as exc:
+                        await asyncio.sleep(exc.retry_after)
+
+
             # Calculate available space for summary content
             # Reserve space for header, formatting, and safety margin
             header_length = len(safe_header)
@@ -4261,7 +4270,7 @@ class YouTubeTelegramBot:
             # If summary fits in one message, send normally
             if len(safe_summary) <= available_space:
                 full_message = f"{safe_header}\n{safe_summary}"
-                msg = await query.edit_message_text(full_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+                msg = await _edit_with_retry(full_message, markup=reply_markup)
                 return msg
             
             # Summary is too long - split into multiple messages
@@ -4275,7 +4284,7 @@ class YouTubeTelegramBot:
             if len(chunks) > 1:
                 first_message += f"\n\n📄 *Continued in next message... ({len(chunks)} parts total)*"
             
-            await query.edit_message_text(first_message, parse_mode=ParseMode.MARKDOWN)
+            await _edit_with_retry(first_message)
             
             # Send remaining chunks as follow-up messages
             last_msg = None
@@ -4305,7 +4314,7 @@ class YouTubeTelegramBot:
             truncated_summary = safe_summary[:1000] + "..." if len(safe_summary) > 1000 else safe_summary
             fallback_message = f"{safe_header}\n{truncated_summary}\n\n⚠️ *Summary was truncated due to length. View full summary on dashboard.*"
             try:
-                msg = await query.edit_message_text(fallback_message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+                msg = await _edit_with_retry(fallback_message, markup=reply_markup)
                 return msg
             except Exception as fallback_e:
                 logging.error(f"Even fallback message failed: {fallback_e}")
