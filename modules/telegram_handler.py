@@ -53,6 +53,14 @@ from modules.telegram.ui.formatting import (
 )
 from modules.telegram.handlers.captions import build_ai2ai_audio_caption
 from modules.telegram.ui.keyboards import build_ollama_models_keyboard as ui_build_models_keyboard
+from modules.telegram.ui.tts import (
+    build_local_failure_keyboard as ui_build_local_failure_keyboard,
+    build_tts_catalog_keyboard as ui_build_tts_catalog_keyboard,
+    build_tts_keyboard as ui_build_tts_keyboard,
+    gender_label as ui_gender_label,
+    tts_prompt_text as ui_tts_prompt_text,
+    tts_voice_label as ui_tts_voice_label,
+)
 from modules import render_probe
 from modules.ollama_client import (
     OllamaClientError,
@@ -2874,170 +2882,10 @@ class YouTubeTelegramBot:
 
     # ------------------------- External TTS hub helpers -------------------------
     def _gender_label(self, gender: Optional[str]) -> str:
-        if not gender:
-            return "All genders"
-        mapping = {
-            "female": "Female",
-            "male": "Male",
-            "unknown": "Unknown",
-        }
-        return mapping.get(gender, gender.title())
+        return ui_gender_label(gender)
 
     def _build_tts_catalog_keyboard(self, session: Dict[str, Any]) -> InlineKeyboardMarkup:
-        catalog = session.get('catalog') or {}
-        filters = (catalog.get('filters') or {}) if catalog else {}
-        favorites = session.get('favorites') or []
-        selected_gender = session.get('selected_gender')
-        selected_family = session.get('selected_family')
-
-        mode = session.get('voice_mode')
-        if mode not in ('favorites', 'all'):
-            mode = 'favorites' if favorites else 'all'
-        if mode == 'favorites' and not favorites:
-            mode = 'all'
-        session['voice_mode'] = mode
-
-        favorite_by_voice = {}
-        allowed_ids = None
-        if favorites:
-            for fav in favorites:
-                voice_id = fav.get('voiceId')
-                if voice_id:
-                    favorite_by_voice[voice_id] = fav
-            if mode == 'favorites':
-                allowed_ids = {vid for vid in favorite_by_voice.keys() if vid}
-
-        rows: List[List[InlineKeyboardButton]] = []
-
-        # Mode row
-        mark_fav = "✅" if mode == 'favorites' else "⬜"
-        mark_all = "✅" if mode == 'all' else "⬜"
-        rows.append([
-            InlineKeyboardButton(f"{mark_fav} Favorites", callback_data="tts_mode:favorites"),
-            InlineKeyboardButton(f"{mark_all} All voices", callback_data="tts_mode:all"),
-        ])
-
-        # Gender header and options
-        rows.append([InlineKeyboardButton("Gender", callback_data="tts_nop")])
-        genders = filters.get('genders') or []
-        gender_buttons: List[InlineKeyboardButton] = []
-        mark_all_gender = "✅" if not selected_gender else "⬜"
-        gender_buttons.append(InlineKeyboardButton(f"{mark_all_gender} All", callback_data="tts_gender:all"))
-        for entry in genders:
-            gid = entry.get('id')
-            if not gid:
-                continue
-            label = entry.get('label') or gid.title()
-            mark = "✅" if selected_gender == gid else "⬜"
-            gender_buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"tts_gender:{gid}"))
-        rows.append(gender_buttons)
-
-        # Accent family header and options
-        rows.append([InlineKeyboardButton("Accent", callback_data="tts_nop")])
-        family_options = available_accent_families(catalog, gender=selected_gender, allowed_ids=allowed_ids)
-        accent_rows: List[List[InlineKeyboardButton]] = []
-        mark_all_family = "✅" if not selected_family else "⬜"
-        accent_rows.append([InlineKeyboardButton(f"{mark_all_family} All", callback_data="tts_accent:all")])
-
-        row: List[InlineKeyboardButton] = []
-        for entry in family_options:
-            family_id = entry.get('id')
-            if not family_id:
-                continue
-            label = entry.get('label') or family_id.title()
-            flag = entry.get('flag') or ''
-            mark = "✅" if selected_family == family_id else "⬜"
-            button_label = f"{mark} {flag} {label}".strip()
-            row.append(InlineKeyboardButton(button_label, callback_data=f"tts_accent:{family_id}"))
-            if len(row) == 3:
-                accent_rows.append(row)
-                row = []
-        if row:
-            accent_rows.append(row)
-        rows.extend(accent_rows)
-
-        # Voices header
-        rows.append([InlineKeyboardButton("Voices", callback_data="tts_nop")])
-        voice_lookup: Dict[str, Dict[str, Any]] = {}
-
-        # Determine voices to display
-        display_voices: List[Dict[str, Any]] = []
-        if mode == 'favorites' and allowed_ids:
-            filtered = filter_catalog_voices(
-                catalog,
-                gender=selected_gender,
-                family=selected_family,
-                allowed_ids=allowed_ids,
-            )
-            id_to_voice = {voice.get('id'): voice for voice in filtered if voice.get('id')}
-            for voice_id, fav in favorite_by_voice.items():
-                voice_meta = id_to_voice.get(voice_id)
-                if not voice_meta:
-                    continue
-                entry = dict(voice_meta)
-                entry['_favorite'] = fav
-                display_voices.append(entry)
-        else:
-            display_voices = filter_catalog_voices(
-                catalog,
-                gender=selected_gender,
-                family=selected_family,
-            )
-
-        if display_voices:
-            row: List[InlineKeyboardButton] = []
-            idx = 0
-            for voice in display_voices:
-                voice_id = voice.get('id')
-                if not voice_id:
-                    continue
-                fav_meta = voice.get('_favorite') if mode == 'favorites' else None
-                if mode == 'favorites' and not fav_meta:
-                    fav_meta = favorite_by_voice.get(voice_id)
-                if mode == 'favorites' and not fav_meta:
-                    continue
-                # Build a compact, index-based key to avoid Telegram's 64-byte limit
-                short_key = f"v{idx}"
-                idx += 1
-
-                accent = voice.get('accent') or {}
-                flag = accent.get('flag') or ''
-                label = voice.get('label') or voice_id
-                if flag:
-                    label = f"{flag} {label}"
-                if len(label) > 28:
-                    label = f"{label[:25]}…"
-
-                entry_lookup = {
-                    'label': label,
-                    'voice': voice,
-                    'voiceId': voice_id,
-                    'engine': voice.get('engine'),
-                    'favoriteSlug': (fav_meta.get('slug') if fav_meta else None) or (fav_meta.get('id') if fav_meta else None),
-                }
-                # Store both short and legacy keys for robustness
-                voice_lookup[short_key] = entry_lookup
-                if mode == 'favorites' and fav_meta:
-                    legacy_key = f"fav|{(fav_meta.get('slug') or fav_meta.get('id') or voice_id)}"
-                    voice_lookup[legacy_key] = entry_lookup
-                else:
-                    legacy_key = f"cat|{voice_id}"
-                    voice_lookup[legacy_key] = entry_lookup
-
-                row.append(InlineKeyboardButton(label, callback_data=f"tts_voice:{short_key}"))
-                if len(row) == 3:
-                    rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-        else:
-            rows.append([InlineKeyboardButton("(No voices for this filter)", callback_data="tts_nop")])
-
-        session['voice_lookup'] = voice_lookup
-        session['current_voices'] = list(voice_lookup.keys())
-
-        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
-        return InlineKeyboardMarkup(rows)
+        return ui_build_tts_catalog_keyboard(session)
 
     async def _refresh_tts_catalog(self, query, session: Dict[str, Any]) -> None:
         catalog = session.get('catalog') or {}
@@ -3062,118 +2910,7 @@ class YouTubeTelegramBot:
         return InlineKeyboardMarkup(buttons)
 
     def _build_local_failure_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 Queue for later", callback_data="tts_queue:local"),
-             InlineKeyboardButton("☁️ Use OpenAI", callback_data="tts_provider:openai")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")]
-        ])
-
-    async def _prompt_tts_provider(self, query, session_payload: Dict[str, Any], title: str) -> None:
-        base_hint = session_payload.get('tts_base')
-        client = self.tts_client or self._resolve_tts_client(base_hint)
-        if client and client.base_api_url:
-            self.tts_client = client
-            session_payload['tts_base'] = client.base_api_url
-        else:
-            session_payload['tts_base'] = None
-        prompt_text = (
-            f"🎙️ Choose how to generate audio for **{self._escape_markdown(title)}**"
-        )
-        prompt_message = await query.message.reply_text(
-            prompt_text,
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=self._build_provider_keyboard(include_local=True)
-        )
-        self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
-
-    async def _execute_tts_job(self, query, session: Dict[str, Any], provider: str) -> None:
-        provider = (provider or 'openai').lower()
-        summary_text = session.get('summary_text') or session.get('text') or ''
-        if not summary_text:
-            logging.warning("TTS: session missing text; aborting")
-            await query.answer("Missing summary text", show_alert=True)
-            return
-
-        placeholders = session.get('placeholders') or {}
-        audio_filename = placeholders.get('audio_filename') or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
-        json_placeholder = placeholders.get('json_placeholder') or f"tts_{int(time.time())}.json"
-
-        selected_voice = session.get('selected_voice') or {}
-        favorite_slug = selected_voice.get('favorite_slug')
-        voice_id = selected_voice.get('voice_id')
-        engine_id = selected_voice.get('engine')
-
-        await query.answer(f"Generating audio via {provider.title()}…")
-
-        provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
-        voice_label = session.get('last_voice') or ''
-        # As a fallback, try to infer a label from the selected_voice payload
-        if not voice_label:
-            try:
-                sv = session.get('selected_voice') or {}
-                slug = None
-                if sv.get('favorite_slug'):
-                    slug = f"fav|{sv.get('favorite_slug')}"
-                elif sv.get('voice_id'):
-                    slug = f"cat|{sv.get('voice_id')}"
-                if slug:
-                    voice_label = self._tts_voice_label(session, slug)
-            except Exception:
-                voice_label = ''
-
-        # Post a visible status bubble so the user knows the click registered
-        status_msg = None
-        try:
-            status_text = (
-                f"⏳ Generating TTS"
-                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                + f" • {provider_label}"
-            )
-            status_msg = await query.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            status_msg = None
-
-        try:
-            logging.info(
-                f"🧩 Starting TTS generation via {provider} | title={session.get('title')}"
-            )
-            audio_filepath = await self.summarizer.generate_tts_audio(
-                summary_text,
-                audio_filename,
-                json_placeholder,
-                provider=provider,
-                voice=voice_id,
-                engine=engine_id,
-                favorite_slug=favorite_slug,
-            )
-        except LocalTTSUnavailable as exc:
-            logging.warning(f"Local TTS unavailable during execution: {exc}")
-            await self._handle_local_unavailable(query, session, message=str(exc))
-            return
-        except Exception as exc:
-            logging.error(f"TTS synthesis error: {exc}")
-            await query.answer("TTS failed", show_alert=True)
-            return
-
-        if not audio_filepath or not Path(audio_filepath).exists():
-            logging.warning("TTS generation returned no audio")
-            await query.answer("TTS generation failed", show_alert=True)
-            return
-
-        logging.info(f"📦 TTS file ready: {audio_filepath}")
-        await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider)
-        # Update the status bubble to confirm
-        try:
-            if status_msg:
-                done_text = (
-                    f"✅ Generated"
-                    + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
-                    + f" • {provider_label}"
-                )
-                await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
-        except Exception:
-            pass
-        # Keep session open so user can test more voices without restarting
+        return ui_build_local_failure_keyboard()
 
     async def _handle_local_unavailable(self, query, session: Dict[str, Any], message: str = "") -> None:
         logging.warning(f"Local TTS unavailable: {message}")
@@ -3296,28 +3033,7 @@ class YouTubeTelegramBot:
         self.tts_sessions.pop(self._tts_session_key(chat_id, message_id), None)
 
     def _build_tts_keyboard(self, favorites: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-        buttons: List[List[InlineKeyboardButton]] = []
-        row: List[InlineKeyboardButton] = []
-        max_per_row = 3
-
-        for i, profile in enumerate(favorites):
-            slug = profile.get('slug') or profile.get('voiceId')
-            if not slug:
-                continue
-            label = profile.get('label') or profile.get('voiceId') or slug
-            if label.startswith("Favorite ·"):
-                label = label.split("·", 1)[1].strip() or label
-            if len(label) > 28:
-                label = f"{label[:25]}…"
-            short_key = f"v{i}"
-            row.append(InlineKeyboardButton(f"🎤 {label}", callback_data=f"tts_voice:{short_key}"))
-            if len(row) == max_per_row:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
-        return InlineKeyboardMarkup(buttons)
+        return ui_build_tts_keyboard(favorites)
 
     def _tts_prompt_text(
         self,
@@ -3327,58 +3043,17 @@ class YouTubeTelegramBot:
         family: Optional[str] = None,
         catalog: Optional[Dict[str, Any]] = None,
     ) -> str:
-        snippet = (text or "").strip()
-        if len(snippet) > 280:
-            snippet = snippet[:277].rstrip() + "…"
-        lines = []
-        # Width-keeper line to force Telegram to expand the bubble
-        lines.append("──────────────────────────────")
-        if last_voice:
-            lines.append(f"✅ Last voice: {last_voice}")
-        lines.append("🗣️ Ready to synthesize speech for:")
-        lines.append(f"“{snippet or '…'}”")
-        gender_label = self._gender_label(gender)
-        family_label = accent_family_label(catalog or {}, family)
-        lines.append(f"Filters: {gender_label} · {family_label}")
-        lines.append("Select a voice below or cancel.")
-        lines.append("──────────────────────────────")
-        return "\n".join(lines)
+        return ui_tts_prompt_text(
+            text,
+            last_voice=last_voice,
+            gender=gender,
+            family=family,
+            catalog=catalog,
+        )
 
     def _tts_voice_label(self, session: Dict[str, Any], slug: str) -> str:
-        lookup = session.get('voice_lookup') or {}
-        entry = lookup.get(slug)
-        if entry:
-            label = entry.get('label')
-            if label:
-                return label
-            voice = entry.get('voice') or {}
-            accent = voice.get('accent') or {}
-            base_label = voice.get('label') or entry.get('voiceId') or slug
-            flag = accent.get('flag')
-            if flag:
-                return f"{flag} {base_label}"
-            return base_label
-        base_slug = slug.split('|', 1)[-1]
-        catalog = session.get('catalog') or {}
-        for voice in catalog.get('voices') or []:
-            if voice.get('id') == base_slug:
-                label = voice.get('label') or slug
-                accent = voice.get('accent') or {}
-                flag = accent.get('flag')
-                if flag:
-                    return f"{flag} {label}"
-                return label
-        favorites = session.get('favorites') or []
-        for profile in favorites:
-            profile_slug = profile.get('slug') or profile.get('voiceId')
-            if profile_slug == base_slug:
-                raw_label = profile.get('label') or profile.get('voiceId') or slug
-                if raw_label.startswith("Favorite ·"):
-                    return raw_label.split("·", 1)[1].strip() or slug
-                return raw_label
-        return slug
+        return ui_tts_voice_label(session, slug)
 
-    # ------------------------- Telegram command: /tts -------------------------
     async def tts_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if not self._is_user_allowed(user_id):
