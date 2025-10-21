@@ -193,15 +193,17 @@ def build_ollama_models_keyboard(
     categories: Optional[Dict[str, Dict[str, Any]]] = None,
     persona_parse: Optional[Callable[[Optional[str]], Tuple[str, Optional[str]]]] = None,
     ai2ai_default_models: Optional[Callable[[List[str], bool], Tuple[Optional[str], Optional[str]]]] = None,
+    allow_same_models: bool = False,
 ) -> InlineKeyboardMarkup:
+    sess = session if session is not None else {}
     rows: List[List[InlineKeyboardButton]] = []
     start = page * page_size
     end = start + page_size
     subset = models[start:end]
-    sel_a = (session or {}).get('ai2ai_model_a') if session else None
-    sel_b = (session or {}).get('ai2ai_model_b') if session else None
-    current = (session or {}).get('model') if session else None
-    mode = (session or {}).get('mode') or ('ai-ai' if (sel_a and sel_b) else 'ai-human')
+    sel_a = sess.get('ai2ai_model_a')
+    sel_b = sess.get('ai2ai_model_b')
+    current = sess.get('model')
+    mode = sess.get('mode') or ('ai-ai' if (sel_a and sel_b) else 'ai-human')
 
     # Top mode toggle
     mark_single = '✅' if mode == 'ai-human' else '⬜'
@@ -213,14 +215,13 @@ def build_ollama_models_keyboard(
 
     if mode == 'ai-ai':
         # Ensure paging slots and defaults
-        page_a = int((session or {}).get('ai2ai_page_a') or 0)
-        page_b = int((session or {}).get('ai2ai_page_b') or 0)
-        allow_same = str((session or {}).get('ai2ai_allow_same') or '0').lower() in ('1', 'true', 'yes')
+        page_a = int(sess.get('ai2ai_page_a') or 0)
+        page_b = int(sess.get('ai2ai_page_b') or 0)
         if session is not None and models and ai2ai_default_models:
-            default_a, default_b = ai2ai_default_models(models, allow_same)
-            if not session.get('ai2ai_model_a') and default_a:
+            default_a, default_b = ai2ai_default_models(models, allow_same_models)
+            if not sess.get('ai2ai_model_a') and default_a:
                 session['ai2ai_model_a'] = default_a
-            if not session.get('ai2ai_model_b') and default_b:
+            if not sess.get('ai2ai_model_b') and default_b:
                 session['ai2ai_model_b'] = default_b
             session['active'] = bool(session.get('ai2ai_model_a') and session.get('ai2ai_model_b'))
             sel_a = session.get('ai2ai_model_a')
@@ -229,7 +230,7 @@ def build_ollama_models_keyboard(
         cats = categories or {}
         # Section A
         rows.append([InlineKeyboardButton("Model A:", callback_data="ollama_nop")])
-        view_a = (session or {}).get("ai2ai_view_a") or "models"
+        view_a = sess.get("ai2ai_view_a") or "models"
         if view_a not in ("models", "persona_categories", "persona_list"):
             view_a = "models"
         if session is not None:
@@ -265,7 +266,7 @@ def build_ollama_models_keyboard(
 
         # Section B
         rows.append([InlineKeyboardButton("Model B:", callback_data="ollama_nop")])
-        view_b = (session or {}).get("ai2ai_view_b") or "models"
+        view_b = sess.get("ai2ai_view_b") or "models"
         if view_b not in ("models", "persona_categories", "persona_list"):
             view_b = "models"
         if session is not None:
@@ -310,7 +311,7 @@ def build_ollama_models_keyboard(
 
     # Single-mode picker
     cats = categories or {}
-    view_single = (session or {}).get("single_view") or "models"
+    view_single = sess.get("single_view") or "models"
     if view_single not in ("models", "persona_categories", "persona_list"):
         view_single = "models"
     if view_single == "persona_list" and not (session or {}).get("single_persona_category"):
@@ -345,4 +346,3 @@ def build_ollama_models_keyboard(
         rows.extend(single_persona_categories_rows(session or {}, page_size, cats))
     rows.append([InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
     return InlineKeyboardMarkup(rows)
-

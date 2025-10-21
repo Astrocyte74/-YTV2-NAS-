@@ -52,6 +52,7 @@ from modules.telegram.ui.formatting import (
     split_text_into_chunks as ui_split_chunks,
 )
 from modules.telegram.handlers.captions import build_ai2ai_audio_caption
+from modules.telegram.ui.keyboards import build_ollama_models_keyboard as ui_build_models_keyboard
 from modules import render_probe
 from modules.ollama_client import (
     OllamaClientError,
@@ -909,161 +910,19 @@ class YouTubeTelegramBot:
         return models
 
     def _build_ollama_models_keyboard(self, models: List[str], page: int = 0, page_size: int = 12, session: Optional[Dict[str, Any]] = None) -> InlineKeyboardMarkup:
-        start = page * page_size
-        end = start + page_size
-        subset = models[start:end]
-        rows: List[List[InlineKeyboardButton]] = []
-        row: List[InlineKeyboardButton] = []
-        sel_a = (session or {}).get('ai2ai_model_a') if session else None
-        sel_b = (session or {}).get('ai2ai_model_b') if session else None
-        current = (session or {}).get('model') if session else None
-        mode = (session or {}).get('mode') or ('ai-ai' if (sel_a and sel_b) else 'ai-human')
-
-        # Top mode toggle row
-        mark_single = '✅' if mode == 'ai-human' else '⬜'
-        mark_ai2ai = '✅' if mode == 'ai-ai' else '⬜'
-        rows.append([
-            InlineKeyboardButton(f"{mark_single} Single AI Chat", callback_data="ollama_set_mode:single"),
-            InlineKeyboardButton(f"{mark_ai2ai} AI↔AI Chat", callback_data="ollama_set_mode:ai2ai"),
-        ])
-
-        # AI↔AI integrated picker (two sections)
-        if mode == 'ai-ai':
-            # Ensure paging slots
-            page_a = int((session or {}).get('ai2ai_page_a') or 0)
-            page_b = int((session or {}).get('ai2ai_page_b') or 0)
-            allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
-            if session is not None and models:
-                default_a, default_b = self._ollama_ai2ai_default_models(models, allow_same)
-                if not session.get('ai2ai_model_a') and default_a:
-                    session['ai2ai_model_a'] = default_a
-                if not session.get('ai2ai_model_b') and default_b:
-                    session['ai2ai_model_b'] = default_b
-                session['active'] = bool(session.get('ai2ai_model_a') and session.get('ai2ai_model_b'))
-                sel_a = session.get('ai2ai_model_a')
-                sel_b = session.get('ai2ai_model_b')
-            categories = self._ollama_persona_categories()
-
-            # Section A
-            rows.append([InlineKeyboardButton("Model A:", callback_data="ollama_nop")])
-            view_a = (session or {}).get("ai2ai_view_a") or "models"
-            if view_a not in ("models", "persona_categories", "persona_list"):
-                view_a = "models"
-            if session is not None:
-                session["ai2ai_view_a"] = view_a
-            rows.append(self._ollama_ai2ai_view_toggle_row("A", view_a))
-            if view_a == "models":
-                a_start = page_a * page_size
-                a_end = a_start + page_size
-                a_subset = models[a_start:a_end]
-                row = []
-                for name in a_subset:
-                    base_label = name
-                    if len(base_label) > 28:
-                        base_label = f"{base_label[:25]}…"
-                    label = f"✅ {base_label}" if sel_a == name else base_label
-                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
-                    if len(row) == 3:
-                        rows.append(row)
-                        row = []
-                if row:
-                    rows.append(row)
-                nav_a: List[InlineKeyboardButton] = []
-                if a_end < len(models):
-                    nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
-                if page_a > 0:
-                    nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
-                if nav_a:
-                    rows.append(nav_a)
-            elif view_a == "persona_list":
-                rows.extend(self._ollama_ai2ai_persona_list_rows("A", session or {}, page_size, categories))
-            else:
-                rows.extend(self._ollama_ai2ai_persona_categories_rows("A", session or {}, page_size, categories))
-
-            # Section B
-            rows.append([InlineKeyboardButton("Model B:", callback_data="ollama_nop")])
-            view_b = (session or {}).get("ai2ai_view_b") or "models"
-            if view_b not in ("models", "persona_categories", "persona_list"):
-                view_b = "models"
-            if session is not None:
-                session["ai2ai_view_b"] = view_b
-            rows.append(self._ollama_ai2ai_view_toggle_row("B", view_b))
-            if view_b == "models":
-                b_start = page_b * page_size
-                b_end = b_start + page_size
-                b_subset_raw = models[b_start:b_end]
-                b_subset = [n for n in b_subset_raw if (allow_same or (not sel_a or n != sel_a))]
-                row = []
-                for name in b_subset:
-                    base_label = name
-                    if len(base_label) > 28:
-                        base_label = f"{base_label[:25]}…"
-                    label = f"✅ {base_label}" if sel_b == name else base_label
-                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
-                    if len(row) == 3:
-                        rows.append(row)
-                        row = []
-                if row:
-                    rows.append(row)
-                nav_b: List[InlineKeyboardButton] = []
-                if b_end < len(models):
-                    nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
-                if page_b > 0:
-                    nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
-                if nav_b:
-                    rows.append(nav_b)
-            elif view_b == "persona_list":
-                rows.extend(self._ollama_ai2ai_persona_list_rows("B", session or {}, page_size, categories))
-            else:
-                rows.extend(self._ollama_ai2ai_persona_categories_rows("B", session or {}, page_size, categories))
-
-            # Footer
-            foot: List[InlineKeyboardButton] = []
-            if sel_a and sel_b:
-                foot.append(InlineKeyboardButton("🧠 AI↔AI Options", callback_data="ollama_ai2ai:opts"))
-                foot.append(InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear"))
-            foot.append(InlineKeyboardButton("❌ Close", callback_data="ollama_cancel"))
-            rows.append(foot)
-            return InlineKeyboardMarkup(rows)
-
-        # Single-mode picker (models + personas)
+        allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
         categories = self._ollama_persona_categories()
-        view_single = (session or {}).get("single_view") or "models"
-        if view_single not in ("models", "persona_categories", "persona_list"):
-            view_single = "models"
-        if view_single == "persona_list" and not (session or {}).get("single_persona_category"):
-            view_single = "persona_categories"
-        if session is not None:
-            session["single_view"] = view_single
-            rows.append(self._ollama_single_view_toggle_row(view_single))
-        if view_single == "models":
-            row = []
-            for name in subset:
-                label = name
-                if len(label) > 28:
-                    label = f"{label[:25]}…"
-                if name == session.get("ai2ai_model_a") or name == session.get("ai2ai_model_b") or name == current:
-                    label = f"✅ {label}"
-                row.append(InlineKeyboardButton(label, callback_data=f"ollama_model:{name}"))
-                if len(row) == 3:
-                    rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            nav: List[InlineKeyboardButton] = []
-            if end < len(models):
-                nav.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more:{page+1}"))
-            if page > 0:
-                nav.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page-1}"))
-            if nav:
-                rows.append(nav)
-        elif view_single == "persona_list":
-            rows.extend(self._ollama_single_persona_list_rows(session or {}, page_size, categories))
-        else:
-            rows.extend(self._ollama_single_persona_categories_rows(session or {}, page_size, categories))
-        # Footer: close button (mode toggle handled at top)
-        rows.append([InlineKeyboardButton("❌ Close", callback_data="ollama_cancel")])
-        return InlineKeyboardMarkup(rows)
+        sess = session if session is not None else {}
+        return ui_build_models_keyboard(
+            models=models,
+            page=page,
+            page_size=page_size,
+            session=sess,
+            categories=categories,
+            persona_parse=self._persona_parse,
+            ai2ai_default_models=self._ollama_ai2ai_default_models,
+            allow_same_models=allow_same,
+        )
 
     def _ollama_stream_default(self) -> bool:
         val = os.getenv('OLLAMA_STREAM_DEFAULT', '1').lower()
