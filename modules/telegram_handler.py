@@ -5231,6 +5231,9 @@ class YouTubeTelegramBot:
                         slug = (fav.get("slug") or vid)
                         eng = fav.get("engine") or voice_meta.get("engine") or voice_meta.get("provider")
                         results.append((slug, vid, eng, f"{gender} via favorites"))
+                    # Randomize among matching favorites
+                    if results:
+                        random.shuffle(results)
                     return results
 
                 def _candidates_catalog_by_gender(gender: Optional[str]) -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
@@ -5255,14 +5258,18 @@ class YouTubeTelegramBot:
 
                 def _candidates_generic() -> List[Tuple[Optional[str], Optional[str], Optional[str], str]]:
                     results: List[Tuple[Optional[str], Optional[str], Optional[str], str]] = []
-                    # any favorites first
+                    # any favorites first (randomized)
+                    fav_results: List[Tuple[Optional[str], Optional[str], Optional[str], str]] = []
                     for fav in favs:
                         vid = (fav.get("voiceId") or "").strip()
                         slug = (fav.get("slug") or vid)
                         eng = fav.get("engine") or (id_to_voice.get(vid) or {}).get("engine") or (id_to_voice.get(vid) or {}).get("provider")
                         if vid or slug:
-                            results.append((slug, vid, eng, "fallback via favorites"))
-                    # then any catalog
+                            fav_results.append((slug, vid, eng, "fallback via favorites"))
+                    if fav_results:
+                        random.shuffle(fav_results)
+                        results.extend(fav_results)
+                    # then any catalog (keep deterministic label sort already applied upstream)
                     for v in (catalog or {}).get("voices") or []:
                         vid = (v.get("id") or "").strip()
                         if not vid:
