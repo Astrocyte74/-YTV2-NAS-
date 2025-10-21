@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ParseMode
+
+from modules.ollama_client import get_models as ollama_get_models
 
 
 def default_models(handler, models: List[str], allow_same: bool) -> Tuple[Optional[str], Optional[str]]:
@@ -214,8 +218,220 @@ async def continue_exchange(
     handler.ollama_sessions[chat_id] = session
 
 
+async def handle_callback(
+    handler,
+    query,
+    callback_data: str,
+    session: Dict[str, Any],
+    render_options: Optional[Callable[[], Awaitable[None]]] = None,
+) -> bool:
+    chat_id = query.message.chat_id
+
+    if callback_data == "ollama_ai2ai:tts":
+        try:
+            await query.answer("Generating audio…")
+        except Exception:
+            pass
+        status = None
+        try:
+            status = await query.message.reply_text("🎧 Generating AI↔AI audio…")
+        except Exception:
+            status = None
+        try:
+            path = await handler._ollama_ai2ai_generate_audio(chat_id, session)
+            if not path or not Path(path).exists():
+                raise RuntimeError("no audio produced")
+            caption = handler._ai2ai_audio_caption(session)
+            with open(path, "rb") as f:
+                await query.message.reply_voice(voice=f, caption=caption, parse_mode=ParseMode.MARKDOWN)
+            try:
+                if status:
+                    await status.edit_text("✅ AI↔AI audio ready")
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                message = f"❌ AI↔AI audio failed: {exc}"
+                if status:
+                    await status.edit_text(message)
+                else:
+                    await query.message.reply_text(message)
+            except Exception:
+                pass
+        return True
+
+    if callback_data.startswith("ollama_ai2ai:"):
+        action = callback_data.split(":", 1)[1]
+        if action == "enter":
+            models = session.get("models") or []
+            if not models:
+                raw = ollama_get_models()
+                models = handler._ollama_models_list(raw)
+                session["models"] = models
+            kb = handler._build_ollama_models_keyboard_ai2ai(models, "A", session.get("page", 0), session=session)
+            await query.edit_message_text("🤝 Select model for A:", reply_markup=kb)
+            await query.answer("AI↔AI mode")
+            handler.ollama_sessions[chat_id] = session
+            return True
+        if action == "clear":
+            for key in (
+                "ai2ai_model_a",
+                "ai2ai_model_b",
+                "ai2ai_active",
+                "persona_a",
+                "persona_b",
+                "persona_a_display",
+                "persona_b_display",
+                "persona_a_gender",
+                "persona_b_gender",
+                "persona_category_a",
+                "persona_category_b",
+                "persona_a_custom",
+                "persona_b_custom",
+                "persona_a_intro_pending",
+                "persona_b_intro_pending",
+                "ai2ai_round",
+                "ai2ai_turns_total",
+                "topic",
+                "ai2ai_turns_left",
+                "ai2ai_view_a",
+                "ai2ai_view_b",
+                "ai2ai_persona_category_a",
+                "ai2ai_persona_category_b",
+                "ai2ai_persona_page_a",
+                "ai2ai_persona_page_b",
+                "ai2ai_persona_cat_page_a",
+                "ai2ai_persona_cat_page_b",
+            ):
+                session.pop(key, None)
+            session.pop("ai2ai_page_a", None)
+            session.pop("ai2ai_page_b", None)
+            session["mode"] = "ai-human"
+            session["active"] = bool(session.get("model"))
+            models = session.get("models") or []
+            kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
+            await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
+            await query.answer("Cleared AI↔AI")
+            handler.ollama_sessions[chat_id] = session
+            return True
+        if action == "auto":
+            turns = session.get("ai2ai_turns_config") or session.get("ai2ai_turns_total") or os.getenv('OLLAMA_AI2AI_TURNS', '10')
+            try:
+                turns_int = int(turns)
+            except Exception:
+                turns_int = 10
+            if turns_int <= 0:
+                turns_int = 10
+            session["ai2ai_cancel"] = False
+            session["ai2ai_active"] = True
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("Continuing AI↔AI")
+            try:
+                await handler._ollama_ai2ai_run(chat_id, turns_int)
+            except Exception as exc:
+                await query.message.reply_text(f"❌ Failed to continue AI↔AI: {exc}")
+            return True
+        if action == "start":
+            session["ai2ai_active"] = True
+            if not (session.get("persona_a") and session.get("persona_b")):
+                rand_a, rand_b = handler._ollama_persona_random_pair()
+                session.setdefault("persona_a", rand_a)
+                session.setdefault("persona_b", rand_b)
+            handler._update_persona_session_fields(session, 'a', session.get('persona_a'))
+            handler._update_persona_session_fields(session, 'b', session.get('persona_b'))
+            session.setdefault("persona_a_custom", False)
+            session.setdefault("persona_b_custom", False)
+            session.setdefault("persona_a_intro_pending", False)
+            session.setdefault("persona_b_intro_pending", False)
+            session.setdefault("topic", session.get("last_user") or "The nature of space and time")
+            try:
+                default_turns = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+            except Exception:
+                default_turns = 10
+            session.setdefault("ai2ai_turns_left", default_turns)
+            if not session.get("ai2ai_model_a"):
+                session["ai2ai_model_a"] = session.get("model")
+            if not session.get("ai2ai_model_b"):
+                session["ai2ai_model_b"] = session.get("model")
+            session["active"] = True
+            handler.ollama_sessions[chat_id] = session
+            await query.answer("AI↔AI started")
+            try:
+                await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
+            except Exception:
+                pass
+            if render_options is not None:
+                await render_options()
+            return True
+        if action in ("continue", "auto"):
+            turns_cfg = session.get("ai2ai_turns_config") or session.get("ai2ai_turns_left")
+            if not isinstance(turns_cfg, int) or turns_cfg <= 0:
+                try:
+                    turns_cfg = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
+                except Exception:
+                    turns_cfg = 10
+                session["ai2ai_turns_config"] = turns_cfg
+            await query.answer("Continuing…")
+            await handler._ollama_ai2ai_run(query.message.chat_id, turns_cfg)
+            return True
+        if action == "opts":
+            turns = int(session.get('ai2ai_turns_left') or 10)
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("➖ Turns", callback_data="ollama_ai2ai_turns:-"),
+                    InlineKeyboardButton(f"{turns} turns", callback_data="ollama_nop"),
+                    InlineKeyboardButton("➕ Turns", callback_data="ollama_ai2ai_turns:+"),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")],
+            ])
+            await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
+            await query.answer("Options")
+            return True
+        return False
+
+    if callback_data.startswith("ollama_ai2ai_turns:"):
+        op = callback_data.split(":", 1)[1]
+        turns = int(session.get('ai2ai_turns_left') or 10)
+        if op == '+':
+            turns = min(50, turns + 1)
+        else:
+            turns = max(1, turns - 1)
+        session['ai2ai_turns_left'] = turns
+        session['ai2ai_turns_config'] = turns
+        handler.ollama_sessions[chat_id] = session
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("➖ Turns", callback_data="ollama_ai2ai_turns:-"),
+                InlineKeyboardButton(f"{turns} turns", callback_data="ollama_nop"),
+                InlineKeyboardButton("➕ Turns", callback_data="ollama_ai2ai_turns:+"),
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")],
+        ])
+        await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
+        await query.answer("Updated turns")
+        return True
+
+    if callback_data.startswith("ollama_more_ai2ai:"):
+        _, slot, page_str = callback_data.split(":", 2)
+        try:
+            page = int(page_str)
+        except Exception:
+            page = 0
+        models = session.get("models") or []
+        key = f"ai2ai_page_{slot.lower()}"
+        session[key] = page
+        kb = handler._build_ollama_models_keyboard_ai2ai(models, slot, page, session=session)
+        await query.edit_message_text(f"🤖 Pick model for {slot}:", reply_markup=kb)
+        handler.ollama_sessions[chat_id] = session
+        await query.answer("Page updated")
+        return True
+
+    return False
+
+
 __all__ = [
     'default_models',
     'run',
     'continue_exchange',
+    'handle_callback',
 ]

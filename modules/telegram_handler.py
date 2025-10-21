@@ -1997,200 +1997,11 @@ class YouTubeTelegramBot:
             except Exception:
                 pass
             return
-        if callback_data.startswith("ollama_ai2ai:"):
-            action = callback_data.split(":", 1)[1]
-            if action == "enter":
-                # Explicitly enter AI↔AI selection: pick model A first
-                models = session.get("models") or []
-                if not models:
-                    raw = ollama_get_models()
-                    models = self._ollama_models_list(raw)
-                    session["models"] = models
-                kb = self._build_ollama_models_keyboard_ai2ai(models, "A", session.get("page", 0), session=session)
-                await query.edit_message_text("🤝 Select model for A:", reply_markup=kb)
-                await query.answer("AI↔AI mode")
-                self.ollama_sessions[chat_id] = session
-                return
-            if action == "clear":
-                # Clear AI↔AI selection and return to single-mode picker
-                for k in (
-                    "ai2ai_model_a",
-                    "ai2ai_model_b",
-                    "ai2ai_active",
-                    "persona_a",
-                    "persona_b",
-                    "persona_a_display",
-                    "persona_b_display",
-                    "persona_a_gender",
-                    "persona_b_gender",
-                    "persona_category_a",
-                    "persona_category_b",
-                    "persona_a_custom",
-                    "persona_b_custom",
-                    "persona_a_intro_pending",
-                    "persona_b_intro_pending",
-                    "ai2ai_round",
-                    "ai2ai_turns_total",
-                    "topic",
-                    "ai2ai_turns_left",
-                    "ai2ai_view_a",
-                    "ai2ai_view_b",
-                    "ai2ai_persona_category_a",
-                    "ai2ai_persona_category_b",
-                    "ai2ai_persona_page_a",
-                    "ai2ai_persona_page_b",
-                    "ai2ai_persona_cat_page_a",
-                    "ai2ai_persona_cat_page_b",
-                ):
-                    session.pop(k, None)
-                session.pop("ai2ai_page_a", None)
-                session.pop("ai2ai_page_b", None)
-                session["mode"] = "ai-human"
-                session["active"] = bool(session.get("model"))
-                models = session.get("models") or []
-                kb = self._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
-                await query.answer("Cleared AI↔AI")
-                self.ollama_sessions[chat_id] = session
-                return
-            if action == "auto":
-                turns = session.get("ai2ai_turns_config") or session.get("ai2ai_turns_total") or os.getenv('OLLAMA_AI2AI_TURNS', '10')
-                try:
-                    turns_int = int(turns)
-                except Exception:
-                    turns_int = 10
-                if turns_int <= 0:
-                    turns_int = 10
-                session["ai2ai_cancel"] = False
-                session["ai2ai_active"] = True
-                self.ollama_sessions[chat_id] = session
-                await query.answer("Continuing AI↔AI")
-                try:
-                    await self._ollama_ai2ai_run(chat_id, turns_int)
-                except Exception as exc:
-                    await query.message.reply_text(f"❌ Failed to continue AI↔AI: {exc}")
-                return
-            if action == "start":
-                # Initialize AI↔AI session with default personas
-                session["ai2ai_active"] = True
-                if not (session.get("persona_a") and session.get("persona_b")):
-                    rand_a, rand_b = self._ollama_persona_random_pair()
-                    session.setdefault("persona_a", rand_a)
-                    session.setdefault("persona_b", rand_b)
-                # Populate derived fields for display/gender
-                self._update_persona_session_fields(session, 'a', session.get('persona_a'))
-                self._update_persona_session_fields(session, 'b', session.get('persona_b'))
-                session.setdefault("persona_a_custom", False)
-                session.setdefault("persona_b_custom", False)
-                session.setdefault("persona_a_intro_pending", False)
-                session.setdefault("persona_b_intro_pending", False)
-                session.setdefault("topic", session.get("last_user") or "The nature of space and time")
-                # Default turns
-                try:
-                    default_turns = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
-                except Exception:
-                    default_turns = 10
-                session.setdefault("ai2ai_turns_left", default_turns)
-                # Default models
-                if not session.get("ai2ai_model_a"):
-                    session["ai2ai_model_a"] = session.get("model")
-                if not session.get("ai2ai_model_b"):
-                    session["ai2ai_model_b"] = session.get("model")
-                session["active"] = True
-                self.ollama_sessions[chat_id] = session
-                await query.answer("AI↔AI started")
-                try:
-                    await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
-                except Exception:
-                    pass
-                await _render_options()
-                return
-            if action in ("continue", "auto"):
-                turns_cfg = session.get("ai2ai_turns_config") or session.get("ai2ai_turns_left")
-                if not isinstance(turns_cfg, int) or turns_cfg <= 0:
-                    try:
-                        turns_cfg = int(os.getenv('OLLAMA_AI2AI_TURNS', '10'))
-                    except Exception:
-                        turns_cfg = 10
-                    session["ai2ai_turns_config"] = turns_cfg
-                await query.answer("Continuing…")
-                await self._ollama_ai2ai_run(query.message.chat_id, turns_cfg)
-                return
-            if action == "opts":
-                # Simple AI↔AI options (turns +/-)
-                turns = int(session.get('ai2ai_turns_left') or 10)
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➖ Turns", callback_data="ollama_ai2ai_turns:-"), InlineKeyboardButton(f"{turns} turns", callback_data="ollama_nop"), InlineKeyboardButton("➕ Turns", callback_data="ollama_ai2ai_turns:+")],
-                    [InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")]
-                ])
-                await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
-                await query.answer("Options")
-                return
-        if callback_data == "ollama_ai2ai:tts":
-            # Generate AI↔AI audio recap using local TTS hub (or fallback)
-            try:
-                await query.answer("Generating audio…")
-            except Exception:
-                pass
-            status = None
-            try:
-                status = await query.message.reply_text("🎧 Generating AI↔AI audio…")
-            except Exception:
-                status = None
-            try:
-                path = await self._ollama_ai2ai_generate_audio(chat_id, session)
-                if not path or not Path(path).exists():
-                    raise RuntimeError("no audio produced")
-                caption = self._ai2ai_audio_caption(session)
-                with open(path, "rb") as f:
-                    await query.message.reply_voice(voice=f, caption=caption, parse_mode=ParseMode.MARKDOWN)
-                try:
-                    if status:
-                        await status.edit_text("✅ AI↔AI audio ready")
-                except Exception:
-                    pass
-            except Exception as e:
-                try:
-                    if status:
-                        await status.edit_text(f"❌ AI↔AI audio failed: {e}")
-                    else:
-                        await query.message.reply_text(f"❌ AI↔AI audio failed: {e}")
-                except Exception:
-                    pass
+        handled_ai2ai = await ai2ai_handler.handle_callback(self, query, callback_data, session, _render_options)
+        if handled_ai2ai:
             return
         if callback_data == "ollama_nop":
             await query.answer("Select an option")
-            return
-        if callback_data.startswith("ollama_ai2ai_turns:"):
-            op = callback_data.split(":", 1)[1]
-            turns = int(session.get('ai2ai_turns_left') or 10)
-            if op == '+':
-                turns = min(50, turns + 1)
-            else:
-                turns = max(1, turns - 1)
-            session['ai2ai_turns_left'] = turns
-            session['ai2ai_turns_config'] = turns
-            self.ollama_sessions[chat_id] = session
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("➖ Turns", callback_data="ollama_ai2ai_turns:-"), InlineKeyboardButton(f"{turns} turns", callback_data="ollama_nop"), InlineKeyboardButton("➕ Turns", callback_data="ollama_ai2ai_turns:+")],
-                [InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")]
-            ])
-            await query.edit_message_text("🧠 AI↔AI Options", reply_markup=kb)
-            await query.answer("Updated turns")
-            return
-        if callback_data.startswith("ollama_more_ai2ai:"):
-            _, slot, page_str = callback_data.split(":", 2)
-            try:
-                page = int(page_str)
-            except Exception:
-                page = 0
-            models = session.get("models") or []
-            key = f"ai2ai_page_{slot.lower()}"
-            session[key] = page
-            kb = self._build_ollama_models_keyboard_ai2ai(models, slot, page, session=session)
-            await query.edit_message_text(f"🤖 Pick model for {slot}:", reply_markup=kb)
-            self.ollama_sessions[chat_id] = session
-            await query.answer("Page updated")
             return
     
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2614,6 +2425,94 @@ class YouTubeTelegramBot:
 
     def _build_local_failure_keyboard(self) -> InlineKeyboardMarkup:
         return ui_build_local_failure_keyboard()
+
+    async def _execute_tts_job(self, query, session: Dict[str, Any], provider: str) -> None:
+        provider_key = (provider or "openai").lower()
+        summary_text = session.get("summary_text") or session.get("text") or ""
+        if not summary_text:
+            logging.warning("TTS: session missing text; aborting")
+            await query.answer("Missing summary text", show_alert=True)
+            return
+        placeholders = session.get("placeholders") or {}
+        audio_filename = placeholders.get("audio_filename") or f"audio_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp3"
+        json_placeholder = placeholders.get("json_placeholder") or f"tts_{int(time.time())}.json"
+        selected_voice = session.get("selected_voice") or {}
+        favorite_slug = selected_voice.get("favorite_slug")
+        voice_id = selected_voice.get("voice_id")
+        engine_id = selected_voice.get("engine")
+
+        await query.answer(f"Generating audio via {provider_key.title()}…")
+        provider_label = "Local TTS hub" if provider_key == "local" else "OpenAI TTS"
+
+        voice_label = session.get("last_voice") or ""
+        if not voice_label:
+            try:
+                slug_hint = None
+                if favorite_slug:
+                    slug_hint = f"fav|{favorite_slug}"
+                elif voice_id:
+                    slug_hint = f"cat|{voice_id}"
+                if slug_hint:
+                    voice_label = self._tts_voice_label(session, slug_hint)
+            except Exception:
+                voice_label = ""
+
+        status_msg = None
+        try:
+            status_text = (
+                f"⏳ Generating TTS"
+                + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                + f" • {provider_label}"
+            )
+            status_msg = await query.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            status_msg = None
+
+        if not self.summarizer:
+            self.summarizer = YouTubeSummarizer()
+
+        try:
+            logging.info(
+                "🧩 Starting TTS generation via %s | title=%s",
+                provider_key,
+                session.get("title"),
+            )
+            audio_filepath = await self.summarizer.generate_tts_audio(
+                summary_text,
+                audio_filename,
+                json_placeholder,
+                provider=provider_key,
+                voice=voice_id,
+                engine=engine_id,
+                favorite_slug=favorite_slug,
+            )
+        except LocalTTSUnavailable as exc:
+            logging.warning("Local TTS unavailable during execution: %s", exc)
+            await self._handle_local_unavailable(query, session, message=str(exc))
+            return
+        except Exception as exc:
+            logging.error("TTS synthesis error: %s", exc)
+            await query.answer("TTS failed", show_alert=True)
+            return
+
+        if not audio_filepath or not Path(audio_filepath).exists():
+            logging.warning("TTS generation returned no audio")
+            await query.answer("TTS generation failed", show_alert=True)
+            return
+
+        logging.info("📦 TTS file ready: %s", audio_filepath)
+        await self._finalize_tts_delivery(query, session, Path(audio_filepath), provider_key)
+
+        try:
+            if status_msg:
+                done_text = (
+                    f"✅ Generated"
+                    + (f" • {self._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}"
+                )
+                await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
 
     async def _handle_local_unavailable(self, query, session: Dict[str, Any], message: str = "") -> None:
         logging.warning(f"Local TTS unavailable: {message}")
