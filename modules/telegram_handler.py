@@ -64,6 +64,8 @@ from modules.telegram.ui.tts import (
     build_tts_catalog_keyboard as ui_build_tts_catalog_keyboard,
     build_tts_keyboard as ui_build_tts_keyboard,
     gender_label as ui_gender_label,
+    short_engine_label,
+    strip_favorite_label,
     tts_prompt_text as ui_tts_prompt_text,
     tts_voice_label as ui_tts_voice_label,
 )
@@ -1840,16 +1842,21 @@ class YouTubeTelegramBot:
             slug = fav.get('slug') or fav.get('voiceId')
             if not slug:
                 continue
+            engine = fav.get('engine')
+            base_label = strip_favorite_label(fav.get('label')) or fav.get('voiceId') or slug
+            display_label = f"{short_engine_label(engine)} {base_label}".strip()
             short_key = f"v{i}"
             entry = {
-                'label': (fav.get('label') or slug),
+                'label': base_label,
+                'display_label': display_label,
+                'button_label': display_label if len(display_label) <= 32 else f"{display_label[:29]}…",
                 'voice': None,
                 'voiceId': fav.get('voiceId'),
-                'engine': fav.get('engine'),
+                'engine': engine,
                 'favoriteSlug': slug,
             }
             voice_lookup[short_key] = entry
-            voice_lookup[f"fav|{slug}"] = entry
+            voice_lookup[f"fav|{engine or ''}|{slug}"] = entry
 
         session_payload = {
             "text": speak_text,

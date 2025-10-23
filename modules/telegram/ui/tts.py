@@ -288,7 +288,7 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         engine_buttons: List[InlineKeyboardButton] = []
         for engine in engine_keys:
             mark = '✅' if engine == active_engine else '⬜'
-            label = 'ALL' if engine == '__all__' else engine.upper()
+            label = 'ALL' if engine == '__all__' else f"{short_engine_label(engine)} {engine.upper()}"
             engine_buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"tts_engine:{engine}"))
             if len(engine_buttons) == 3:
                 rows.append(engine_buttons)
@@ -415,9 +415,9 @@ def build_tts_keyboard(favorites: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
         slug = profile.get('slug') or profile.get('voiceId')
         if not slug:
             continue
-        label = profile.get('label') or profile.get('voiceId') or slug
-        if label.startswith('Favorite ·'):
-            label = label.split('·', 1)[1].strip() or label
+        base_label = strip_favorite_label(profile.get('label')) or profile.get('voiceId') or slug
+        prefix = short_engine_label(profile.get('engine'))
+        label = f"{prefix} {base_label}".strip()
         if len(label) > 28:
             label = f"{label[:25]}…"
         short_key = f"v{i}"
