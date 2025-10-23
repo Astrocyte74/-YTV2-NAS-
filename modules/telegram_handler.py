@@ -1780,14 +1780,15 @@ class YouTubeTelegramBot:
             }
             return bool(catalog_ids & fav_ids)
 
-        active_engine = default_engine
-        if favorites_list and not engine_has_matches(active_engine):
-            for engine in sorted(favorite_engines):
-                if engine_has_matches(engine):
-                    active_engine = engine
-                    break
+        active_engine = '__all__' if favorites_list else default_engine
+        if active_engine == '__all__' and favorites_list:
+            if not engine_has_matches(default_engine):
+                for engine in sorted(favorite_engines):
+                    if engine_has_matches(engine):
+                        default_engine = engine
+                        break
 
-        active_catalog = catalogs.get(active_engine) or {}
+        active_catalog = catalogs.get(default_engine if active_engine == '__all__' else active_engine) or {}
         has_catalog_voices = any(
             isinstance(cat, dict) and (cat.get('voices') or [])
             for cat in catalogs.values()

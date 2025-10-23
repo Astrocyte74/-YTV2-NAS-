@@ -33,6 +33,7 @@
    - If local hub is offline/unreachable → offer to queue job or switch to OpenAI.
 3. Voice selection:
    - Favorites are shown/selected by default when available. If no favorite matches the active engine, the picker auto-switches to one that does.
+   - Engine chips start on `ALL` (aggregated view) and let you narrow to a specific engine; voice buttons show a short prefix like `[K]` or `[X]` so you know which catalog they belong to.
    - Optionally switch engines manually, flip to All voices, and filter by gender and accent family.
 4. When you click a voice, the bot posts a “Generating …” status bubble, then replies with the audio and updates the bubble to “Generated …”. The picker remains open for more tests.
 5. Delivery and sync:
@@ -55,7 +56,7 @@
 
 - When provider `local` is selected, the voice picker defaults to Favorites if any favorites exist.
 - Favorites are fetched from the hub in one call; starred entries drive the picker (with an automatic fallback to all voices if the favorites list would be empty for the current catalog).
-- Engine chips appear whenever multiple engines are available; the picker auto-selects the first engine that contains your favorites and surfaces a hint when it switches.
+- Engine chips surface both an `ALL` tab (aggregated) and per-engine tabs; the picker auto-selects the first engine that contains your favorites, shows a hint when it switches, and prefixes each button with the engine code.
 - The picker checkmarks reflect the current mode: “Favorites” or “All voices”.
 
 ## Environment

@@ -214,6 +214,12 @@ async def handle_callback(handler, query, callback_data: str) -> None:
 
     if callback_data.startswith("tts_engine:"):
         engine = callback_data.split(":", 1)[1]
+        if engine == '__all__':
+            session['active_engine'] = engine
+            handler._store_tts_session(chat_id, message_id, session)
+            await handler._refresh_tts_catalog(query, session)
+            await query.answer("All engines")
+            return
         catalogs = session.get('catalogs') or {}
         if engine not in catalogs or not catalogs.get(engine):
             client = handler._resolve_tts_client(session.get('tts_base'))
@@ -287,10 +293,11 @@ async def handle_callback(handler, query, callback_data: str) -> None:
             favorites = session.get('favorites')
             if client:
                 try:
-                    if active_engine not in catalogs or not catalogs.get(active_engine):
-                        fetched_catalog = await client.fetch_catalog(engine=active_engine)
-                        catalogs[active_engine] = fetched_catalog or {}
-                    catalog = catalogs.get(active_engine) or catalog
+                    target_engine = active_engine if active_engine != '__all__' else default_engine
+                    if target_engine not in catalogs or not catalogs.get(target_engine):
+                        fetched_catalog = await client.fetch_catalog(engine=target_engine)
+                        catalogs[target_engine] = fetched_catalog or {}
+                    catalog = catalogs.get(target_engine) or catalog
                     if not favorites:
                         try:
                             favorites = await client.fetch_favorites()
@@ -351,23 +358,25 @@ async def handle_callback(handler, query, callback_data: str) -> None:
 
     payload = callback_data.split(":", 1)[1]
     logging.info("🔊 Voice selected payload=%s", payload)
-    kind, _, identifier = payload.partition("|")
-    if not identifier:
-        identifier = kind
-        kind = 'cat'
 
     voice_lookup = session.get('voice_lookup') or {}
     entry = voice_lookup.get(payload) or {}
+
+    parts = payload.split("|")
+    kind = parts[0] if parts else ''
+    engine_hint = parts[1] if len(parts) > 2 else (parts[1] if len(parts) > 1 and kind != 'cat' else '')
+    identifier_hint = parts[-1] if len(parts) > 1 else (parts[0] if parts else '')
 
     favorite_slug = entry.get('favoriteSlug') if entry else None
     voice_id = entry.get('voiceId') if entry else None
     engine_id = entry.get('engine') if entry else None
 
-    if not favorite_slug and not voice_id:
-        if kind == 'fav':
-            favorite_slug = identifier
-        else:
-            voice_id = identifier
+    if kind == 'fav' and not favorite_slug:
+        favorite_slug = identifier_hint
+    if kind != 'fav' and not voice_id:
+        voice_id = identifier_hint
+    if not engine_id and engine_hint:
+        engine_id = engine_hint
 
     session['selected_voice'] = {
         'favorite_slug': favorite_slug,
@@ -412,10 +421,19 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
         try:
             sv = session.get('selected_voice') or {}
             slug = None
-            if sv.get('favorite_slug'):
-                slug = f"fav|{sv.get('favorite_slug')}"
-            elif sv.get('voice_id'):
-                slug = f"cat|{sv.get('voice_id')}"
+            engine_hint = sv.get('engine')
+            favorite_slug = sv.get('favorite_slug')
+            voice_id = sv.get('voice_id')
+            if favorite_slug:
+                if engine_hint:
+                    slug = f"fav|{engine_hint}|{favorite_slug}"
+                else:
+                    slug = f"fav|{favorite_slug}"
+            elif voice_id:
+                if engine_hint:
+                    slug = f"cat|{engine_hint}|{voice_id}"
+                else:
+                    slug = f"cat|{voice_id}"
             if slug:
                 voice_label = handler._tts_voice_label(session, slug)
         except Exception:
