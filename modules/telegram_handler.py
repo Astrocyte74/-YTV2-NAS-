@@ -58,6 +58,8 @@ from modules.telegram.ui.summary import (
     build_summary_keyboard as ui_build_summary_keyboard,
     existing_variants_message as ui_existing_variants_message,
     friendly_variant_label as ui_friendly_variant_label,
+    build_summary_provider_keyboard as ui_build_summary_provider_keyboard,
+    build_summary_model_keyboard as ui_build_summary_model_keyboard,
 )
 from modules.telegram.ui.tts import (
     build_local_failure_keyboard as ui_build_local_failure_keyboard,
@@ -116,6 +118,10 @@ class YouTubeTelegramBot:
         self.tts_client: Optional[TTSHubClient] = None
         # Interactive TTS sessions keyed by (chat_id, message_id)
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Interactive summary sessions keyed by (chat_id, message_id)
+        self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Cache of instantiated summarizers keyed by provider/model
+        self.summarizer_cache: Dict[str, YouTubeSummarizer] = {}
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
         
@@ -140,6 +146,7 @@ class YouTubeTelegramBot:
         try:
             llm_config.load_environment()
             self.summarizer = YouTubeSummarizer()
+            self._cache_summarizer_instance(self.summarizer)
             logging.info(f"✅ YouTube summarizer initialized with {self.summarizer.llm_provider}/{self.summarizer.model}")
         except Exception as e:
             logging.error(f"Failed to initialize YouTubeSummarizer: {e}")
@@ -658,6 +665,330 @@ class YouTubeTelegramBot:
             "• https://redd.it/<id>\n\n"
             "Supported Web articles:\n"
             "• Any https:// link (except YouTube/Reddit)"
+        )
+
+    # ------------------------- Summary provider helpers -------------------------
+
+    def _summary_session_key(self, chat_id: int, message_id: int) -> tuple:
+        return (chat_id, message_id)
+
+    def _store_summary_session(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
+        self.summary_sessions[self._summary_session_key(chat_id, message_id)] = payload
+
+    def _get_summary_session(self, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        return self.summary_sessions.get(self._summary_session_key(chat_id, message_id))
+
+    def _remove_summary_session(self, chat_id: int, message_id: int) -> None:
+        self.summary_sessions.pop(self._summary_session_key(chat_id, message_id), None)
+
+    def _summarizer_cache_key(self, provider: Optional[str], model: Optional[str]) -> str:
+        provider_key = (provider or "unknown").strip().lower()
+        model_key = (model or "").strip()
+        return f"{provider_key}::{model_key}"
+
+    def _cache_summarizer_instance(self, summarizer: Optional[YouTubeSummarizer]) -> None:
+        if not summarizer:
+            return
+        key = self._summarizer_cache_key(
+            getattr(summarizer, "llm_provider", None),
+            getattr(summarizer, "model", None),
+        )
+        self.summarizer_cache[key] = summarizer
+
+    def _cached_ollama_summarizer(self) -> Optional[YouTubeSummarizer]:
+        for cached in self.summarizer_cache.values():
+            if getattr(cached, "llm_provider", "").lower() == "ollama":
+                return cached
+        return None
+
+    def _friendly_llm_provider(self, provider: Optional[str]) -> str:
+        mapping = {
+            "openai": "OpenAI",
+            "anthropic": "Anthropic",
+            "openrouter": "OpenRouter",
+            "ollama": "Ollama",
+        }
+        if not provider:
+            return "LLM"
+        return mapping.get(provider.lower(), provider.title())
+
+    @staticmethod
+    def _short_label(text: str, limit: int = 48) -> str:
+        if not isinstance(text, str):
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def _cloud_model_options(self, base_provider: Optional[str], base_model: Optional[str]) -> List[Dict[str, Any]]:
+        options: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        def add_option(provider: Optional[str], model: Optional[str]) -> None:
+            try:
+                resolved_provider, resolved_model, api_key = llm_config.get_model_config(provider, model)
+            except ValueError:
+                return
+            if resolved_provider == "ollama":
+                return
+            if resolved_provider in ("openai", "anthropic", "openrouter") and not api_key:
+                return
+            key = self._summarizer_cache_key(resolved_provider, resolved_model)
+            if key in seen:
+                return
+            seen.add(key)
+            provider_name = self._friendly_llm_provider(resolved_provider)
+            label_core = provider_name if not resolved_model else f"{provider_name} • {resolved_model}"
+            display_provider = self._friendly_llm_provider(resolved_provider)
+            button_text = f"☁️ {display_provider}"
+            if resolved_model:
+                button_text = f"{button_text} • {self._short_label(resolved_model, 24)}"
+            options.append(
+                {
+                    "provider": resolved_provider,
+                    "model": resolved_model,
+                    "label": label_core,
+                    "button_label": button_text,
+                }
+            )
+
+        add_option(base_provider, base_model)
+
+        explicit_model = getattr(llm_config, "llm_model", None)
+        if explicit_model:
+            try:
+                resolved_provider, resolved_model, _ = llm_config.get_model_config(None, explicit_model)
+                add_option(resolved_provider, resolved_model)
+            except ValueError:
+                pass
+
+        shortlist_name = getattr(llm_config, "llm_shortlist", None)
+        shortlist = llm_config.SHORTLISTS.get(shortlist_name, {}) if shortlist_name else {}
+        for provider, model in shortlist.get("primary", []):
+            add_option(provider, model)
+        for provider, model in shortlist.get("fallback", []):
+            add_option(provider, model)
+
+        return options[:6]
+
+    def _ollama_model_options(self) -> List[Dict[str, Any]]:
+        models: List[str] = []
+        try:
+            raw = ollama_get_models()
+            models = self._ollama_models_list(raw)
+        except Exception as exc:
+            logging.debug(f"Ollama model list unavailable: {exc}")
+
+        preferred = os.getenv("OLLAMA_SUMMARY_MODEL")
+        cached = self._cached_ollama_summarizer()
+        cached_model = getattr(cached, "model", None) if cached else None
+
+        ordered: List[str] = []
+        for candidate in (cached_model, preferred):
+            if candidate and candidate not in ordered:
+                ordered.append(candidate)
+        for model in models:
+            if model and model not in ordered:
+                ordered.append(model)
+
+        options: List[Dict[str, Any]] = []
+        for model in ordered[:8]:
+            if not model:
+                continue
+            options.append(
+                {
+                    "provider": "ollama",
+                    "model": model,
+                    "label": f"Ollama • {model}",
+                    "button_label": f"🏠 {self._short_label(model, 32)}",
+                }
+            )
+        return options
+
+
+    def _summary_provider_options(self) -> Dict[str, Dict[str, Any]]:
+        options: Dict[str, Dict[str, Any]] = {}
+        base_summarizer = self.summarizer
+        if not base_summarizer:
+            try:
+                base_summarizer = YouTubeSummarizer()
+                self.summarizer = base_summarizer
+                self._cache_summarizer_instance(base_summarizer)
+            except Exception as exc:
+                logging.error(f"Failed to initialize default summarizer: {exc}")
+                return options
+        provider = getattr(base_summarizer, "llm_provider", "")
+        model = getattr(base_summarizer, "model", None)
+
+        cloud_models = self._cloud_model_options(provider, model)
+        if cloud_models:
+            default_option = cloud_models[0]
+            default_label = "API / Cloud"
+            button_text = "☁️ API / Cloud"
+            options["cloud"] = {
+                "label": default_label,
+                "button_label": button_text,
+                "models": cloud_models,
+            }
+
+        local_models = self._ollama_model_options()
+        if local_models:
+            default_option = local_models[0]
+            default_label = "Ollama (Local)"
+            button_text = "🏠 Ollama (Local)"
+            options["ollama"] = {
+                "label": default_label,
+                "button_label": button_text,
+                "models": local_models,
+            }
+        return options
+
+    def _get_summary_summarizer(self, provider: str, model: Optional[str] = None) -> YouTubeSummarizer:
+        provider_key = (provider or "").strip().lower()
+        model_key = (model or "").strip()
+        if (
+            self.summarizer
+            and getattr(self.summarizer, "llm_provider", "").lower() == provider_key
+            and (not model_key or getattr(self.summarizer, "model", None) == model_key)
+        ):
+            return self.summarizer
+        cache_key = self._summarizer_cache_key(provider_key, model_key)
+        cached = self.summarizer_cache.get(cache_key)
+        if cached:
+            return cached
+        kwargs = {"llm_provider": provider_key}
+        if model_key:
+            kwargs["model"] = model_key
+        summarizer = YouTubeSummarizer(**kwargs)
+        if not self.summarizer and provider_key != "ollama":
+            self.summarizer = summarizer
+        self._cache_summarizer_instance(summarizer)
+        return summarizer
+
+    async def _handle_summary_provider_callback(self, query, provider_key: str) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_summary_session(chat_id, message_id)
+        if not session:
+            await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+            await self._show_main_summary_options(query)
+            return
+
+        provider_options: Dict[str, Dict[str, Any]] = session.get("provider_options") or {}
+        option = provider_options.get(provider_key)
+        if not option:
+            self._remove_summary_session(chat_id, message_id)
+            await query.answer("That option is no longer available.", show_alert=True)
+            await self._show_main_summary_options(query)
+            return
+
+        model_options = option.get("models") or []
+        if not model_options:
+            self._remove_summary_session(chat_id, message_id)
+            await query.edit_message_text("❌ No models available for this provider.")
+            return
+
+        if len(model_options) > 1:
+            session["selected_provider"] = provider_key
+            session["model_options"] = model_options
+            self._store_summary_session(chat_id, message_id, session)
+            provider_label = option.get("label") or provider_key.title()
+            per_row = 1 if provider_key == "cloud" else 2
+            keyboard = ui_build_summary_model_keyboard(provider_key, model_options, per_row=per_row)
+            await query.edit_message_text(
+                f"⚙️ Choose a model for {provider_label}",
+                reply_markup=keyboard,
+            )
+            return
+
+        selected_model = model_options[0]
+        await self._execute_summary_with_model(query, session, provider_key, selected_model)
+
+    async def _execute_summary_with_model(
+        self,
+        query,
+        session: Dict[str, Any],
+        provider_key: str,
+        model_option: Dict[str, Any],
+    ) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        try:
+            summarizer = self._get_summary_summarizer(model_option.get("provider"), model_option.get("model"))
+        except Exception as exc:
+            logging.error(f"Summary provider init failed: {exc}")
+            self._remove_summary_session(chat_id, message_id)
+            await query.edit_message_text("❌ Failed to initialize the selected summarizer. Please try again later.")
+            return
+
+        summary_type = session.get("summary_type")
+        user_name = session.get("user_name") or "Unknown"
+        proficiency_level = session.get("proficiency_level")
+        provider_label = model_option.get("label")
+
+        self._remove_summary_session(chat_id, message_id)
+
+        if not summary_type:
+            await self._show_main_summary_options(query)
+            return
+
+        await self._process_content_summary(
+            query,
+            summary_type,
+            user_name,
+            proficiency_level,
+            provider_key=provider_key,
+            summarizer=summarizer,
+            provider_label=provider_label,
+        )
+
+    async def _handle_summary_model_callback(self, query, provider_key: str, index: int) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_summary_session(chat_id, message_id)
+        if not session:
+            await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+            await self._show_main_summary_options(query)
+            return
+
+        if session.get("selected_provider") != provider_key:
+            await query.answer("Please choose a provider first.", show_alert=True)
+            return
+
+        model_options = session.get("model_options") or []
+        if not (0 <= index < len(model_options)):
+            await query.answer("Invalid model selection.", show_alert=True)
+            return
+
+        selected_model = model_options[index]
+        await self._execute_summary_with_model(query, session, provider_key, selected_model)
+
+    async def _handle_summary_model_back(self, query) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_summary_session(chat_id, message_id)
+        if not session:
+            await self._show_main_summary_options(query)
+            return
+
+        provider_options: Dict[str, Dict[str, Any]] = session.get("provider_options") or {}
+        if len(provider_options) <= 1:
+            self._remove_summary_session(chat_id, message_id)
+            await self._show_main_summary_options(query)
+            return
+
+        session.pop("selected_provider", None)
+        session.pop("model_options", None)
+        self._store_summary_session(chat_id, message_id, session)
+
+        cloud_button = (provider_options.get("cloud") or {}).get("button_label") or "☁️ Cloud"
+        local_button = (provider_options.get("ollama") or {}).get("button_label")
+        summary_type = session.get("summary_type") or "comprehensive"
+        summary_label = self._friendly_variant_label(summary_type)
+        keyboard = ui_build_summary_provider_keyboard(cloud_button, local_label=local_button)
+        await query.edit_message_text(
+            f"⚙️ Choose summarization engine for {summary_label}",
+            reply_markup=keyboard,
         )
 
     # ------------------------- Ollama chat integration -------------------------
@@ -1312,28 +1643,95 @@ class YouTubeTelegramBot:
         # Handle summary requests
         if callback_data.startswith("summarize_"):
             raw = callback_data.replace("summarize_", "")  # e.g. "audio-fr" or "audio-fr:beginner"
-            
+
             # Handle back button
             if raw == "back_to_main":
+                self._remove_summary_session(query.message.chat.id, query.message.message_id)
                 await self._show_main_summary_options(query)
                 return
-            
+
             parts = raw.split(":", 1)
             summary_type = parts[0]  # "audio-fr" / "audio-es" / "audio"
             proficiency_level = parts[1] if len(parts) == 2 else None
-            
+
             # If French/Spanish audio without level specified, show level picker
             if summary_type in ("audio-fr", "audio-es") and proficiency_level is None:
+                self._remove_summary_session(query.message.chat.id, query.message.message_id)
                 await self._show_proficiency_selector(query, summary_type)
                 return
-            
-            # Process with proficiency level (None for regular summaries)
-            await self._process_content_summary(query, summary_type, user_name, proficiency_level)
-        
+
+            provider_options = self._summary_provider_options()
+            if not provider_options:
+                await query.edit_message_text("❌ Summarizer not configured. Please try /status for details.")
+                return
+
+            # If only one provider is available, skip provider selection
+            if len(provider_options) == 1:
+                provider_key, option = next(iter(provider_options.items()))
+                model_options = option.get("models") or []
+                session_payload = {
+                    "summary_type": summary_type,
+                    "proficiency_level": proficiency_level,
+                    "user_name": user_name,
+                    "provider_options": provider_options,
+                }
+                if len(model_options) <= 1:
+                    selected_model = model_options[0] if model_options else {}
+                    await self._execute_summary_with_model(query, session_payload, provider_key, selected_model)
+                else:
+                    session_payload["selected_provider"] = provider_key
+                    session_payload["model_options"] = model_options
+                    self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
+                    provider_label = option.get("label") or provider_key.title()
+                    per_row = 1 if provider_key == "cloud" else 2
+                    keyboard = ui_build_summary_model_keyboard(provider_key, model_options, per_row=per_row)
+                    await query.edit_message_text(
+                        f"⚙️ Choose a model for {provider_label}",
+                        reply_markup=keyboard,
+                    )
+                return
+
+            summary_label = self._friendly_variant_label(summary_type)
+            session_payload = {
+                "summary_type": summary_type,
+                "proficiency_level": proficiency_level,
+                "user_name": user_name,
+                "provider_options": provider_options,
+            }
+            self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
+            cloud_option = provider_options.get("cloud") or next(iter(provider_options.values()))
+            cloud_label = cloud_option.get("button_label") or "☁️ Cloud"
+            local_label = (provider_options.get("ollama") or {}).get("button_label")
+            prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
+            keyboard = ui_build_summary_provider_keyboard(cloud_label, local_label=local_label)
+            await query.edit_message_text(prompt_text, reply_markup=keyboard)
+            return
+
         elif callback_data.startswith("tts_"):
             await self._handle_tts_callback(query, callback_data)
         elif callback_data.startswith("ollama_"):
             await self._handle_ollama_callback(query, callback_data)
+        elif callback_data.startswith("summary_model:"):
+            suffix = callback_data.split(":", 1)[1]
+            if suffix == "back":
+                await self._handle_summary_model_back(query)
+            else:
+                parts = callback_data.split(":")
+                if len(parts) == 3:
+                    provider_key = parts[1]
+                    try:
+                        index = int(parts[2])
+                    except ValueError:
+                        await query.answer("Invalid selection", show_alert=True)
+                        return
+                    await self._handle_summary_model_callback(query, provider_key, index)
+                else:
+                    await query.answer("Invalid selection", show_alert=True)
+            return
+        elif callback_data.startswith("summary_provider:"):
+            provider_key = callback_data.split(":", 1)[1]
+            await self._handle_summary_provider_callback(query, provider_key)
+            return
         
         elif callback_data.startswith('listen_this'):
             # One-off TTS for the exact summary on this message
@@ -1902,8 +2300,27 @@ class YouTubeTelegramBot:
             await query.edit_message_text("🇪🇸 **Elige tu nivel de español:**", 
                                         parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     
-    async def _process_content_summary(self, query, summary_type: str, user_name: str, proficiency_level: str = None):
-        await summary_service.process_content_summary(self, query, summary_type, user_name, proficiency_level)
+    async def _process_content_summary(
+        self,
+        query,
+        summary_type: str,
+        user_name: str,
+        proficiency_level: str = None,
+        *,
+        provider_key: str = "cloud",
+        summarizer: Optional[YouTubeSummarizer] = None,
+        provider_label: Optional[str] = None,
+    ):
+        await summary_service.process_content_summary(
+            self,
+            query,
+            summary_type,
+            user_name,
+            proficiency_level,
+            provider_key=provider_key,
+            summarizer=summarizer,
+            provider_label=provider_label,
+        )
 
     async def _send_formatted_response(self, query, result: Dict[str, Any], summary_type: str, export_info: Dict = None):
         await summary_service.send_formatted_response(self, query, result, summary_type, export_info)

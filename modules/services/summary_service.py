@@ -14,8 +14,10 @@ import unicodedata
 
 try:
     import requests
+    from requests.exceptions import ConnectionError as RequestsConnectionError
 except ImportError:  # pragma: no cover - optional dependency
     requests = None
+    RequestsConnectionError = None
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -26,6 +28,8 @@ from modules.report_generator import create_report_from_youtube_summarizer
 from modules.summary_variants import merge_summary_variants, normalize_variant_id
 from modules.event_stream import emit_report_event
 from modules.services import sync_service
+from modules.summary_queue import enqueue as enqueue_summary_job
+from modules.ollama_client import OllamaClientError
 
 
 def _format_duration_and_savings(metadata: Dict[str, Any]) -> str:
@@ -83,6 +87,26 @@ def post_dashboard_json(endpoint: str, payload: Dict[str, Any], timeout: int = 3
     except Exception as exc:  # pragma: no cover - network call
         logging.debug("Dashboard POST failed (%s): %s", endpoint, exc)
     return None
+
+
+def _is_local_summary_unavailable(exc: Exception) -> bool:
+    if isinstance(exc, OllamaClientError):
+        return True
+    if RequestsConnectionError and isinstance(exc, RequestsConnectionError):
+        return True
+    if isinstance(exc, (ConnectionError, asyncio.TimeoutError)):
+        return True
+    message = str(exc).lower()
+    keywords = (
+        "connection refused",
+        "failed to establish",
+        "connection reset",
+        "unreachable",
+        "timed out",
+        "timeout",
+        "bad gateway",
+    )
+    return any(keyword in message for keyword in keywords)
 
 
 def fetch_report_from_dashboard(video_id: str, timeout: int = 8) -> Optional[Dict[str, Any]]:
@@ -594,6 +618,10 @@ async def process_content_summary(
     summary_type: str,
     user_name: str,
     proficiency_level: Optional[str] = None,
+    *,
+    provider_key: str = "cloud",
+    summarizer=None,
+    provider_label: Optional[str] = None,
 ) -> None:
     item = handler.current_item or {}
     content_id = item.get("content_id")
@@ -611,9 +639,11 @@ async def process_content_summary(
         await query.edit_message_text("❌ Could not resolve the source URL. Please resend the link.")
         return
 
-    if not handler.summarizer:
+    summarizer = summarizer or handler.summarizer
+    if not summarizer:
         await query.edit_message_text("❌ Summarizer not available. Please try /status for more info.")
         return
+    provider_key = (provider_key or "cloud").lower()
 
     noun_map = {
         "youtube": "video",
@@ -665,26 +695,45 @@ async def process_content_summary(
                 logging.info("🔄 Content exists but not marked synced - processing fresh")
 
         logging.info("🎬 PROCESSING: %s | %s | user: %s | URL: %s", display_id, summary_type, user_name, url)
-        logging.info("🧠 LLM: %s/%s", handler.summarizer.llm_provider, handler.summarizer.model)
+        llm_provider = getattr(summarizer, "llm_provider", "unknown")
+        llm_model = getattr(summarizer, "model", "unknown")
+        llm_label = provider_label or f"{llm_provider}/{llm_model}"
+        logging.info("🧠 LLM: %s", llm_label)
 
-        if source == "reddit":
-            result = await handler.summarizer.process_reddit_thread(
-                url,
-                summary_type=summary_type,
-                proficiency_level=proficiency_level
-            )
-        elif source == "web":
-            result = await handler.summarizer.process_web_page(
-                url,
-                summary_type=summary_type,
-                proficiency_level=proficiency_level
-            )
-        else:
-            result = await handler.summarizer.process_video(
-                url,
-                summary_type=summary_type,
-                proficiency_level=proficiency_level
-            )
+        try:
+            if source == "reddit":
+                result = await summarizer.process_reddit_thread(
+                    url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency_level
+                )
+            elif source == "web":
+                result = await summarizer.process_web_page(
+                    url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency_level
+                )
+            else:
+                result = await summarizer.process_video(
+                    url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency_level
+                )
+        except Exception as exc:
+            if provider_key == "ollama" and _is_local_summary_unavailable(exc):
+                await _handle_local_summary_unavailable(
+                    handler,
+                    query,
+                    summary_type,
+                    proficiency_level,
+                    user_name,
+                    summarizer,
+                    content_id,
+                    source,
+                    url,
+                )
+                return
+            raise
 
         if not result:
             await query.edit_message_text("❌ Failed to process content. Please check the URL and try again.")
@@ -794,6 +843,69 @@ async def process_content_summary(
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)
         await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
+
+
+async def _handle_local_summary_unavailable(
+    handler,
+    query,
+    summary_type: str,
+    proficiency_level: Optional[str],
+    user_name: str,
+    summarizer,
+    content_id: Optional[str],
+    source: str,
+    url: Optional[str],
+) -> None:
+    chat_id = query.message.chat.id if query.message else None
+    message_id = query.message.message_id if query.message else None
+    job_path = None
+    job_payload = {
+        "created_at": datetime.utcnow().isoformat(),
+        "summary_type": summary_type,
+        "proficiency_level": proficiency_level,
+        "content_id": content_id,
+        "source": source,
+        "url": url,
+        "provider": "ollama",
+        "model": getattr(summarizer, "model", None),
+        "user": user_name,
+    }
+    try:
+        job_path = enqueue_summary_job(job_payload)
+        logging.info("📥 Queued summary job for later processing: %s", job_path.name)
+    except Exception as exc:
+        logging.error(f"Failed to enqueue summary job: {exc}")
+
+    cloud_option = None
+    try:
+        cloud_options = handler._summary_provider_options()
+        cloud_option = (cloud_options or {}).get("cloud")
+    except Exception as exc:
+        logging.debug(f"Unable to build cloud provider option: {exc}")
+
+    buttons: List[List[InlineKeyboardButton]] = []
+    if cloud_option and chat_id is not None and message_id is not None:
+        session_payload = {
+            "summary_type": summary_type,
+            "proficiency_level": proficiency_level,
+            "user_name": user_name,
+            "provider_options": {"cloud": cloud_option},
+        }
+        handler._store_summary_session(chat_id, message_id, session_payload)
+        buttons.append([InlineKeyboardButton(cloud_option["button_label"], callback_data="summary_provider:cloud")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+
+    if job_path:
+        queue_line = f"🗂️ Queued job ID: {job_path.name}"
+    else:
+        queue_line = "⚠️ Could not queue this request automatically."
+
+    message = (
+        "⚠️ Ollama summarizer is currently offline.\n"
+        f"{queue_line}\n"
+        "You can switch to the cloud summarizer now or wait for the queue to process when the local models return."
+    )
+    await query.edit_message_text(message, reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def reprocess_single_summary(
