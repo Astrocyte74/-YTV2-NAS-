@@ -582,6 +582,7 @@ class YouTubeSummarizer:
                 'automatic_captions': [],
                 'subtitles': [],
                 'release_timestamp': 0,
+                'chapters': [],
             }
         except Exception as e:
             logging.warning(f"⚠️ Fallback metadata extraction failed: {str(e)}")
@@ -600,6 +601,7 @@ class YouTubeSummarizer:
             'channel_url': '',
             'tags': [],
             'thumbnail': f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else '',
+            'chapters': [],
         }
 
     def _extract_video_id(self, youtube_url: str) -> str:
@@ -724,10 +726,11 @@ class YouTubeSummarizer:
                         'aspect_ratio': info.get('aspect_ratio', 0.0),
                         'vcodec': info.get('vcodec', ''),
                         'acodec': info.get('acodec', ''),
-                        'automatic_captions': list(info.get('automatic_captions', {}).keys()),
-                        'subtitles': list(info.get('subtitles', {}).keys()),
-                        'release_timestamp': info.get('release_timestamp', 0),
-                    }
+                    'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+                    'subtitles': list(info.get('subtitles', {}).keys()),
+                    'release_timestamp': info.get('release_timestamp', 0),
+                    'chapters': info.get('chapters') or [],
+                }
             else:
                 metadata = None
         except Exception as e:
@@ -836,7 +839,8 @@ class YouTubeSummarizer:
                 'transcript': transcript_text,
                 'content_type': 'transcript',
                 'transcript_language': transcript_language,
-                'success': True
+                'success': True,
+                'chapters': metadata.get('chapters', []),
             }
         
         # STEP 2: Fallback to yt-dlp if youtube-transcript-api failed
@@ -931,6 +935,7 @@ class YouTubeSummarizer:
                     'automatic_captions': list(info.get('automatic_captions', {}).keys()),
                     'subtitles': list(info.get('subtitles', {}).keys()),
                     'release_timestamp': info.get('release_timestamp', 0),
+                    'chapters': info.get('chapters') or [],
             }
             
             # Log enhanced metadata extraction for visibility
@@ -976,7 +981,8 @@ class YouTubeSummarizer:
                     'transcript': transcript_text,
                     'content_type': content_type,
                     'transcript_language': transcript_language,
-                    'success': True
+                    'success': True,
+                    'chapters': metadata.get('chapters', []),
                 }
                 
         except Exception as e:
@@ -994,7 +1000,8 @@ class YouTubeSummarizer:
                     'transcript': transcript_text,
                     'content_type': 'transcript',
                     'transcript_language': transcript_language,
-                    'success': True
+                    'success': True,
+                    'chapters': fallback_metadata.get('chapters', []),
                 }
             else:
                 return {
