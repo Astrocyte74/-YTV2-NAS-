@@ -285,12 +285,34 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
     ])
 
     if len(engine_keys) > 1:
+        remaining_engines = engine_keys
+        if '__all__' in engine_keys:
+            mark = '✅' if active_engine == '__all__' else '⬜'
+            ordered_engines: List[str] = []
+            for eng in engine_order:
+                if eng == '__all__' or eng in ordered_engines:
+                    continue
+                ordered_engines.append(eng)
+            for eng in remaining_engines:
+                if eng in ordered_engines:
+                    continue
+                ordered_engines.append(eng)
+            badges = " ".join(short_engine_label(eng) for eng in ordered_engines if eng)
+            label = "ALL VOICE ENGINES"
+            if badges:
+                label = f"{label} {badges}"
+            rows.append([
+                InlineKeyboardButton(f"{mark} {label}", callback_data="tts_engine:__all__")
+            ])
+            remaining_engines = [eng for eng in engine_keys if eng != '__all__']
+
         engine_buttons: List[InlineKeyboardButton] = []
-        for engine in engine_keys:
+        chunk_size = 2 if len(remaining_engines) >= 4 else 3
+        for engine in remaining_engines:
             mark = '✅' if engine == active_engine else '⬜'
-            label = 'ALL' if engine == '__all__' else f"{short_engine_label(engine)} {engine.upper()}"
+            label = f"{short_engine_label(engine)} {engine.upper()}"
             engine_buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"tts_engine:{engine}"))
-            if len(engine_buttons) == 3:
+            if len(engine_buttons) == chunk_size:
                 rows.append(engine_buttons)
                 engine_buttons = []
         if engine_buttons:
