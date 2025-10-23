@@ -53,6 +53,15 @@ def build_combined_filters(voices: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def strip_favorite_label(label: Optional[str]) -> str:
+    if not label:
+        return ""
+    text = label.strip()
+    if text.lower().startswith("favorite ·"):
+        text = text.split("·", 1)[1].strip()
+    return text
+
+
 def gender_label(gender: Optional[str]) -> str:
     if not gender:
         return "All genders"
@@ -354,10 +363,11 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         }
         fav_meta = voice.get('_favorite')
         if fav_meta:
+            fav_label = strip_favorite_label(fav_meta.get('label'))
             entry.update(
                 {
                     'favoriteSlug': fav_meta.get('slug') or fav_meta.get('id') or voice_id,
-                    'label': fav_meta.get('label') or entry['label'],
+                    'label': fav_label or entry['label'],
                 }
             )
         voice_lookup[primary_key] = entry
@@ -374,7 +384,7 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         entry = voice_lookup.get(key)
         if not entry:
             continue
-        base_label = entry.get('label') or entry.get('voiceId') or key
+        base_label = strip_favorite_label(entry.get('label')) or entry.get('voiceId') or key
         prefix = short_engine_label(entry.get('engine'))
         display_label = f"{prefix} {base_label}".strip()
         entry['display_label'] = display_label
@@ -455,7 +465,7 @@ def tts_voice_label(session: Dict[str, Any], slug: str) -> str:
                 continue
             voice_id = voice.get('id')
             if voice_id == identifier:
-                base_label = voice.get('label') or identifier
+                base_label = strip_favorite_label(voice.get('label')) or identifier
                 accent = voice.get('accent') or {}
                 flag = accent.get('flag')
                 prefix = short_engine_label(engine or voice.get('engine'))
@@ -471,7 +481,7 @@ def tts_voice_label(session: Dict[str, Any], slug: str) -> str:
         fav_slug = fav.get('slug') or fav.get('voiceId')
         if fav_slug == identifier:
             prefix = short_engine_label(fav.get('engine'))
-            label = fav.get('label') or fav_slug
+            label = strip_favorite_label(fav.get('label')) or fav_slug
             return f"{prefix} {label}".strip()
 
     return slug
