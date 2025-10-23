@@ -19,7 +19,7 @@
 - `modules/telegram_handler.py`
   - Orchestrates Telegram prompts and UI for both one‑off TTS (`/tts`) and YouTube summary audio.
   - Provider picker: “Local TTS hub” vs “OpenAI TTS”. On local failure: “Queue for later” or “Use OpenAI”.
-  - Voice picker: Favorites‑first by default (if any). Toggle between Favorites and All voices. Gender and accent‑family filters supported.
+  - Voice picker: Favorites‑first by default (if any). Toggle between Favorites and All voices, switch engines (Kokoro/XTTS, etc.), and filter by gender or accent family.
   - UX details: Shows a status bubble when a voice is selected (⏳ Generating … → ✅ Generated …), keeps the picker open for rapid A/B tests, and includes the voice name in audio captions.
 
 ## Typical Flow
@@ -32,8 +32,8 @@
    - OpenAI → synthesize via OpenAI as fallback.
    - If local hub is offline/unreachable → offer to queue job or switch to OpenAI.
 3. Voice selection:
-   - Favorites are shown/selected by default when available (falls back to global favorites if `tag=telegram` is empty).
-   - Optionally switch to All voices; filter by gender and accent family.
+   - Favorites are shown/selected by default when available. If no favorite matches the active engine, the picker auto-switches to one that does.
+   - Optionally switch engines manually, flip to All voices, and filter by gender and accent family.
 4. When you click a voice, the bot posts a “Generating …” status bubble, then replies with the audio and updates the bubble to “Generated …”. The picker remains open for more tests.
 5. Delivery and sync:
    - One‑off preview (`/tts`): sends audio with a compact caption and does NOT sync to DB/Render.
@@ -54,7 +54,8 @@
 ## Favorites Resolution and Defaults
 
 - When provider `local` is selected, the voice picker defaults to Favorites if any favorites exist.
-- Favorites are fetched with `tag=telegram`; if none found, falls back to global `favorites`.
+- Favorites are fetched from the hub in one call; starred entries drive the picker (with an automatic fallback to all voices if the favorites list would be empty for the current catalog).
+- Engine chips appear whenever multiple engines are available; the picker auto-selects the first engine that contains your favorites and surfaces a hint when it switches.
 - The picker checkmarks reflect the current mode: “Favorites” or “All voices”.
 
 ## Environment
@@ -267,7 +268,7 @@ Expected
   - Use the fallback prompt to queue or switch to OpenAI.
 
 - Favorites toggle does nothing
-  - If `tag=telegram` favorites are empty, the picker falls back to global favorites. Toggle should then reflect “Favorites” mode with that list.
+  - If no favorites match the active catalog, the picker now flips to “All voices” automatically and shows an informational hint.
 - Queue not draining
   - Confirm `ENABLE_TTS_QUEUE_WORKER=1` and that logs show the worker PID.
   - Verify jobs appear in `/app/data/tts_queue/` inside the container.

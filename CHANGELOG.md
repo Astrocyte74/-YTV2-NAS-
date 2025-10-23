@@ -40,7 +40,8 @@ Configuration
 Compatibility
 - No breaking changes to existing summarization
 - /tts now has a richer UI; defaults remain simple for favorites flow
-- Favorites default for catalog flows; falls back to global favorites when `tag=telegram` is empty
+- Favorites default for catalog flows; automatically flips to all voices when no favorites match the active engine
+- Engine toggle chips surface when multiple providers (Kokoro/XTTS, etc.) are available, and the picker auto-switches to the first engine that contains your favorites
 
 Deployment
 - Pull latest `main` and restart the bot container
@@ -59,4 +60,3 @@ Known Issues / Next Steps
 - Worker to drain `data/tts_queue/` when hub comes back online
 - Short‑TTL caching for catalog/favorites to reduce HTTP calls
 - “Close” button to dismiss the picker when testing is done
-

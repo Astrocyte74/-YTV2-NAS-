@@ -16,7 +16,7 @@ import time
 import urllib.parse
 from datetime import datetime
 import random
-from typing import List, Dict, Any, Optional, Callable, Tuple, Awaitable
+from typing import List, Dict, Any, Optional, Callable, Tuple, Awaitable, Set
 from pathlib import Path
 
 try:
@@ -44,6 +44,7 @@ from modules.tts_hub import (
     accent_family_label,
     available_accent_families,
     filter_catalog_voices,
+    DEFAULT_ENGINE,
 )
 from modules.telegram.ui.formatting import (
     escape_markdown as ui_escape_markdown,
@@ -1615,7 +1616,13 @@ class YouTubeTelegramBot:
         return ui_build_tts_catalog_keyboard(session)
 
     async def _refresh_tts_catalog(self, query, session: Dict[str, Any]) -> None:
-        catalog = session.get('catalog') or {}
+        catalogs = session.get('catalogs') or {}
+        active_engine = session.get('active_engine')
+        if active_engine and active_engine in catalogs:
+            catalog = catalogs.get(active_engine) or {}
+            session['catalog'] = catalog
+        else:
+            catalog = session.get('catalog') or {}
         prompt = self._tts_prompt_text(
             session.get('text', ''),
             last_voice=session.get('last_voice'),
@@ -1710,19 +1717,89 @@ class YouTubeTelegramBot:
             logging.warning(f"TTS catalog fetch failed: {e}")
             catalog = None
 
+        default_engine = DEFAULT_ENGINE
+        catalogs: Dict[str, Dict[str, Any]] = {}
+        if isinstance(catalog, dict):
+            detected_engine = (
+                (catalog.get('meta') or {}).get('engine')
+                or catalog.get('engine')
+            )
+            if isinstance(detected_engine, str) and detected_engine.strip():
+                default_engine = detected_engine.strip()
+            catalogs[default_engine] = catalog
+        else:
+            catalogs[default_engine] = {}
+
         favorites_list: List[Dict[str, Any]] = []
         try:
-            favorites_list = await client.fetch_favorites(tag="telegram")
-            if not favorites_list:
-                favorites_list = await client.fetch_favorites()
+            favorites_list = await client.fetch_favorites()
         except Exception as e:
             logging.warning(f"TTS favorites fetch failed: {e}")
             favorites_list = []
 
-        if catalog and catalog.get('voices'):
+        def resolve_engine(value: Optional[str]) -> str:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return default_engine
+
+        favorite_engines: Set[str] = set()
+        for fav in favorites_list:
+            if not isinstance(fav, dict):
+                continue
+            if not fav.get('voiceId'):
+                continue
+            favorite_engines.add(resolve_engine(fav.get('engine')))
+
+        for engine in sorted(favorite_engines):
+            if engine in catalogs and catalogs[engine]:
+                continue
+            if engine == default_engine and catalogs.get(engine):
+                continue
+            try:
+                extra_catalog = await client.fetch_catalog(engine=engine)
+                catalogs[engine] = extra_catalog or {}
+            except Exception as e:
+                logging.warning(f"TTS catalog fetch failed for engine {engine}: {e}")
+                catalogs.setdefault(engine, {})
+
+        def engine_has_matches(engine: str) -> bool:
+            fav_ids = {
+                fav.get('voiceId')
+                for fav in favorites_list
+                if isinstance(fav, dict)
+                and fav.get('voiceId')
+                and resolve_engine(fav.get('engine')) == engine
+            }
+            if not fav_ids:
+                return False
+            cat = catalogs.get(engine) or {}
+            catalog_ids = {
+                voice.get('id')
+                for voice in (cat.get('voices') or [])
+                if isinstance(voice, dict) and voice.get('id')
+            }
+            return bool(catalog_ids & fav_ids)
+
+        active_engine = default_engine
+        if favorites_list and not engine_has_matches(active_engine):
+            for engine in sorted(favorite_engines):
+                if engine_has_matches(engine):
+                    active_engine = engine
+                    break
+
+        active_catalog = catalogs.get(active_engine) or {}
+        has_catalog_voices = any(
+            isinstance(cat, dict) and (cat.get('voices') or [])
+            for cat in catalogs.values()
+        )
+
+        if has_catalog_voices:
             session_payload = {
                 "text": speak_text,
-                "catalog": catalog,
+                "catalog": active_catalog,
+                "catalogs": catalogs,
+                "active_engine": active_engine,
+                "default_engine": default_engine,
                 "selected_gender": None,
                 "selected_family": None,
                 "last_voice": None,
@@ -1731,7 +1808,7 @@ class YouTubeTelegramBot:
                 "tts_base": client.base_api_url,
                 "mode": "oneoff_tts",
             }
-            prompt = self._tts_prompt_text(speak_text, catalog=catalog)
+            prompt = self._tts_prompt_text(speak_text, catalog=active_catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
             prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)
             self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)

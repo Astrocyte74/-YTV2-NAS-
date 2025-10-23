@@ -5,14 +5,14 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 from modules.metrics import metrics
 from modules.services import sync_service
-from modules.tts_hub import LocalTTSUnavailable, TTSHubClient
+from modules.tts_hub import LocalTTSUnavailable, TTSHubClient, DEFAULT_ENGINE
 from modules.tts_queue import enqueue as enqueue_tts_job
 from youtube_summarizer import YouTubeSummarizer
 
@@ -212,6 +212,30 @@ async def handle_callback(handler, query, callback_data: str) -> None:
 
     catalog = session.get("catalog")
 
+    if callback_data.startswith("tts_engine:"):
+        engine = callback_data.split(":", 1)[1]
+        catalogs = session.get('catalogs') or {}
+        if engine not in catalogs or not catalogs.get(engine):
+            client = handler._resolve_tts_client(session.get('tts_base'))
+            if client:
+                try:
+                    fetched = await client.fetch_catalog(engine=engine)
+                    catalogs[engine] = fetched or {}
+                    session['catalogs'] = catalogs
+                except Exception as exc:
+                    logging.warning(f"⚠️ Failed to load catalog for engine {engine}: {exc}")
+                    await query.answer("Engine unavailable", show_alert=True)
+                    return
+            else:
+                await query.answer("Engine unavailable", show_alert=True)
+                return
+        session['active_engine'] = engine
+        session['catalog'] = catalogs.get(engine) or {}
+        handler._store_tts_session(chat_id, message_id, session)
+        await handler._refresh_tts_catalog(query, session)
+        await query.answer(f"{engine.upper()} voices")
+        return
+
     if catalog:
         if callback_data.startswith("tts_mode:"):
             mode_value = callback_data.split(":", 1)[1]
@@ -255,27 +279,56 @@ async def handle_callback(handler, query, callback_data: str) -> None:
         if provider == 'local':
             client = handler._resolve_tts_client(session.get('tts_base'))
             session['tts_base'] = client.base_api_url if client else None
+            default_engine = session.get('default_engine') or DEFAULT_ENGINE
+            session.setdefault('default_engine', default_engine)
+            active_engine = session.get('active_engine') or default_engine
             catalog = session.get('catalog')
+            catalogs = session.get('catalogs') or {}
             favorites = session.get('favorites')
-            if client and not catalog:
+            if client:
                 try:
-                    catalog = await client.fetch_catalog()
-                    session['catalog'] = catalog
+                    if active_engine not in catalogs or not catalogs.get(active_engine):
+                        fetched_catalog = await client.fetch_catalog(engine=active_engine)
+                        catalogs[active_engine] = fetched_catalog or {}
+                    catalog = catalogs.get(active_engine) or catalog
                     if not favorites:
                         try:
-                            favorites = await client.fetch_favorites(tag="telegram")
+                            favorites = await client.fetch_favorites()
                         except Exception:
                             favorites = []
-                        if not favorites:
-                            try:
-                                favorites = await client.fetch_favorites()
-                            except Exception:
-                                favorites = []
                         session['favorites'] = favorites or []
+
+                    def resolve_engine(value: Optional[str]) -> str:
+                        if isinstance(value, str) and value.strip():
+                            return value.strip()
+                        return default_engine
+
+                    favorite_engines: Set[str] = set()
+                    if favorites:
+                        for fav in favorites:
+                            if not isinstance(fav, dict):
+                                continue
+                            if not fav.get('voiceId'):
+                                continue
+                            favorite_engines.add(resolve_engine(fav.get('engine')))
+                    for engine in sorted(favorite_engines):
+                        if engine in catalogs and catalogs.get(engine):
+                            continue
+                        try:
+                            extra_catalog = await client.fetch_catalog(engine=engine)
+                            catalogs[engine] = extra_catalog or {}
+                        except Exception as exc:
+                            logging.warning(f"⚠️ Failed to load catalog for engine {engine}: {exc}")
+                    session['catalogs'] = catalogs
+                    session['catalog'] = catalog
                 except Exception as exc:
                     await handle_local_unavailable(handler, query, session, message=str(exc))
                     return
-            if not catalog or not catalog.get('voices'):
+            has_any_catalog = any(
+                isinstance(cat, dict) and (cat.get('voices') or [])
+                for cat in catalogs.values()
+            )
+            if not has_any_catalog:
                 await handle_local_unavailable(handler, query, session, message="No voices available")
                 return
             if favorites is None and session.get('favorites') is None:

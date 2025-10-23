@@ -147,9 +147,7 @@ async def process_job(path: Path) -> bool:
             try:
                 from modules.tts_hub import TTSHubClient
                 client = TTSHubClient.from_env()
-                favs = await client.fetch_favorites(tag="telegram")
-                if not favs:
-                    favs = await client.fetch_favorites()
+                favs = await client.fetch_favorites()
                 if favs:
                     picked = favs[0]
                     favorite_slug = picked.get("slug") or picked.get("id") or picked.get("voiceId")

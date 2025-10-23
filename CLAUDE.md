@@ -240,11 +240,12 @@ The NAS component syncs with the Postgres dashboard via direct database writes:
 - Telegram action keyboard (post‑summary) uses a spacious three‑row layout:
   - Row 1: `📊 Dashboard` | `📄 Open Summary`
   - Row 2: `▶️ Listen` (one‑off TTS) | `🧩 Generate Quiz`
-  - Row 3: `➕ Add Variant` | `🗑️ Delete…`
+  - Row 3: `➕ Add Variant`
 - One‑off `Listen` runs chunked TTS with merge, replies with a voice message, and never ingests/saves audio. A small status line appears during work.
 - `Generate Quiz` (one‑tap) creates a 10‑item quiz from Key Points (or synthesizes minimal Key Points if missing), optionally categorizes via Dashboard, saves, and replies with deep links:
   - Quizzernator: `https://quizzernator.onrender.com/?quiz=api:<filename>&autoplay=1`
   - Dashboard: `/api/quiz/<filename>`
+- Removal of summaries currently happens via the dashboard controls; Telegram deletion will return later if needed.
 - Variant discovery for checkmarks now queries the Dashboard (POSTGRES_DASHBOARD_URL) in addition to local JSON/ledger, ensuring all past variants are represented.
 
 ### Prompt Refinements

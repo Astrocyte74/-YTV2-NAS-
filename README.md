@@ -292,13 +292,14 @@ After a summary is generated, the bot presents a three‑row action keyboard des
 
 - Row 1: `📊 Dashboard` | `📄 Open Summary`
 - Row 2: `▶️ Listen` (one‑off) | `🧩 Generate Quiz`
-- Row 3: `➕ Add Variant` | `🗑️ Delete…`
+- Row 3: `➕ Add Variant`
 
 Notes:
 - “Listen” streams the stored MP3 (generated on the NAS, hosted via `/exports/by_video/<video_id>.mp3`). One‑off TTS remains available through the card actions, but dashboard playback uses the saved variant.
 - “Generate Quiz” produces a 10‑item quiz from the Key Points summary (or synthesizes minimal Key Points if missing), optionally categorizes, saves to the Dashboard, and replies with:
   - `▶️ Play in Quizzernator` (deep link, autoplay)
   - `📂 See in Dashboard` (raw JSON)
+- Need to delete a summary? Use the dashboard card actions; Telegram deletion will return in a future update.
 - The original summary message remains visible; a small status line appears below it while actions are running (⏳/✅).
 
 ## 🔌 Dashboard Quiz API dependency

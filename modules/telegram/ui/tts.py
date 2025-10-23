@@ -4,7 +4,12 @@ from typing import Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from modules.tts_hub import available_accent_families, accent_family_label, filter_catalog_voices
+from modules.tts_hub import (
+    available_accent_families,
+    accent_family_label,
+    filter_catalog_voices,
+    DEFAULT_ENGINE,
+)
 
 
 def gender_label(gender: Optional[str]) -> str:
@@ -19,8 +24,18 @@ def gender_label(gender: Optional[str]) -> str:
 
 
 def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
-    catalog = session.get('catalog') or {}
-    filters = (catalog.get('filters') or {}) if catalog else {}
+    catalogs = dict(session.get('catalogs') or {})
+    default_engine = session.get('default_engine') or DEFAULT_ENGINE
+    active_engine = session.get('active_engine') or default_engine
+
+    existing_catalog = session.get('catalog')
+    if active_engine not in catalogs:
+        if isinstance(existing_catalog, dict):
+            catalogs[active_engine] = existing_catalog
+        else:
+            catalogs[active_engine] = {}
+    session['catalogs'] = catalogs
+
     favorites = session.get('favorites') or []
     selected_gender = session.get('selected_gender')
     selected_family = session.get('selected_family')
@@ -30,17 +45,131 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         mode = 'favorites' if favorites else 'all'
     if mode == 'favorites' and not favorites:
         mode = 'all'
-    session['voice_mode'] = mode
 
-    favorite_by_voice: Dict[str, Dict[str, Any]] = {}
-    allowed_ids = None
-    if favorites:
+    def normalized_engine(value: Optional[str]) -> str:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return default_engine
+
+    def build_for_engine(engine: str, use_favorites: bool):
+        catalog = catalogs.get(engine) or {}
+        fav_map: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
         for fav in favorites:
+            if not isinstance(fav, dict):
+                continue
             voice_id = fav.get('voiceId')
-            if voice_id:
-                favorite_by_voice[voice_id] = fav
-        if mode == 'favorites':
-            allowed_ids = {vid for vid in favorite_by_voice.keys() if vid}
+            if not voice_id:
+                continue
+            if normalized_engine(fav.get('engine')) != engine:
+                continue
+            if voice_id in fav_map:
+                continue
+            fav_map[voice_id] = fav
+            order.append(voice_id)
+        if use_favorites and not fav_map:
+            return [], fav_map, None, catalog
+
+        allowed_ids = set(fav_map.keys()) if use_favorites and fav_map else None
+        if use_favorites:
+            filtered = filter_catalog_voices(
+                catalog,
+                gender=selected_gender,
+                family=selected_family,
+                allowed_ids=allowed_ids,
+            )
+        else:
+            filtered = filter_catalog_voices(
+                catalog,
+                gender=selected_gender,
+                family=selected_family,
+            )
+
+        display: List[Dict[str, Any]] = []
+        if use_favorites and allowed_ids:
+            voice_map = {
+                voice.get('id'): voice
+                for voice in filtered
+                if isinstance(voice, dict) and voice.get('id')
+            }
+            for voice_id in order:
+                voice_meta = voice_map.get(voice_id)
+                if not voice_meta:
+                    continue
+                entry = dict(voice_meta)
+                entry['_favorite'] = fav_map[voice_id]
+                display.append(entry)
+        else:
+            for voice_meta in filtered:
+                entry = dict(voice_meta)
+                voice_id = entry.get('id')
+                fav_meta = fav_map.get(voice_id)
+                if fav_meta:
+                    entry['_favorite'] = fav_meta
+                display.append(entry)
+
+        return display, fav_map, allowed_ids, catalog
+
+    use_favorites = mode == 'favorites'
+    display_voices, favorite_by_voice, allowed_ids_set, active_catalog = build_for_engine(active_engine, use_favorites)
+
+    # Determine a stable engine order for the keyboard.
+    engine_order: List[str] = list(session.get('engine_order') or [])
+    seen_engines = set(engine_order)
+    def ensure_engine_order(engine: str) -> None:
+        if engine not in seen_engines:
+            engine_order.append(engine)
+            seen_engines.add(engine)
+
+    ensure_engine_order(default_engine)
+    for eng in sorted(catalogs.keys()):
+        ensure_engine_order(eng)
+
+    favorite_engines: List[str] = []
+    for fav in favorites:
+        if not isinstance(fav, dict):
+            continue
+        voice_id = fav.get('voiceId')
+        if not voice_id:
+            continue
+        fav_engine = normalized_engine(fav.get('engine'))
+        if fav_engine not in favorite_engines:
+            favorite_engines.append(fav_engine)
+    for eng in favorite_engines:
+        ensure_engine_order(eng)
+
+    session['engine_order'] = engine_order
+
+    engine_switch_hint: Optional[str] = None
+    engine_keys = engine_order
+
+    if use_favorites and not display_voices:
+        for engine in engine_keys:
+            if engine == active_engine:
+                continue
+            alt_display, alt_map, alt_allowed, alt_catalog = build_for_engine(engine, True)
+            if alt_display:
+                active_engine = engine
+                display_voices = alt_display
+                favorite_by_voice = alt_map
+                allowed_ids_set = alt_allowed
+                active_catalog = alt_catalog
+                engine_switch_hint = f"No favorites matched the previous engine; switched to {engine.upper()}."
+                break
+
+    fallback_to_all = False
+    if not display_voices:
+        mode = 'all'
+        use_favorites = False
+        display_voices, favorite_by_voice, _, active_catalog = build_for_engine(active_engine, False)
+        allowed_ids_set = None
+        fallback_to_all = True
+
+    session['voice_mode'] = mode
+    session['active_engine'] = active_engine
+    session['catalog'] = active_catalog
+
+    filters = (active_catalog.get('filters') or {}) if isinstance(active_catalog, dict) else {}
 
     rows: List[List[InlineKeyboardButton]] = []
 
@@ -50,6 +179,18 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         InlineKeyboardButton(f"{mark_fav} Favorites", callback_data="tts_mode:favorites"),
         InlineKeyboardButton(f"{mark_all} All voices", callback_data="tts_mode:all"),
     ])
+
+    if len(engine_keys) > 1:
+        engine_buttons: List[InlineKeyboardButton] = []
+        for engine in engine_keys:
+            mark = '✅' if engine == active_engine else '⬜'
+            label = engine.upper()
+            engine_buttons.append(InlineKeyboardButton(f"{mark} {label}", callback_data=f"tts_engine:{engine}"))
+            if len(engine_buttons) == 3:
+                rows.append(engine_buttons)
+                engine_buttons = []
+        if engine_buttons:
+            rows.append(engine_buttons)
 
     rows.append([InlineKeyboardButton("Gender", callback_data="tts_nop")])
     genders = filters.get('genders') or []
@@ -66,7 +207,11 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
     rows.append(gender_buttons)
 
     rows.append([InlineKeyboardButton("Accent", callback_data="tts_nop")])
-    family_options = available_accent_families(catalog, gender=selected_gender, allowed_ids=allowed_ids)
+    family_options = available_accent_families(
+        active_catalog or {},
+        gender=selected_gender,
+        allowed_ids=allowed_ids_set,
+    )
     accent_rows: List[List[InlineKeyboardButton]] = []
     mark_all_family = '✅' if not selected_family else '⬜'
     accent_rows.append([InlineKeyboardButton(f"{mark_all_family} All", callback_data="tts_accent:all")])
@@ -89,37 +234,24 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
     rows.extend(accent_rows)
 
     rows.append([InlineKeyboardButton("Voices", callback_data="tts_nop")])
+    if engine_switch_hint:
+        rows.append([InlineKeyboardButton(f"ℹ️ {engine_switch_hint}", callback_data="tts_nop")])
+    if fallback_to_all:
+        rows.append([
+            InlineKeyboardButton(
+                f"ℹ️ No favorites for {active_engine.upper()}; showing all voices",
+                callback_data="tts_nop",
+            )
+        ])
+
     voice_lookup: Dict[str, Dict[str, Any]] = {}
+    display_keys: List[str] = []
 
-    display_voices: List[Dict[str, Any]] = []
-    if mode == 'favorites' and allowed_ids:
-        filtered = filter_catalog_voices(
-            catalog,
-            gender=selected_gender,
-            family=selected_family,
-            allowed_ids=allowed_ids,
-        )
-        id_to_voice = {voice.get('id'): voice for voice in filtered if voice.get('id')}
-        for voice_id, fav in favorite_by_voice.items():
-            voice_meta = id_to_voice.get(voice_id)
-            if not voice_meta:
-                continue
-            entry = dict(voice_meta)
-            entry['_favorite'] = fav
-            display_voices.append(entry)
-    else:
-        display_voices = filter_catalog_voices(
-            catalog,
-            gender=selected_gender,
-            family=selected_family,
-        )
-
-    id_to_voice = {voice.get('id'): voice for voice in display_voices if voice.get('id')}
     for voice in display_voices:
         voice_id = voice.get('id')
         if not voice_id:
             continue
-        short_key = f"cat|{voice_id}"
+        primary_key = f"cat|{voice_id}"
         entry = {
             'voice': voice,
             'voiceId': voice_id,
@@ -134,17 +266,21 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
                     'label': fav_meta.get('label') or entry['label'],
                 }
             )
-        voice_lookup[short_key] = entry
+        voice_lookup[primary_key] = entry
+        if primary_key not in display_keys:
+            display_keys.append(primary_key)
         if fav_meta:
-            legacy_key = f"fav|{(fav_meta.get('slug') or fav_meta.get('voiceId') or voice_id)}"
-            voice_lookup[legacy_key] = entry
-        legacy_cat = f"cat|{voice_id}"
-        voice_lookup[legacy_cat] = entry
+            alias_key = f"fav|{(fav_meta.get('slug') or fav_meta.get('voiceId') or voice_id)}"
+            voice_lookup[alias_key] = entry
 
     session['voice_lookup'] = voice_lookup
+    session['voice_display_keys'] = display_keys
 
     voice_buttons: List[InlineKeyboardButton] = []
-    for key, entry in voice_lookup.items():
+    for key in display_keys:
+        entry = voice_lookup.get(key)
+        if not entry:
+            continue
         label = entry.get('label') or entry.get('voiceId') or key
         if len(label) > 32:
             label = f"{label[:29]}…"
