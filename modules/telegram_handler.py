@@ -1865,6 +1865,7 @@ class YouTubeTelegramBot:
             "last_voice": None,
             "selected_family": None,
             "voice_lookup": voice_lookup,
+            "voice_alias_map": {},
             "mode": "oneoff_tts",
         }
         self._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)

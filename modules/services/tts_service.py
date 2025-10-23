@@ -359,10 +359,16 @@ async def handle_callback(handler, query, callback_data: str) -> None:
     payload = callback_data.split(":", 1)[1]
     logging.info("🔊 Voice selected payload=%s", payload)
 
-    voice_lookup = session.get('voice_lookup') or {}
-    entry = voice_lookup.get(payload) or {}
+    alias_map = session.get('voice_alias_map') or {}
+    raw_payload = payload
+    if payload.startswith("alias|"):
+        alias_token = payload.split("|", 1)[1]
+        raw_payload = alias_map.get(alias_token, payload)
 
-    parts = payload.split("|")
+    voice_lookup = session.get('voice_lookup') or {}
+    entry = voice_lookup.get(payload) or voice_lookup.get(raw_payload) or {}
+
+    parts = raw_payload.split("|")
     kind = parts[0] if parts else ''
     engine_hint = parts[1] if len(parts) > 2 else (parts[1] if len(parts) > 1 and kind != 'cat' else '')
     identifier_hint = parts[-1] if len(parts) > 1 else (parts[0] if parts else '')

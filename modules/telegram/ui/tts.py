@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import itertools
 from typing import Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -285,27 +287,28 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
     ])
 
     if len(engine_keys) > 1:
-        remaining_engines = engine_keys
+        remaining_engines = [eng for eng in engine_keys if eng != '__all__']
         if '__all__' in engine_keys:
             mark = '✅' if active_engine == '__all__' else '⬜'
             ordered_engines: List[str] = []
             for eng in engine_order:
-                if eng == '__all__' or eng in ordered_engines:
+                if not eng or eng == '__all__' or eng in ordered_engines:
                     continue
                 ordered_engines.append(eng)
             for eng in remaining_engines:
-                if eng in ordered_engines:
+                if not eng or eng in ordered_engines:
                     continue
                 ordered_engines.append(eng)
-            badges = " ".join(short_engine_label(eng) for eng in ordered_engines if eng)
+            badges_all = [short_engine_label(eng) for eng in ordered_engines if eng]
+            badges_display = " ".join(badges_all[:6])
+            if len(badges_all) > 6:
+                badges_display = f"{badges_display} ..."
             label = "ALL VOICE ENGINES"
-            if badges:
-                label = f"{label} {badges}"
+            if badges_display:
+                label = f"{label} {badges_display}"
             rows.append([
                 InlineKeyboardButton(f"{mark} {label}", callback_data="tts_engine:__all__")
             ])
-            remaining_engines = [eng for eng in engine_keys if eng != '__all__']
-
         engine_buttons: List[InlineKeyboardButton] = []
         chunk_size = 2 if len(remaining_engines) >= 4 else 3
         for engine in remaining_engines:
@@ -369,7 +372,28 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(f"ℹ️ {info}", callback_data="tts_nop")])
 
     voice_lookup: Dict[str, Dict[str, Any]] = {}
+    alias_map: Dict[str, str] = {}
+    alias_counter = itertools.count(1)
     display_keys: List[str] = []
+
+    def register_voice_key(raw_key: str, entry: Dict[str, Any]) -> str:
+        """Store entry under raw key and return a callback-safe slug."""
+        voice_lookup[raw_key] = entry
+        slug = raw_key
+        callback = f"tts_voice:{slug}"
+        if len(callback.encode('utf-8')) > 64:
+            token = format(next(alias_counter), 'x')
+            slug = f"alias|{token}"
+            callback = f"tts_voice:{slug}"
+            if len(callback.encode('utf-8')) > 64:
+                digest = hashlib.sha1(raw_key.encode('utf-8')).hexdigest()[:16]
+                slug = f"alias|{digest}"
+                callback = f"tts_voice:{slug}"
+        voice_lookup[slug] = entry
+        if slug.startswith('alias|'):
+            alias_token = slug.split('|', 1)[1]
+            alias_map[alias_token] = raw_key
+        return slug
 
     for voice in display_voices:
         voice_id = voice.get('id')
@@ -392,14 +416,15 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
                     'label': fav_label or entry['label'],
                 }
             )
-        voice_lookup[primary_key] = entry
-        display_keys.append(primary_key)
+        slug_key = register_voice_key(primary_key, entry)
+        display_keys.append(slug_key)
         if fav_meta:
             alias_key = f"fav|{engine}|{(fav_meta.get('slug') or fav_meta.get('voiceId') or voice_id)}"
-            voice_lookup[alias_key] = entry
+            register_voice_key(alias_key, entry)
 
     session['voice_lookup'] = voice_lookup
     session['voice_display_keys'] = display_keys
+    session['voice_alias_map'] = alias_map
 
     voice_buttons: List[InlineKeyboardButton] = []
     for key in display_keys:
@@ -457,7 +482,12 @@ def build_tts_keyboard(favorites: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
 
 def tts_voice_label(session: Dict[str, Any], slug: str) -> str:
     lookup = session.get('voice_lookup') or {}
-    entry = lookup.get(slug)
+    alias_map = session.get('voice_alias_map') or {}
+    raw_slug = slug
+    if slug.startswith('alias|'):
+        token = slug.split('|', 1)[1]
+        raw_slug = alias_map.get(token, raw_slug)
+    entry = lookup.get(slug) or lookup.get(raw_slug)
     if entry:
         return (
             entry.get('display_label')
@@ -467,10 +497,10 @@ def tts_voice_label(session: Dict[str, Any], slug: str) -> str:
             or slug
         )
 
-    parts = slug.split('|')
+    parts = raw_slug.split('|')
     kind = parts[0] if parts else ''
     engine_hint = parts[1] if len(parts) > 2 else (parts[1] if len(parts) > 1 and kind != 'cat' else '')
-    identifier = parts[-1] if len(parts) > 1 else slug
+    identifier = parts[-1] if len(parts) > 1 else raw_slug
 
     catalogs = session.get('catalogs') or {}
     search_engines: List[str] = []
