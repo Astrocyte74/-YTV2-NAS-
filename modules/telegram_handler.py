@@ -1788,8 +1788,18 @@ class YouTubeTelegramBot:
             mark_stream = "✅" if stream else "⬜"
             # AI↔AI scaffolding controls
             ai2ai_active = bool(session.get("ai2ai_active"))
-            ai2ai_model_a = session.get("ai2ai_model_a") or session.get("model") or "—"
-            ai2ai_model_b = session.get("ai2ai_model_b") or session.get("model") or "—"
+            prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+            prov_b = (session.get('ai2ai_provider_b') or 'ollama')
+            cloud_opt_a = session.get('ai2ai_cloud_option_a') or {}
+            cloud_opt_b = session.get('ai2ai_cloud_option_b') or {}
+            def _slot_label(local_model: Optional[str], prov_key: str, cloud_opt: Dict[str, Any]) -> str:
+                if prov_key == 'cloud':
+                    cm = cloud_opt.get('model') or 'Select…'
+                    cp = cloud_opt.get('provider') or getattr(llm_config, 'llm_provider', 'openrouter')
+                    return f"{cm} (Cloud/{self._friendly_llm_provider(cp)})"
+                return local_model or '—'
+            ai2ai_model_a = _slot_label(session.get("ai2ai_model_a"), prov_a, cloud_opt_a)
+            ai2ai_model_b = _slot_label(session.get("ai2ai_model_b"), prov_b, cloud_opt_b)
             ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
             if mode == "ai-ai" and ai2ai_active:
                 ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
