@@ -3,8 +3,8 @@ version: "3.9"
 services:
   youtube-summarizer-bot:
     container_name: youtube-summarizer-bot
-    build: .
-    image: ytv2-nas:latest
+    # Use the last known-good, explicitly tagged image. Do not use :latest.
+    image: ytv2-nas:web-ingest-watcher-2025.10.22-extras
     restart: unless-stopped
     # Keep secrets and provider keys in .env.nas
     env_file:
@@ -43,4 +43,3 @@ volumes:
   youtube-bot-downloads:
   youtube-bot-cache:
   youtube-bot-logs:
-
