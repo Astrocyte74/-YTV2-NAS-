@@ -96,6 +96,73 @@ class YouTubeSummarizer:
         self._web_fetcher: Optional["WebPageFetcher"] = None
         # Lazy-initialized local TTS hub client
         self._tts_hub_client: Optional[TTSHubClient] = None
+
+    def _apply_ytdlp_env(self, ydl_opts: dict) -> None:
+        """Apply environment-driven tweaks to yt-dlp options.
+
+        Supported env vars (container/Portainer configurable):
+          - YTDLP_SAFE_MODE=1             → use android-only client
+          - YTDLP_FORCE_CLIENT=android|web|tv|web_safari
+          - YTDLP_SLEEP_REQUESTS=int      → request pacing (seconds)
+          - YTDLP_RETRIES=int             → total retries (also applied to fragment_retries)
+          - YTDLP_COOKIES_FILE=/path.txt  → Netscape cookie file path
+          - YTDLP_FORCE_STACK=ipv4|ipv6   → select IP stack (maps to source_address)
+          - YT_DLP_OPTS=...               → respects --force-ipv4/--force-ipv6 if present
+        """
+        try:
+            # Player client selection
+            extractor_args = (ydl_opts.get('extractor_args') or {}).copy()
+            yt_args = dict((extractor_args.get('youtube') or {}))
+
+            force_client = (os.getenv('YTDLP_FORCE_CLIENT') or '').strip().lower()
+            safe_mode = (os.getenv('YTDLP_SAFE_MODE') or '').strip().lower() in {'1', 'true', 'yes'}
+            if force_client in {'android', 'web', 'tv', 'web_safari'}:
+                yt_args['player-client'] = [force_client]
+            elif safe_mode:
+                yt_args['player-client'] = ['android']
+
+            if yt_args:
+                extractor_args['youtube'] = yt_args
+                ydl_opts['extractor_args'] = extractor_args
+
+            # Sleep / pacing
+            sleep_req = os.getenv('YTDLP_SLEEP_REQUESTS')
+            if sleep_req and sleep_req.isdigit():
+                v = max(0, int(sleep_req))
+                ydl_opts['sleep_interval'] = v
+                ydl_opts['max_sleep_interval'] = max(v, ydl_opts.get('max_sleep_interval') or v)
+                ydl_opts['sleep_interval_requests'] = v
+                ydl_opts['sleep_interval_subtitles'] = v
+
+            # Retries
+            retries = os.getenv('YTDLP_RETRIES')
+            if retries and retries.isdigit():
+                r = max(0, int(retries))
+                ydl_opts['retries'] = r
+                ydl_opts['fragment_retries'] = r
+
+            # Cookies
+            cookiefile = os.getenv('YTDLP_COOKIES_FILE')
+            if cookiefile and os.path.isfile(cookiefile):
+                ydl_opts['cookiefile'] = cookiefile
+
+            # IP stack selection via env
+            force_stack = (os.getenv('YTDLP_FORCE_STACK') or '').strip().lower()
+            if force_stack in {'4', 'ipv4', 'v4'}:
+                ydl_opts['source_address'] = '0.0.0.0'
+            elif force_stack in {'6', 'ipv6', 'v6'}:
+                ydl_opts['source_address'] = '::'
+
+            # Also honor CLI-style flags present in YT_DLP_OPTS
+            cli_opts = os.getenv('YT_DLP_OPTS') or ''
+            if '--force-ipv4' in cli_opts and 'source_address' not in ydl_opts:
+                ydl_opts['source_address'] = '0.0.0.0'
+            if '--force-ipv6' in cli_opts and 'source_address' not in ydl_opts:
+                ydl_opts['source_address'] = '::'
+
+        except Exception as _:
+            # Do not break extraction on env parsing errors
+            pass
     
     def _initialize_llm(self, api_key: str):
         """Initialize the LLM based on provider and model"""
@@ -688,6 +755,8 @@ class YouTubeSummarizer:
                 'retries': 3,
                 'socket_timeout': 20,
             }
+            # Apply environment-driven adjustments (safe mode, retries, cookies, IP stack)
+            self._apply_ytdlp_env(ydl_opts)
             # Use robust extraction with retry logic
             info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
             if not info:
@@ -895,6 +964,9 @@ class YouTubeSummarizer:
                 'prefer_insecure': False,
             }
             
+            # Apply environment-driven adjustments (safe mode, retries, cookies, IP stack)
+            self._apply_ytdlp_env(ydl_opts)
+
             # Use robust extraction with comprehensive retry logic
             info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
             if not info:
