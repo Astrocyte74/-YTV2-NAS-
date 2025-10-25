@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  youtube-summarizer-bot:
+    container_name: youtube-summarizer-bot
+    build: .
+    image: ytv2-nas:latest
+    restart: unless-stopped
+    # Keep secrets and provider keys in .env.nas
+    env_file:
+      - .env.nas
+    # These are operational toggles that you likely want visible/editable in Portainer
+    environment:
+      # Queue worker defaults
+      - ENABLE_TTS_QUEUE_WORKER=1
+      - TTS_QUEUE_INTERVAL=30
+
+      # yt-dlp mitigation and pacing
+      - YTDLP_SAFE_MODE=true
+      - YTDLP_FORCE_CLIENT=android
+      - YTDLP_SLEEP_REQUESTS=3
+      - YTDLP_RETRIES=1
+      - YTDLP_COOKIES_FILE=/app/data/cookies/cookies.txt
+      - YTDLP_FORCE_STACK=ipv4   # change to ipv6 if available
+      - YT_DLP_OPTS=--sleep-requests 3 --retries 1 --retry-sleep 3 --force-ipv4
+
+    # Bind the repo; persistent data via named volumes
+    volumes:
+      - ./:/app
+      - youtube-bot-downloads:/app/downloads
+      - youtube-bot-cache:/app/cache
+      - youtube-bot-logs:/app/logs
+      - ./data:/app/data
+      - ./exports:/app/exports
+      - ./logs:/app/logs
+
+    ports:
+      - "6452:6452"
+
+    # Dockerfile sets CMD to /app/entrypoint.sh
+
+volumes:
+  youtube-bot-downloads:
+  youtube-bot-cache:
+  youtube-bot-logs:
+

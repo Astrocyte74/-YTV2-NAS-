@@ -13,8 +13,8 @@
 
 ## Deployment & Container Tips
 - Python dependencies (PRAW, psycopg, etc.) are installed via `requirements.txt`. Any time the file changes, rebuild the NAS image so the packages are baked in:
-  1. From the repo root, run `docker build -t ytv2-nas:latest .`
-  2. In Portainer: **Containers → youtube-summarizer-bot → Duplicate/Edit → Replace existing container**, set Image to `ytv2-nas:latest`, confirm env vars, then deploy.
+  1. From the repo root, build with an explicit, date-stamped tag (recommended): `docker build -t ytv2-nas:web-ingest-watcher-2025.10.22-extras .`
+  2. In Portainer: **Containers → youtube-summarizer-bot → Duplicate/Edit → Replace existing container**, set Image to `ytv2-nas:web-ingest-watcher-2025.10.22-extras` (or your latest tag), confirm env vars, then deploy.
   3. After the new container starts, run `python tools/test_postgres_connect.py` from the console to confirm psycopg is available.
 - Portainer: Use **Recreate** with _Re-pull image_ **off** to pick up code changes from the bind-mounted repo.
 - After updating `.env.nas` (e.g., new Reddit refresh token), recreate the container so env vars reload.
