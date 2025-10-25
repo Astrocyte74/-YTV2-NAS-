@@ -209,8 +209,8 @@ def build_ollama_models_keyboard(
     mark_single = '✅' if mode == 'ai-human' else '⬜'
     mark_ai2ai = '✅' if mode == 'ai-ai' else '⬜'
     rows.append([
-        InlineKeyboardButton(f"{mark_single} Single AI Chat", callback_data="ollama_set_mode:single"),
-        InlineKeyboardButton(f"{mark_ai2ai} AI↔AI Chat", callback_data="ollama_set_mode:ai2ai"),
+        InlineKeyboardButton(f"{mark_single} Single", callback_data="ollama_set_mode:single"),
+        InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_set_mode:ai2ai"),
     ])
 
     if mode == 'ai-ai':
@@ -246,12 +246,12 @@ def build_ollama_models_keyboard(
                 row: List[InlineKeyboardButton] = []
                 for i, opt in enumerate(cloud_opts[:page_size*2]):  # show up to two rows by default
                     base_label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                    if len(base_label) > 28:
-                        base_label = f"{base_label[:25]}…"
+                    if len(base_label) > 24:
+                        base_label = f"{base_label[:22]}…"
                     ok = (opt.get('provider'), opt.get('model')) == sel_key
-                    label = f"✅ ☁️ {base_label}" if ok else f"☁️ {base_label}"
+                    label = f"✅ {base_label}" if ok else base_label
                     row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:A:{i}"))
-                    if len(row) == 3:
+                    if len(row) == 2:
                         rows.append(row)
                         row = []
                 if row:
@@ -275,9 +275,9 @@ def build_ollama_models_keyboard(
                     rows.append(row)
                 nav_a: List[InlineKeyboardButton] = []
                 if a_end < len(models):
-                    nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
+                    nav_a.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
                 if page_a > 0:
-                    nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
+                    nav_a.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
                 if nav_a:
                     rows.append(nav_a)
         elif view_a == "persona_list":
@@ -302,12 +302,12 @@ def build_ollama_models_keyboard(
                 row: List[InlineKeyboardButton] = []
                 for i, opt in enumerate(cloud_opts_b[:page_size*2]):
                     base_label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                    if len(base_label) > 28:
-                        base_label = f"{base_label[:25]}…"
+                    if len(base_label) > 24:
+                        base_label = f"{base_label[:22]}…"
                     ok = (opt.get('provider'), opt.get('model')) == sel_key_b
-                    label = f"✅ ☁️ {base_label}" if ok else f"☁️ {base_label}"
+                    label = f"✅ {base_label}" if ok else base_label
                     row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:B:{i}"))
-                    if len(row) == 3:
+                    if len(row) == 2:
                         rows.append(row)
                         row = []
                 if row:
@@ -330,9 +330,9 @@ def build_ollama_models_keyboard(
                     rows.append(row)
                 nav_b: List[InlineKeyboardButton] = []
                 if b_end < len(models):
-                    nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
+                    nav_b.append(InlineKeyboardButton("➡️ More", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
                 if page_b > 0:
-                    nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
+                    nav_b.insert(0, InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
                 if nav_b:
                     rows.append(nav_b)
         elif view_b == "persona_list":
@@ -343,8 +343,8 @@ def build_ollama_models_keyboard(
         # Footer
         foot: List[InlineKeyboardButton] = []
         if sel_a and sel_b:
-            foot.append(InlineKeyboardButton("🧠 AI↔AI Options", callback_data="ollama_ai2ai:opts"))
-            foot.append(InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear"))
+            foot.append(InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts"))
+            foot.append(InlineKeyboardButton("♻️ Clear", callback_data="ollama_ai2ai:clear"))
         foot.append(InlineKeyboardButton("❌ Close", callback_data="ollama_cancel"))
         rows.append(foot)
         return InlineKeyboardMarkup(rows)

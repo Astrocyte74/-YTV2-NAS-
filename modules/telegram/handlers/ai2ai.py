@@ -111,15 +111,15 @@ async def run(handler, chat_id: int, turns: int) -> None:
         return
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⏭️ Continue AI↔AI", callback_data="ollama_ai2ai:auto"),
+            InlineKeyboardButton("⏭️ Continue", callback_data="ollama_ai2ai:auto"),
             InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts"),
         ],
-        [InlineKeyboardButton("🔊 AI↔AI Audio", callback_data="ollama_ai2ai:tts")],
-        [InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear")],
+        [InlineKeyboardButton("🔊 Audio", callback_data="ollama_ai2ai:tts")],
+        [InlineKeyboardButton("♻️ Clear", callback_data="ollama_ai2ai:clear")],
     ])
     await handler.application.bot.send_message(
         chat_id=chat_id,
-        text="✅ AI↔AI session complete. Choose Continue to keep the exchange going, or Options to adjust turns.",
+        text="✅ Session complete. Continue to keep going, or use Options to adjust turns.",
         reply_markup=kb,
     )
 
@@ -454,7 +454,7 @@ async def handle_callback(
             handler.ollama_sessions[chat_id] = session
             await query.answer("AI↔AI started")
             try:
-                await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
+                await query.edit_message_text("🤖 AI↔AI active. Options → Continue to run turns.")
             except Exception:
                 pass
             if render_options is not None:

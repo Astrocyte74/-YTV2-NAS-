@@ -290,6 +290,48 @@ async def handle_callback(handler, query, callback_data: str) -> None:
             await query.answer("Accent updated")
             return
 
+    if callback_data == "tts_refresh":
+        client = handler._resolve_tts_client(session.get('tts_base'))
+        if not client:
+            await query.answer("TTS hub unavailable", show_alert=True)
+            return
+        try:
+            favorites = await client.fetch_favorites()
+        except Exception:
+            favorites = []
+        session['favorites'] = favorites or []
+        default_engine = session.get('default_engine') or DEFAULT_ENGINE
+        active_engine = session.get('active_engine') or default_engine
+        target_engine = active_engine if active_engine != '__all__' else default_engine
+        catalogs = session.get('catalogs') or {}
+        try:
+            fetched = await client.fetch_catalog(engine=target_engine)
+            catalogs[target_engine] = fetched or {}
+        except Exception:
+            pass
+        # Warm catalogs for favorite engines
+        try:
+            fav_engs: Set[str] = set()
+            for fav in favorites or []:
+                eng = (fav.get('engine') or '').strip() or default_engine
+                fav_engs.add(eng)
+            for eng in sorted(fav_engs):
+                if eng in catalogs and catalogs.get(eng):
+                    continue
+                try:
+                    extra = await client.fetch_catalog(engine=eng)
+                    catalogs[eng] = extra or {}
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        session['catalogs'] = catalogs
+        session['catalog'] = catalogs.get(target_engine) or session.get('catalog') or {}
+        handler._store_tts_session(chat_id, message_id, session)
+        await handler._refresh_tts_catalog(query, session)
+        await query.answer("Refreshed")
+        return
+
     if callback_data.startswith("tts_provider:"):
         provider = callback_data.split(":", 1)[1]
         session['provider'] = provider

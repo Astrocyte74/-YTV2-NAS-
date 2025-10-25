@@ -283,7 +283,7 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
     mark_all = '✅' if mode == 'all' else '⬜'
     rows.append([
         InlineKeyboardButton(f"{mark_fav} Favorites", callback_data="tts_mode:favorites"),
-        InlineKeyboardButton(f"{mark_all} All voices", callback_data="tts_mode:all"),
+        InlineKeyboardButton(f"{mark_all} All", callback_data="tts_mode:all"),
     ])
 
     if len(engine_keys) > 1:
@@ -303,7 +303,7 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
             badges_display = " ".join(badges_all[:6])
             if len(badges_all) > 6:
                 badges_display = f"{badges_display} ..."
-            label = "ALL VOICE ENGINES"
+            label = "All engines"
             if badges_display:
                 label = f"{label} {badges_display}"
             rows.append([
@@ -466,11 +466,12 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
             continue
         label = entry.get('display_label') or entry.get('button_label') or entry.get('label') or 'favorite'
         quick_label = label if len(label) <= 28 else f"{label[:25]}…"
-        quick_buttons.append(InlineKeyboardButton(f"🎤 Quick • {quick_label}", callback_data=f"tts_voice:{slug}"))
+        quick_buttons.append(InlineKeyboardButton(f"Quick • {quick_label}", callback_data=f"tts_voice:{slug}"))
     if quick_buttons:
         rows.append(quick_buttons)
     rows.extend(grouped)
-
+    # Place Refresh near the bottom for convenience
+    rows.append([InlineKeyboardButton("↻ Refresh", callback_data="tts_refresh")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
     return InlineKeyboardMarkup(rows)
 
@@ -590,7 +591,7 @@ def build_local_failure_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton('⏳ Queue for later', callback_data='tts_queue_local'),
-                InlineKeyboardButton('☁️ Use OpenAI now', callback_data='tts_switch_provider:openai'),
+                InlineKeyboardButton('Use OpenAI', callback_data='tts_switch_provider:openai'),
             ],
             [InlineKeyboardButton('❌ Cancel', callback_data='tts_cancel')],
         ]
