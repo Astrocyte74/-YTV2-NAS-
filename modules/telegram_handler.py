@@ -125,6 +125,16 @@ class YouTubeTelegramBot:
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
         
+        # Persisted user preferences (e.g., last-used cloud/local models for quick picks)
+        self.user_prefs_path = Path("./data/user_prefs.json")
+        self.user_prefs: Dict[str, Any] = {}
+        try:
+            self.user_prefs_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.user_prefs_path.exists():
+                self.user_prefs = json.loads(self.user_prefs_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            self.user_prefs = {}
+        
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
             r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})'
@@ -710,6 +720,96 @@ class YouTubeTelegramBot:
                 return cached
         return None
 
+    # ------------------------- Quick pick helpers -------------------------
+    def _save_user_prefs(self) -> None:
+        try:
+            self.user_prefs_path.write_text(json.dumps(self.user_prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _remember_last_model(self, user_id: int, provider_key: str, model_slug: Optional[str]) -> None:
+        if not model_slug:
+            return
+        uid = str(user_id)
+        prefs = self.user_prefs.get(uid) or {}
+        if provider_key == "ollama":
+            prefs["last_local_model"] = model_slug
+        else:
+            prefs["last_cloud_model"] = model_slug
+        self.user_prefs[uid] = prefs
+        self._save_user_prefs()
+
+    def _short_model_name(self, model: Optional[str]) -> str:
+        if not model:
+            return ""
+        return model.split("/", 1)[1] if "/" in model else model
+
+    def _quick_pick_candidates(self, provider_options: Dict[str, Dict[str, Any]], user_id: int) -> Dict[str, Optional[str]]:
+        mode = (os.getenv("QUICK_PICK_MODE") or "auto").strip().lower()
+        env_cloud = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+        env_local = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+
+        uid = str(user_id)
+        last = self.user_prefs.get(uid) or {}
+        last_cloud = (last.get("last_cloud_model") or "").strip()
+        last_local = (last.get("last_local_model") or "").strip()
+
+        def first_slug(key: str) -> Optional[str]:
+            opt = provider_options.get(key) or {}
+            models = opt.get("models") or []
+            if not models:
+                return None
+            return (models[0].get("model") or "").strip() or None
+
+        pick_cloud: Optional[str] = None
+        pick_local: Optional[str] = None
+
+        if provider_options.get("cloud"):
+            if mode == "env" and env_cloud:
+                pick_cloud = env_cloud
+            elif mode == "last" and last_cloud:
+                pick_cloud = last_cloud
+            else:  # auto or fallback
+                pick_cloud = env_cloud or last_cloud or first_slug("cloud")
+
+        if provider_options.get("ollama"):
+            if mode == "env" and env_local:
+                pick_local = env_local
+            elif mode == "last" and last_local:
+                pick_local = last_local
+            else:  # auto or fallback
+                pick_local = env_local or last_local or first_slug("ollama")
+
+        return {"cloud": pick_cloud, "ollama": pick_local}
+
+    def _build_provider_with_quick_keyboard(
+        self,
+        cloud_label: str,
+        local_label: Optional[str],
+        quick_cloud_slug: Optional[str],
+        quick_local_slug: Optional[str],
+    ) -> InlineKeyboardMarkup:
+        rows: List[List[InlineKeyboardButton]] = []
+        if quick_cloud_slug:
+            rows.append([
+                InlineKeyboardButton(
+                    f"☁️ API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
+                    callback_data=f"summary_quick:cloud:{quick_cloud_slug}",
+                )
+            ])
+        if quick_local_slug:
+            rows.append([
+                InlineKeyboardButton(
+                    f"🏠 Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
+                    callback_data=f"summary_quick:ollama:{quick_local_slug}",
+                )
+            ])
+        rows.append([InlineKeyboardButton(cloud_label, callback_data="summary_provider:cloud")])
+        if local_label:
+            rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+        return InlineKeyboardMarkup(rows)
+
     def _friendly_llm_provider(self, provider: Optional[str]) -> str:
         mapping = {
             "openai": "OpenAI",
@@ -932,6 +1032,12 @@ class YouTubeTelegramBot:
         message_id = query.message.message_id
         try:
             summarizer = self._get_summary_summarizer(model_option.get("provider"), model_option.get("model"))
+            # Persist last-used choice for quick picks
+            try:
+                user_id = query.from_user.id
+                self._remember_last_model(user_id, provider_key, model_option.get("model"))
+            except Exception:
+                pass
         except Exception as exc:
             logging.error(f"Summary provider init failed: {exc}")
             self._remove_summary_session(chat_id, message_id)
@@ -1720,7 +1826,13 @@ class YouTubeTelegramBot:
             cloud_label = cloud_option.get("button_label") or "☁️ Cloud"
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
-            keyboard = ui_build_summary_provider_keyboard(cloud_label, local_label=local_label)
+            picks = self._quick_pick_candidates(provider_options, user_id)
+            keyboard = self._build_provider_with_quick_keyboard(
+                cloud_label,
+                local_label,
+                picks.get("cloud"),
+                picks.get("ollama"),
+            )
             await query.edit_message_text(prompt_text, reply_markup=keyboard)
             return
 
@@ -1748,6 +1860,48 @@ class YouTubeTelegramBot:
         elif callback_data.startswith("summary_provider:"):
             provider_key = callback_data.split(":", 1)[1]
             await self._handle_summary_provider_callback(query, provider_key)
+            return
+        elif callback_data.startswith("summary_quick:"):
+            parts = callback_data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer("Invalid selection", show_alert=True)
+                return
+            _, provider_key, model_slug = parts
+            chat_id = query.message.chat.id
+            message_id = query.message.message_id
+            session = self._get_summary_session(chat_id, message_id)
+            if not session:
+                await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+                await self._show_main_summary_options(query)
+                return
+            # Build a model option similar to list entries
+            try:
+                if provider_key == "cloud":
+                    from llm_config import llm_config as _lc
+                    resolved_provider, resolved_model, _ = _lc.get_model_config(None, model_slug)
+                    model_option = {
+                        "provider": resolved_provider,
+                        "model": resolved_model,
+                        "label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                        "button_label": f"☁️ {self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
+                    }
+                else:
+                    model_option = {
+                        "provider": "ollama",
+                        "model": model_slug,
+                        "label": f"Ollama • {self._short_model_name(model_slug)}",
+                        "button_label": f"🏠 {self._short_label(self._short_model_name(model_slug), 24)}",
+                    }
+            except Exception:
+                await query.answer("Model unavailable. Choose a provider.")
+                await self._handle_summary_provider_callback(query, provider_key if provider_key in ("cloud", "ollama") else "cloud")
+                return
+            # Remember last used
+            try:
+                self._remember_last_model(user_id, provider_key, model_option.get("model"))
+            except Exception:
+                pass
+            await self._execute_summary_with_model(query, session, provider_key, model_option)
             return
         
         elif callback_data.startswith('listen_this'):
