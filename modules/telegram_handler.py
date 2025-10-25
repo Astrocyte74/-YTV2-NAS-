@@ -77,6 +77,7 @@ from modules.ollama_client import (
     pull as ollama_pull,
 )
 from modules.services import ollama_service, summary_service, tts_service
+from modules.services import cloud_service
 from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
 import hashlib
 from pydub import AudioSegment
@@ -1162,7 +1163,7 @@ class YouTubeTelegramBot:
         allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
         categories = self._ollama_persona_categories()
         sess = session if session is not None else {}
-        return ui_build_models_keyboard(
+        kb = ui_build_models_keyboard(
             models=models,
             page=page,
             page_size=page_size,
@@ -1172,6 +1173,38 @@ class YouTubeTelegramBot:
             ai2ai_default_models=self._ollama_ai2ai_default_models,
             allow_same_models=allow_same,
         )
+        # Insert provider toggle rows (Local vs Cloud) to enable Cloud chat in /o
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            rows = list(kb.inline_keyboard or [])
+            mode = sess.get('mode') or ('ai-ai' if (sess.get('ai2ai_model_a') and sess.get('ai2ai_model_b')) else 'ai-human')
+            if mode == 'ai-human':
+                prov = (sess.get('provider') or 'ollama')
+                mark_local = '✅' if prov != 'cloud' else '⬜'
+                mark_cloud = '✅' if prov == 'cloud' else '⬜'
+                rows.insert(1, [
+                    InlineKeyboardButton(f"{mark_local} Local", callback_data="ollama_provider:single:local"),
+                    InlineKeyboardButton(f"{mark_cloud} Cloud", callback_data="ollama_provider:single:cloud"),
+                ])
+            else:
+                prov_a = (sess.get('ai2ai_provider_a') or 'ollama')
+                prov_b = (sess.get('ai2ai_provider_b') or 'ollama')
+                mark_la = '✅' if prov_a != 'cloud' else '⬜'
+                mark_ca = '✅' if prov_a == 'cloud' else '⬜'
+                mark_lb = '✅' if prov_b != 'cloud' else '⬜'
+                mark_cb = '✅' if prov_b == 'cloud' else '⬜'
+                rows.insert(1, [
+                    InlineKeyboardButton(f"A: {mark_la} Local", callback_data="ollama_provider:A:local"),
+                    InlineKeyboardButton(f"A: {mark_ca} Cloud", callback_data="ollama_provider:A:cloud"),
+                ])
+                rows.insert(2, [
+                    InlineKeyboardButton(f"B: {mark_lb} Local", callback_data="ollama_provider:B:local"),
+                    InlineKeyboardButton(f"B: {mark_cb} Cloud", callback_data="ollama_provider:B:cloud"),
+                ])
+            kb = InlineKeyboardMarkup(rows)
+        except Exception:
+            pass
+        return kb
 
     def _ollama_stream_default(self) -> bool:
         val = os.getenv('OLLAMA_STREAM_DEFAULT', '1').lower()
@@ -1440,25 +1473,15 @@ class YouTubeTelegramBot:
         if not self._is_user_allowed(user_id):
             await update.message.reply_text("❌ You are not authorized to use this bot.")
             return
-        # Quick preflight: detect hub/offline fast to avoid long timeouts
+        # Preflight: detect hub/offline fast; still allow Cloud chat if hub/down
         base = os.getenv('TTSHUB_API_BASE')
-        if not base or not reach_hub_ok(base):
-            await update.message.reply_text(
-                "⚠️ Ollama hub is unreachable. If your Mac is offline, try again later.\n"
-                "Tip: We can add Cloud chat here as a fallback — let me know to enable it."
-            )
-            return
-        if not reach_hub_ollama_ok(base):
-            await update.message.reply_text(
-                "⚠️ Hub is up but Ollama isn’t responding. Start Ollama on your Mac or check the hub’s upstream settings."
-            )
-            return
+        hub_up = bool(base and reach_hub_ok(base))
+        ollama_up = hub_up and reach_hub_ollama_ok(base) if hub_up else False
         try:
-            raw = ollama_get_models()
-            models = self._ollama_models_list(raw)
-            if not models:
-                await update.message.reply_text("⚠️ No models available on the hub.")
-                return
+            models = []
+            if ollama_up:
+                raw = ollama_get_models()
+                models = self._ollama_models_list(raw)
             raw_text = update.message.text or ""
             prompt = ""
             if raw_text:
@@ -1483,11 +1506,17 @@ class YouTubeTelegramBot:
             if default_model:
                 sess["model"] = default_model
                 sess["active"] = True
+            if not ollama_up:
+                # Switch to Cloud provider by default when hub is unavailable
+                sess["provider"] = "cloud"
+                sess["active"] = False
             self.ollama_sessions[update.effective_chat.id] = sess
             kb = self._build_ollama_models_keyboard(models, 0, session=sess)
             # Render dynamic status above the picker
             text = self._ollama_status_text(sess)
             await update.message.reply_text(text, reply_markup=kb)
+            if not hub_up:
+                await update.message.reply_text("☁️ Hub offline. Switched to Cloud provider. Open Options → Pick Cloud Model to start.")
             if prompt and sess.get("model"):
                 await self._ollama_handle_user_text(update, sess, prompt)
         except Exception as exc:
@@ -1537,7 +1566,63 @@ class YouTubeTelegramBot:
         await update.message.reply_text("💬 New AI↔AI turn coming up…")
 
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
-        await ollama_service.handle_user_text(self, update, session, text)
+        provider_mode = (session.get('provider') or 'ollama').lower()
+        if provider_mode == 'cloud':
+            await self._cloud_handle_user_text(update, session, text)
+        else:
+            await ollama_service.handle_user_text(self, update, session, text)
+
+    async def _cloud_handle_user_text(self, update: Update, session: Dict[str, Any], text: str) -> None:
+        chat_id = update.effective_chat.id
+        # Resolve provider/model from selection or shortlist
+        opt = session.get('cloud_single_option') or {}
+        provider = opt.get('provider') or getattr(llm_config, 'llm_provider', None) or 'openrouter'
+        model = opt.get('model') or getattr(llm_config, 'llm_model', None)
+        if not model:
+            shortlist = llm_config.SHORTLISTS.get(getattr(llm_config, 'llm_shortlist', 'openrouter_defaults'), {})
+            for p, m in (shortlist.get('primary') or []):
+                if p != 'ollama':
+                    provider, model = p, m
+                    break
+        if not model:
+            await update.message.reply_text("⚠️ No cloud model available. Configure LLM_SHORTLIST/LLM_MODEL.")
+            return
+        messages: List[Dict[str, str]] = []
+        persona_single = session.get("persona_single")
+        if persona_single and session.get("persona_single_custom"):
+            intro_pending = bool(session.get("persona_single_intro_pending"))
+            messages.append({
+                "role": "system",
+                "content": self._ollama_persona_system_prompt(persona_single, "user", intro_pending),
+            })
+        history = list(session.get("history") or [])
+        messages.extend(history)
+        messages.append({"role": "user", "content": text})
+        try:
+            from telegram.constants import ChatAction
+            app = getattr(self, 'application', None)
+            if app and getattr(app, 'bot', None):
+                await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            pass
+        try:
+            resp_text = cloud_service.chat(messages, provider=provider, model=model)
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Cloud chat error: {str(exc)[:200]}")
+            return
+        display_text = resp_text
+        if session.get('mode') == 'ai-human':
+            persona_single_name = session.get("persona_single")
+            if persona_single_name:
+                display_text = f"{persona_single_name} ({provider}/{model})\n\n{resp_text}"
+            else:
+                display_text = f"☁️ {provider}/{model}\n\n{resp_text}"
+        await self._send_long_text_reply(update, display_text)
+        trimmed_history = (history + [{"role": "user", "content": text}])
+        session["history"] = (trimmed_history + [{"role": "assistant", "content": resp_text}])[-16:]
+        if session.get("persona_single_custom"):
+            session["persona_single_intro_pending"] = False
+        self.ollama_sessions[chat_id] = session
 
     async def _ollama_stream_chat(
         self,
@@ -1696,6 +1781,33 @@ class YouTubeTelegramBot:
                 [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
+            # Provider toggles and cloud pickers
+            if mode == "ai-human":
+                prov = (session.get('provider') or 'ollama')
+                rows.append([
+                    InlineKeyboardButton("Provider:", callback_data="ollama_nop"),
+                    InlineKeyboardButton(("✅ Local" if prov != 'cloud' else "⬜ Local"), callback_data="ollama_provider:single:local"),
+                    InlineKeyboardButton(("✅ Cloud" if prov == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:single:cloud"),
+                ])
+                if prov == 'cloud':
+                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model", callback_data="ollama_cloud_pick:single")])
+            else:
+                pa = (session.get('ai2ai_provider_a') or 'ollama')
+                pb = (session.get('ai2ai_provider_b') or 'ollama')
+                rows.append([
+                    InlineKeyboardButton("A Provider:", callback_data="ollama_nop"),
+                    InlineKeyboardButton(("✅ Local" if pa != 'cloud' else "⬜ Local"), callback_data="ollama_provider:A:local"),
+                    InlineKeyboardButton(("✅ Cloud" if pa == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:A:cloud"),
+                ])
+                rows.append([
+                    InlineKeyboardButton("B Provider:", callback_data="ollama_nop"),
+                    InlineKeyboardButton(("✅ Local" if pb != 'cloud' else "⬜ Local"), callback_data="ollama_provider:B:local"),
+                    InlineKeyboardButton(("✅ Cloud" if pb == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:B:cloud"),
+                ])
+                if pa == 'cloud':
+                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model A", callback_data="ollama_cloud_pick:A")])
+                if pb == 'cloud':
+                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model B", callback_data="ollama_cloud_pick:B")])
             if mode == "ai-ai":
                 rows.append([
                     InlineKeyboardButton(f"A: {ai2ai_model_a}", callback_data="ollama_ai2ai:pick_a"),
@@ -1707,6 +1819,67 @@ class YouTubeTelegramBot:
             kb = InlineKeyboardMarkup(rows)
             await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
             await query.answer("Options")
+            return
+        if callback_data.startswith("ollama_provider:"):
+            parts = callback_data.split(":")
+            scope = parts[1]
+            target = parts[2]
+            if scope == 'single':
+                session['provider'] = 'cloud' if target == 'cloud' else 'ollama'
+            else:
+                key = f"ai2ai_provider_{scope.lower()}"
+                session[key] = 'cloud' if target == 'cloud' else 'ollama'
+            self.ollama_sessions[chat_id] = session
+            kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            await query.answer("Provider updated")
+            return
+        if callback_data.startswith("ollama_cloud_pick:"):
+            which = callback_data.split(":", 1)[1]
+            base_provider = getattr(llm_config, 'llm_provider', None)
+            base_model = getattr(llm_config, 'llm_model', None)
+            opts = self._cloud_model_options(base_provider, base_model)
+            if not opts:
+                await query.answer("No cloud models available", show_alert=True)
+                return
+            session['cloud_model_options'] = opts
+            self.ollama_sessions[chat_id] = session
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            rows: List[List[InlineKeyboardButton]] = []
+            row: List[InlineKeyboardButton] = []
+            for i, opt in enumerate(opts[:12]):
+                label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
+                if len(label) > 28:
+                    label = f"{label[:25]}…"
+                row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{which}:{i}"))
+                if len(row) == 2:
+                    rows.append(row)
+                    row = []
+            if row:
+                rows.append(row)
+            rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ollama_options")])
+            await query.edit_message_text("☁️ Choose a cloud model", reply_markup=InlineKeyboardMarkup(rows))
+            return
+        if callback_data.startswith("ollama_cloud_model:"):
+            _, which, idx_str = callback_data.split(":", 2)
+            try:
+                idx = int(idx_str)
+            except Exception:
+                idx = 0
+            opts = session.get('cloud_model_options') or []
+            if not (0 <= idx < len(opts)):
+                await query.answer("Invalid selection", show_alert=True)
+                return
+            sel = opts[idx]
+            if which == 'single':
+                session['provider'] = 'cloud'
+                session['cloud_single_option'] = sel
+            elif which in ('A', 'B'):
+                session[f'ai2ai_provider_{which.lower()}'] = 'cloud'
+                session[f'ai2ai_cloud_option_{which.lower()}'] = sel
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Cloud model set")
+            await self._handle_ollama_callback(query, "ollama_options")
             return
         if callback_data.startswith("ollama_pull:"):
             model = callback_data.split(":", 1)[1]
