@@ -1830,7 +1830,7 @@ class YouTubeTelegramBot:
                 key = f"ai2ai_provider_{scope.lower()}"
                 session[key] = 'cloud' if target == 'cloud' else 'ollama'
             self.ollama_sessions[chat_id] = session
-            # If switching to cloud, immediately prompt for a cloud model for this scope
+            # If switching to cloud, immediately show cloud model choices within the same UI (preserve top rows)
             if target == 'cloud':
                 base_provider = getattr(llm_config, 'llm_provider', None)
                 base_model = getattr(llm_config, 'llm_model', None)
@@ -1841,7 +1841,13 @@ class YouTubeTelegramBot:
                 else:
                     session['cloud_model_options'] = opts
                     self.ollama_sessions[chat_id] = session
-                    rows: List[List[InlineKeyboardButton]] = []
+                    # Build a composite keyboard: keep top rows (mode + provider toggles), replace model rows with cloud options
+                    base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+                    base_rows = list(base_kb.inline_keyboard or [])
+                    mode = session.get('mode') or 'ai-human'
+                    top_count = 2 if mode == 'ai-human' else 3
+                    new_rows: List[List[InlineKeyboardButton]] = base_rows[:top_count]
+                    # Cloud option rows (2 per row)
                     row: List[InlineKeyboardButton] = []
                     for i, opt in enumerate(opts[:12]):
                         label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
@@ -1849,15 +1855,17 @@ class YouTubeTelegramBot:
                             label = f"{label[:25]}…"
                         row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{scope}:{i}"))
                         if len(row) == 2:
-                            rows.append(row)
+                            new_rows.append(row)
                             row = []
                     if row:
-                        rows.append(row)
-                    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="ollama_options")])
+                        new_rows.append(row)
+                    # Back returns to the main models grid
+                    page = int(session.get('page') or 0)
+                    new_rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page}")])
                     try:
-                        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+                        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
                     except Exception:
-                        await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(rows))
+                        await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(new_rows))
                     await query.answer("Provider updated")
                     return
             # Otherwise or if no opts, re-render the main keyboard
@@ -1878,7 +1886,12 @@ class YouTubeTelegramBot:
                 return
             session['cloud_model_options'] = opts
             self.ollama_sessions[chat_id] = session
-            rows: List[List[InlineKeyboardButton]] = []
+            # Composite keyboard for cloud selection
+            base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+            base_rows = list(base_kb.inline_keyboard or [])
+            mode = session.get('mode') or 'ai-human'
+            top_count = 2 if mode == 'ai-human' else 3
+            new_rows: List[List[InlineKeyboardButton]] = base_rows[:top_count]
             row: List[InlineKeyboardButton] = []
             for i, opt in enumerate(opts[:12]):
                 label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
@@ -1886,15 +1899,16 @@ class YouTubeTelegramBot:
                     label = f"{label[:25]}…"
                 row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{which}:{i}"))
                 if len(row) == 2:
-                    rows.append(row)
+                    new_rows.append(row)
                     row = []
             if row:
-                rows.append(row)
-            rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ollama_options")])
+                new_rows.append(row)
+            page = int(session.get('page') or 0)
+            new_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"ollama_more:{page}")])
             try:
-                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
             except Exception:
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(rows))
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(new_rows))
             return
         if callback_data.startswith("ollama_cloud_model:"):
             _, which, idx_str = callback_data.split(":", 2)
