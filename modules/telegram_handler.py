@@ -1854,12 +1854,18 @@ class YouTubeTelegramBot:
                     if row:
                         rows.append(row)
                     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="ollama_options")])
-                    await query.edit_message_text("☁️ Choose a cloud model", reply_markup=InlineKeyboardMarkup(rows))
+                    try:
+                        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+                    except Exception:
+                        await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(rows))
                     await query.answer("Provider updated")
                     return
             # Otherwise or if no opts, re-render the main keyboard
             kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
-            await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            try:
+                await query.edit_message_reply_markup(reply_markup=kb)
+            except Exception:
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             await query.answer("Provider updated")
             return
         if callback_data.startswith("ollama_cloud_pick:"):
@@ -1885,7 +1891,10 @@ class YouTubeTelegramBot:
             if row:
                 rows.append(row)
             rows.append([InlineKeyboardButton("❌ Cancel", callback_data="ollama_options")])
-            await query.edit_message_text("☁️ Choose a cloud model", reply_markup=InlineKeyboardMarkup(rows))
+            try:
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(rows))
+            except Exception:
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(rows))
             return
         if callback_data.startswith("ollama_cloud_model:"):
             _, which, idx_str = callback_data.split(":", 2)
@@ -1906,7 +1915,13 @@ class YouTubeTelegramBot:
                 session[f'ai2ai_cloud_option_{which.lower()}'] = sel
             self.ollama_sessions[chat_id] = session
             await query.answer("Cloud model set")
-            await self._handle_ollama_callback(query, "ollama_options")
+            # Update only the markup to reflect provider toggles and selections
+            kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+            try:
+                await query.edit_message_reply_markup(reply_markup=kb)
+            except Exception:
+                # Fallback to full edit if reply_markup fails
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             return
         if callback_data.startswith("ollama_pull:"):
             model = callback_data.split(":", 1)[1]
