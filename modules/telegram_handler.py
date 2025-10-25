@@ -1824,12 +1824,42 @@ class YouTubeTelegramBot:
             parts = callback_data.split(":")
             scope = parts[1]
             target = parts[2]
+            # Update provider selection in session
             if scope == 'single':
                 session['provider'] = 'cloud' if target == 'cloud' else 'ollama'
             else:
                 key = f"ai2ai_provider_{scope.lower()}"
                 session[key] = 'cloud' if target == 'cloud' else 'ollama'
             self.ollama_sessions[chat_id] = session
+            # If switching to cloud, immediately prompt for a cloud model for this scope
+            if target == 'cloud':
+                base_provider = getattr(llm_config, 'llm_provider', None)
+                base_model = getattr(llm_config, 'llm_model', None)
+                opts = self._cloud_model_options(base_provider, base_model)
+                if not opts:
+                    await query.answer("No cloud models available", show_alert=True)
+                    # Fall back to re-rendering main view
+                else:
+                    session['cloud_model_options'] = opts
+                    self.ollama_sessions[chat_id] = session
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    rows: List[List[InlineKeyboardButton]] = []
+                    row: List[InlineKeyboardButton] = []
+                    for i, opt in enumerate(opts[:12]):
+                        label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
+                        if len(label) > 28:
+                            label = f"{label[:25]}…"
+                        row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{scope}:{i}"))
+                        if len(row) == 2:
+                            rows.append(row)
+                            row = []
+                    if row:
+                        rows.append(row)
+                    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="ollama_options")])
+                    await query.edit_message_text("☁️ Choose a cloud model", reply_markup=InlineKeyboardMarkup(rows))
+                    await query.answer("Provider updated")
+                    return
+            # Otherwise or if no opts, re-render the main keyboard
             kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
             await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             await query.answer("Provider updated")
