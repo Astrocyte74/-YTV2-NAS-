@@ -1718,11 +1718,24 @@ class YouTubeTelegramBot:
             ai2ai_active = bool(session.get("ai2ai_active"))
             ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
             if mode == "ai-ai" and ai2ai_active:
-                ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
+                ai2ai_row = [InlineKeyboardButton("⏭️ Continue", callback_data="ollama_ai2ai:continue")]
             rows = [
                 [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
+            # Hide streaming toggle for Single when Cloud; add hint when AI↔AI is mixed Local/Cloud
+            try:
+                if mode == "ai-human":
+                    prov = (session.get('provider') or 'ollama')
+                    if prov == 'cloud' and len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
+                        rows.pop(1)
+                else:
+                    pa = (session.get('ai2ai_provider_a') or 'ollama')
+                    pb = (session.get('ai2ai_provider_b') or 'ollama')
+                    if (pa == 'cloud') != (pb == 'cloud'):
+                        rows.insert(2, [InlineKeyboardButton("ℹ️ Streaming applies to Local only", callback_data="ollama_nop")])
+            except Exception:
+                pass
             if ai2ai_row:
                 rows.append(ai2ai_row)
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")])
@@ -1820,11 +1833,22 @@ class YouTubeTelegramBot:
             ai2ai_model_b = _slot_label(session.get("ai2ai_model_b"), prov_b, cloud_opt_b)
             ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
             if mode == "ai-ai" and ai2ai_active:
-                ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
+                ai2ai_row = [InlineKeyboardButton("⏭️ Continue", callback_data="ollama_ai2ai:continue")]
             rows = [
                 [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
+            # Hide streaming in Single when Cloud; add hint in mixed AI↔AI
+            try:
+                if mode == "ai-human":
+                    prov = (session.get('provider') or 'ollama')
+                    if prov == 'cloud' and len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
+                        rows.pop(1)
+                else:
+                    if (prov_a == 'cloud') != (prov_b == 'cloud'):
+                        rows.insert(2, [InlineKeyboardButton("ℹ️ Streaming applies to Local only", callback_data="ollama_nop")])
+            except Exception:
+                pass
             # Provider toggles and cloud pickers
             if mode == "ai-human":
                 prov = (session.get('provider') or 'ollama')
