@@ -90,6 +90,14 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - Client: `modules/ollama_client.py` (non-stream + SSE streaming helpers, handles SSE payloads such as `data: b'…'`)
   - Telegram: `modules/telegram_handler.py` (model picker, streaming updates, AI↔AI automation)
 
+## Reachability & Fallbacks
+- The bot runs a fast preflight before opening the /o picker to avoid long waits when your Mac is offline:
+  - Hub probe: `GET ${TTSHUB_API_BASE}/meta` — if unreachable, the bot replies immediately.
+  - Upstream probe: `GET ${TTSHUB_API_BASE}/ollama/ps` (fallback `/ollama/tags`) — detects when the hub is up but Ollama isn’t responding.
+- Tuning (optional):
+  - `REACH_CONNECT_TIMEOUT` (default 2), `REACH_HTTP_TIMEOUT` (default 4), `REACH_TTL_SECONDS` (default 20)
+- If you want Cloud chat inside /o as a fallback, you can enable it in the bot; ask us to wire a simple Cloud tab using your `llm_config` defaults.
+
 ## Environment
 - NAS/bot:
   - `TTSHUB_API_BASE` (required)
@@ -106,6 +114,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 - Hub on Mac (optional):
   - `OLLAMA_URL` if Ollama is not on `http://127.0.0.1:11434`
   - `OLLAMA_ALLOW_CLI` to control delete fallback via the local `ollama` CLI
+  - Fast reachability (optional): `REACH_CONNECT_TIMEOUT`, `REACH_HTTP_TIMEOUT`, `REACH_TTL_SECONDS`
 
 ## Status & Errors
 - Non‑stream returns `200` JSON; stream returns SSE events.

@@ -34,6 +34,18 @@
   - `YTDLP_FORCE_STACK` — `ipv4|ipv6` (maps to source address)
   - `YT_DLP_OPTS` — raw flags appended to yt-dlp calls
 
+- Fast reachability probes (preflight checks; keep responsive UX when Mac is offline):
+  - `REACH_CONNECT_TIMEOUT` — TCP connect timeout in seconds (default `2`)
+  - `REACH_HTTP_TIMEOUT` — HTTP read timeout in seconds (default `4`)
+  - `REACH_TTL_SECONDS` — cache TTL for last probe result (default `20`)
+  - Used by `/o` and `/tts` to quickly detect when the hub or Ollama is unreachable and show an immediate message instead of waiting on long timeouts.
+
+- TTS hub timeouts (fine‑tune request timeouts to the hub):
+  - `TTSHUB_TIMEOUT_CATALOG` — voices catalog fetch (default `8`)
+  - `TTSHUB_TIMEOUT_FAVORITES` — favorites fetch (default `6`)
+  - `TTSHUB_TIMEOUT_SYNTH` — synthesis POST (default `20`)
+  - These apply only to TTS requests and can be left at defaults in most setups.
+
 ## Dashboard Notes (Postgres-only)
 - Dashboard reads from Postgres only; it does not scan JSON or accept upload endpoints.
 - Ensure at least one summary variant has non-null HTML so a card appears.

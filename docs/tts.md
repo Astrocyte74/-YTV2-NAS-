@@ -68,6 +68,12 @@
 - Dashboard sync (summary audio only):
   - `DATABASE_URL` – Postgres connection for direct upserts
   - `AUDIO_PUBLIC_BASE` – Base used to construct public audio URLs (e.g., `https://your-host` → `${AUDIO_PUBLIC_BASE}/exports/<file>.mp3`)
+ - Fast preflight (optional):
+   - `REACH_CONNECT_TIMEOUT` (default 2), `REACH_HTTP_TIMEOUT` (default 4), `REACH_TTL_SECONDS` (default 20)
+   - Used to quickly detect hub unavailability so `/tts` can show a friendly message without long waits.
+ - Hub request timeouts (optional):
+   - `TTSHUB_TIMEOUT_CATALOG` (default 8), `TTSHUB_TIMEOUT_FAVORITES` (default 6), `TTSHUB_TIMEOUT_SYNTH` (default 20)
+   - Tune only if you experience frequent hub timeouts; defaults work well for most networks.
 
 ## Local Hub Testing (curl one‑liners)
 
