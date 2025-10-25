@@ -788,6 +788,13 @@ class YouTubeTelegramBot:
             return
         uid = str(user_id)
         prefs = self.user_prefs.get(uid) or {}
+        # Maintain recent list (most-recent first, unique, capped)
+        recent: List[str] = list(prefs.get("recent_tts_favorites") or [])
+        alias_slug = str(alias_slug).strip()
+        recent = [s for s in recent if s != alias_slug]
+        recent.insert(0, alias_slug)
+        prefs["recent_tts_favorites"] = recent[:5]
+        # Keep single last for compatibility
         prefs["last_tts_favorite"] = alias_slug
         self.user_prefs[uid] = prefs
         self._save_user_prefs()
@@ -796,6 +803,15 @@ class YouTubeTelegramBot:
         prefs = self.user_prefs.get(str(user_id)) or {}
         slug = (prefs.get("last_tts_favorite") or "").strip()
         return slug or None
+
+    def _last_tts_voices(self, user_id: int, n: int = 2) -> List[str]:
+        prefs = self.user_prefs.get(str(user_id)) or {}
+        recent = prefs.get("recent_tts_favorites") or []
+        # Fallback to single last if list empty
+        if not recent:
+            last = (prefs.get("last_tts_favorite") or "").strip()
+            return [last] if last else []
+        return [str(s).strip() for s in recent if str(s).strip()][:n]
 
     def _build_provider_with_quick_keyboard(
         self,
@@ -2395,38 +2411,65 @@ class YouTubeTelegramBot:
                 "tts_base": client.base_api_url,
                 "mode": "oneoff_tts",
             }
-            # Determine a quick-pick favorite slug: env -> last -> first favorite
-            quick_env = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
-            quick_slug: Optional[str] = None
-            if quick_env:
-                if "|" in quick_env:
-                    # engine|slug
-                    eng, slug = quick_env.split("|", 1)
-                    quick_slug = f"fav|{(eng or '').strip()}|{(slug or '').strip()}"
-                else:
-                    # Try to resolve by slug across favorites
+            # Determine up to 2 quick favorites based on mode: env | last | auto
+            mode = (os.getenv("TTS_QUICK_MODE") or "auto").strip().lower()
+            env_val = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
+            env_list = [s.strip() for s in env_val.split(",") if s.strip()] if env_val else []
+
+            def map_env_to_alias(items: List[str]) -> List[str]:
+                aliases: List[str] = []
+                for item in items:
+                    if "|" in item:
+                        eng, slug = item.split("|", 1)
+                        eng = eng.strip(); slug = slug.strip()
+                        if eng and slug:
+                            aliases.append(f"fav|{eng}|{slug}")
+                    else:
+                        # Resolve engine from favorites list
+                        for fav in favorites_list:
+                            if not isinstance(fav, dict):
+                                continue
+                            slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
+                            if slug and slug == item:
+                                eng = (fav.get('engine') or '').strip()
+                                if eng:
+                                    aliases.append(f"fav|{eng}|{slug}")
+                                    break
+                # Deduplicate preserving order
+                seen = set()
+                result = []
+                for a in aliases:
+                    if a in seen:
+                        continue
+                    seen.add(a)
+                    result.append(a)
+                return result
+
+            quick_slugs: List[str] = []
+            if mode == "env" and env_list:
+                quick_slugs = map_env_to_alias(env_list)
+            elif mode == "last":
+                quick_slugs = self._last_tts_voices(user_id, n=2)
+            else:  # auto
+                if env_list:
+                    quick_slugs = map_env_to_alias(env_list)
+                if not quick_slugs:
+                    quick_slugs = self._last_tts_voices(user_id, n=2)
+                if not quick_slugs and favorites_list:
+                    # Take first two favorites
+                    acc = []
                     for fav in favorites_list:
                         if not isinstance(fav, dict):
                             continue
                         slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
-                        if slug and slug == quick_env:
-                            eng = (fav.get('engine') or '').strip()
-                            quick_slug = f"fav|{eng}|{slug}"
+                        eng = (fav.get('engine') or '').strip()
+                        if slug and eng:
+                            acc.append(f"fav|{eng}|{slug}")
+                        if len(acc) >= 2:
                             break
-            if not quick_slug:
-                quick_slug = self._last_tts_voice(user_id)
-            if not quick_slug and favorites_list:
-                # First favorite entry
-                for fav in favorites_list:
-                    if not isinstance(fav, dict):
-                        continue
-                    slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
-                    eng = (fav.get('engine') or '').strip()
-                    if slug:
-                        quick_slug = f"fav|{eng}|{slug}"
-                        break
-            if quick_slug:
-                session_payload["quick_favorite_slug"] = quick_slug
+                    quick_slugs = acc
+            if quick_slugs:
+                session_payload["quick_favorite_slugs"] = quick_slugs[:2]
             prompt = self._tts_prompt_text(speak_text, catalog=active_catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
             prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)
