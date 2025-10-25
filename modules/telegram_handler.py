@@ -1420,12 +1420,12 @@ class YouTubeTelegramBot:
         if show_stream:
             header += " · Streaming: On"
         parts = [header]
-        if a and b:
+        if mode_key == 'ai-ai':
+            # Ensure personas exist for display
             if not (session.get('persona_a') and session.get('persona_b')):
                 rand_a, rand_b = self._ollama_persona_random_pair()
                 session.setdefault('persona_a', rand_a)
                 session.setdefault('persona_b', rand_b)
-                # Populate derived fields
                 self._update_persona_session_fields(session, 'a', session.get('persona_a'))
                 self._update_persona_session_fields(session, 'b', session.get('persona_b'))
             defaults = self._ollama_persona_defaults()
@@ -1444,7 +1444,6 @@ class YouTubeTelegramBot:
                 cat_key_b = session.get("ai2ai_persona_category_b")
                 if cat_key_b:
                     cat_b = categories.get(cat_key_b, {}).get("label")
-            # Source labels for A/B (Local vs Cloud provider)
             prov_a = (session.get('ai2ai_provider_a') or 'ollama')
             prov_b = (session.get('ai2ai_provider_b') or 'ollama')
             cloud_opt_a = session.get('ai2ai_cloud_option_a') or {}
@@ -1475,7 +1474,7 @@ class YouTubeTelegramBot:
             topic = (session.get('topic') or '').strip()
             if topic:
                 parts.append(f"Topic: {topic}")
-        else:
+        elif mode_key == 'ai-human':
             prov = (session.get('provider') or 'ollama')
             if prov == 'cloud':
                 sel = session.get('cloud_single_option') or {}
@@ -1723,6 +1722,20 @@ class YouTubeTelegramBot:
                 [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
+            # Hide streaming toggle for Single+Cloud; for AI↔AI hide if both Cloud, hint if mixed
+            try:
+                if mode == "ai-human":
+                    prov = (session.get('provider') or 'ollama')
+                    if prov == 'cloud' and len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
+                        rows.pop(1)
+                else:
+                    if prov_a == 'cloud' and prov_b == 'cloud':
+                        if len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
+                            rows.pop(1)
+                    elif (prov_a == 'cloud') != (prov_b == 'cloud'):
+                        rows.insert(2, [InlineKeyboardButton("ℹ️ Streaming applies to Local only", callback_data="ollama_nop")])
+            except Exception:
+                pass
             # Hide streaming toggle for Single when Cloud; add hint when AI↔AI is mixed Local/Cloud
             try:
                 if mode == "ai-human":
@@ -2126,7 +2139,7 @@ class YouTubeTelegramBot:
             }
             self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
             cloud_option = provider_options.get("cloud") or next(iter(provider_options.values()))
-        cloud_label = cloud_option.get("button_label") or "Cloud"
+            cloud_label = cloud_option.get("button_label") or "Cloud"
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
             picks = self._quick_pick_candidates(provider_options, user_id)
