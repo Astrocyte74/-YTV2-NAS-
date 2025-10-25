@@ -1404,7 +1404,7 @@ class YouTubeTelegramBot:
         a = session.get('ai2ai_model_a')
         b = session.get('ai2ai_model_b')
         mode_key = session.get('mode') or ('ai-ai' if (a and b) else 'ai-human')
-        mode_label = 'AI↔AI' if mode_key == 'ai-ai' else 'AI→Human'
+        mode_label = 'AI↔AI' if mode_key == 'ai-ai' else 'Single'
         # Streaming indicator only applies to local (Ollama)
         show_stream = False
         if mode_key == 'ai-human':
@@ -1720,7 +1720,7 @@ class YouTubeTelegramBot:
             if mode == "ai-ai" and ai2ai_active:
                 ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
             rows = [
-                [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
+                [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
             if ai2ai_row:
@@ -1728,7 +1728,7 @@ class YouTubeTelegramBot:
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")])
             kb = InlineKeyboardMarkup(rows)
             try:
-                await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
+                await query.edit_message_text("⚙️ Chat options", reply_markup=kb)
             except Exception:
                 pass
         if callback_data.startswith("ollama_more:"):
@@ -1822,7 +1822,7 @@ class YouTubeTelegramBot:
             if mode == "ai-ai" and ai2ai_active:
                 ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
             rows = [
-                [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
+                [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
             # Provider toggles and cloud pickers
@@ -1861,7 +1861,7 @@ class YouTubeTelegramBot:
                 rows.append(ai2ai_row)
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{session.get('page', 0)}")])
             kb = InlineKeyboardMarkup(rows)
-            await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
+            await query.edit_message_text("⚙️ Chat options", reply_markup=kb)
             await query.answer("Options")
             return
         if callback_data.startswith("ollama_provider:"):
