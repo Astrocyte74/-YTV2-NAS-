@@ -782,6 +782,21 @@ class YouTubeTelegramBot:
 
         return {"cloud": pick_cloud, "ollama": pick_local}
 
+    # ------------------------- TTS quick pick memory -------------------------
+    def _remember_last_tts_voice(self, user_id: int, alias_slug: Optional[str]) -> None:
+        if not alias_slug:
+            return
+        uid = str(user_id)
+        prefs = self.user_prefs.get(uid) or {}
+        prefs["last_tts_favorite"] = alias_slug
+        self.user_prefs[uid] = prefs
+        self._save_user_prefs()
+
+    def _last_tts_voice(self, user_id: int) -> Optional[str]:
+        prefs = self.user_prefs.get(str(user_id)) or {}
+        slug = (prefs.get("last_tts_favorite") or "").strip()
+        return slug or None
+
     def _build_provider_with_quick_keyboard(
         self,
         cloud_label: str,
@@ -2380,6 +2395,38 @@ class YouTubeTelegramBot:
                 "tts_base": client.base_api_url,
                 "mode": "oneoff_tts",
             }
+            # Determine a quick-pick favorite slug: env -> last -> first favorite
+            quick_env = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
+            quick_slug: Optional[str] = None
+            if quick_env:
+                if "|" in quick_env:
+                    # engine|slug
+                    eng, slug = quick_env.split("|", 1)
+                    quick_slug = f"fav|{(eng or '').strip()}|{(slug or '').strip()}"
+                else:
+                    # Try to resolve by slug across favorites
+                    for fav in favorites_list:
+                        if not isinstance(fav, dict):
+                            continue
+                        slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
+                        if slug and slug == quick_env:
+                            eng = (fav.get('engine') or '').strip()
+                            quick_slug = f"fav|{eng}|{slug}"
+                            break
+            if not quick_slug:
+                quick_slug = self._last_tts_voice(user_id)
+            if not quick_slug and favorites_list:
+                # First favorite entry
+                for fav in favorites_list:
+                    if not isinstance(fav, dict):
+                        continue
+                    slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
+                    eng = (fav.get('engine') or '').strip()
+                    if slug:
+                        quick_slug = f"fav|{eng}|{slug}"
+                        break
+            if quick_slug:
+                session_payload["quick_favorite_slug"] = quick_slug
             prompt = self._tts_prompt_text(speak_text, catalog=active_catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
             prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)

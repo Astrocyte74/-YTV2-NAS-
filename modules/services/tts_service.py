@@ -130,6 +130,17 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             engine=engine_id,
             favorite_slug=favorite_slug,
         )
+        # Remember last-used favorite for quick pick
+        try:
+            alias_slug = None
+            if favorite_slug and engine_id:
+                alias_slug = f"fav|{engine_id}|{favorite_slug}"
+            elif voice_id and engine_id:
+                alias_slug = f"cat|{engine_id}|{voice_id}"
+            if alias_slug:
+                handler._remember_last_tts_voice(query.from_user.id, alias_slug)
+        except Exception:
+            pass
     except LocalTTSUnavailable as exc:
         logging.warning("Local TTS unavailable during execution: %s", exc)
         await handle_local_unavailable(handler, query, session, message=str(exc))

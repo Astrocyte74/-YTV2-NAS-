@@ -448,6 +448,13 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
             row = []
     if row:
         grouped.append(row)
+    # Optional quick-pick favorite at the top
+    quick_slug = (session.get('quick_favorite_slug') or '').strip()
+    if quick_slug and voice_lookup.get(quick_slug):
+        entry = voice_lookup.get(quick_slug) or {}
+        label = entry.get('display_label') or entry.get('button_label') or entry.get('label') or 'favorite'
+        quick_label = label if len(label) <= 28 else f"{label[:25]}…"
+        rows.append([InlineKeyboardButton(f"🎤 Quick • {quick_label}", callback_data=f"tts_voice:{quick_slug}")])
     rows.extend(grouped)
 
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
