@@ -237,28 +237,49 @@ def build_ollama_models_keyboard(
             session["ai2ai_view_a"] = view_a
         rows.append(ai2ai_view_toggle_row("A", view_a))
         if view_a == "models":
-            a_start = page_a * page_size
-            a_end = a_start + page_size
-            a_subset = models[a_start:a_end]
-            row: List[InlineKeyboardButton] = []
-            for name in a_subset:
-                base_label = name
-                if len(base_label) > 28:
-                    base_label = f"{base_label[:25]}…"
-                label = f"✅ {base_label}" if sel_a == name else base_label
-                row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
-                if len(row) == 3:
+            prov_a = (sess.get('ai2ai_provider_a') or 'ollama')
+            if prov_a == 'cloud':
+                # Render cloud options for A
+                cloud_opts: List[Dict[str, Any]] = list(sess.get('ai2ai_cloud_options_a') or [])
+                sel_cloud = sess.get('ai2ai_cloud_option_a') or {}
+                sel_key = (sel_cloud.get('provider'), sel_cloud.get('model')) if isinstance(sel_cloud, dict) else (None, None)
+                row: List[InlineKeyboardButton] = []
+                for i, opt in enumerate(cloud_opts[:page_size*2]):  # show up to two rows by default
+                    base_label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
+                    if len(base_label) > 28:
+                        base_label = f"{base_label[:25]}…"
+                    ok = (opt.get('provider'), opt.get('model')) == sel_key
+                    label = f"✅ ☁️ {base_label}" if ok else f"☁️ {base_label}"
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:A:{i}"))
+                    if len(row) == 3:
+                        rows.append(row)
+                        row = []
+                if row:
                     rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            nav_a: List[InlineKeyboardButton] = []
-            if a_end < len(models):
-                nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
-            if page_a > 0:
-                nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
-            if nav_a:
-                rows.append(nav_a)
+            else:
+                # Render local (Ollama) models for A
+                a_start = page_a * page_size
+                a_end = a_start + page_size
+                a_subset = models[a_start:a_end]
+                row: List[InlineKeyboardButton] = []
+                for name in a_subset:
+                    base_label = name
+                    if len(base_label) > 28:
+                        base_label = f"{base_label[:25]}…"
+                    label = f"✅ {base_label}" if sel_a == name else base_label
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_a:{name}"))
+                    if len(row) == 3:
+                        rows.append(row)
+                        row = []
+                if row:
+                    rows.append(row)
+                nav_a: List[InlineKeyboardButton] = []
+                if a_end < len(models):
+                    nav_a.append(InlineKeyboardButton("➡️ More A", callback_data=f"ollama_more_ai2ai:A:{page_a+1}"))
+                if page_a > 0:
+                    nav_a.insert(0, InlineKeyboardButton("⬅️ Back A", callback_data=f"ollama_more_ai2ai:A:{page_a-1}"))
+                if nav_a:
+                    rows.append(nav_a)
         elif view_a == "persona_list":
             rows.extend(ai2ai_persona_list_rows("A", session or {}, page_size, cats, persona_parse or (lambda n: (n or "", None))))
         else:
@@ -273,28 +294,47 @@ def build_ollama_models_keyboard(
             session["ai2ai_view_b"] = view_b
         rows.append(ai2ai_view_toggle_row("B", view_b))
         if view_b == "models":
-            b_start = page_b * page_size
-            b_end = b_start + page_size
-            b_subset = models[b_start:b_end]
-            row = []
-            for name in b_subset:
-                base_label = name
-                if len(base_label) > 28:
-                    base_label = f"{base_label[:25]}…"
-                label = f"✅ {base_label}" if sel_b == name else base_label
-                row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
-                if len(row) == 3:
+            prov_b = (sess.get('ai2ai_provider_b') or 'ollama')
+            if prov_b == 'cloud':
+                cloud_opts_b: List[Dict[str, Any]] = list(sess.get('ai2ai_cloud_options_b') or [])
+                sel_cloud_b = sess.get('ai2ai_cloud_option_b') or {}
+                sel_key_b = (sel_cloud_b.get('provider'), sel_cloud_b.get('model')) if isinstance(sel_cloud_b, dict) else (None, None)
+                row: List[InlineKeyboardButton] = []
+                for i, opt in enumerate(cloud_opts_b[:page_size*2]):
+                    base_label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
+                    if len(base_label) > 28:
+                        base_label = f"{base_label[:25]}…"
+                    ok = (opt.get('provider'), opt.get('model')) == sel_key_b
+                    label = f"✅ ☁️ {base_label}" if ok else f"☁️ {base_label}"
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:B:{i}"))
+                    if len(row) == 3:
+                        rows.append(row)
+                        row = []
+                if row:
                     rows.append(row)
-                    row = []
-            if row:
-                rows.append(row)
-            nav_b: List[InlineKeyboardButton] = []
-            if b_end < len(models):
-                nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
-            if page_b > 0:
-                nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
-            if nav_b:
-                rows.append(nav_b)
+            else:
+                b_start = page_b * page_size
+                b_end = b_start + page_size
+                b_subset = models[b_start:b_end]
+                row = []
+                for name in b_subset:
+                    base_label = name
+                    if len(base_label) > 28:
+                        base_label = f"{base_label[:25]}…"
+                    label = f"✅ {base_label}" if sel_b == name else base_label
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_set_b:{name}"))
+                    if len(row) == 3:
+                        rows.append(row)
+                        row = []
+                if row:
+                    rows.append(row)
+                nav_b: List[InlineKeyboardButton] = []
+                if b_end < len(models):
+                    nav_b.append(InlineKeyboardButton("➡️ More B", callback_data=f"ollama_more_ai2ai:B:{page_b+1}"))
+                if page_b > 0:
+                    nav_b.insert(0, InlineKeyboardButton("⬅️ Back B", callback_data=f"ollama_more_ai2ai:B:{page_b-1}"))
+                if nav_b:
+                    rows.append(nav_b)
         elif view_b == "persona_list":
             rows.extend(ai2ai_persona_list_rows("B", session or {}, page_size, cats, persona_parse or (lambda n: (n or "", None))))
         else:

@@ -1856,58 +1856,23 @@ class YouTubeTelegramBot:
             else:
                 key = f"ai2ai_provider_{scope.lower()}"
                 session[key] = 'cloud' if target == 'cloud' else 'ollama'
-            self.ollama_sessions[chat_id] = session
-            # If switching to cloud, immediately show cloud model choices within the same UI (preserve top rows)
-            if target == 'cloud':
+            # Compute per-slot cloud options if switching to cloud
+            if scope in ('A','B') and target == 'cloud':
                 base_provider = getattr(llm_config, 'llm_provider', None)
                 base_model = getattr(llm_config, 'llm_model', None)
                 opts = self._cloud_model_options(base_provider, base_model)
-                if not opts:
-                    await query.answer("No cloud models available", show_alert=True)
-                    # Fall back to re-rendering main view
+                if opts:
+                    session[f'ai2ai_cloud_options_{scope.lower()}'] = opts
                 else:
-                    session['cloud_model_options'] = opts
-                    self.ollama_sessions[chat_id] = session
-                    # Build a composite keyboard by replacing only the model grid for the selected slot
-                    base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
-                    base_rows = list(base_kb.inline_keyboard or [])
-                    header_text = f"Model {scope}:"
-                    # Locate header for target slot and the next slot header (to delimit the model grid slice)
-                    hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == header_text), None)
-                    if hdr_idx is None:
-                        # Fallback: replace after top rows
-                        new_rows = base_rows[:]
-                    else:
-                        view_idx = hdr_idx + 1 if hdr_idx + 1 < len(base_rows) else hdr_idx
-                        # Next header for the other slot
-                        next_hdr_text = "Model B:" if scope == 'A' else None
-                        next_hdr_idx = None
-                        if next_hdr_text:
-                            next_hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == next_hdr_text), None)
-                        start = min(view_idx + 1, len(base_rows))
-                        end = next_hdr_idx if next_hdr_idx is not None else len(base_rows)
-                        new_rows = base_rows[:start]
-                        # Insert cloud options (2 per row)
-                        row: List[InlineKeyboardButton] = []
-                        for i, opt in enumerate(opts[:12]):
-                            label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                            if len(label) > 28:
-                                label = f"{label[:25]}…"
-                            row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{scope}:{i}"))
-                            if len(row) == 2:
-                                new_rows.append(row)
-                                row = []
-                        if row:
-                            new_rows.append(row)
-                        # Append the remainder (keeping persona rows and the other slot intact)
-                        new_rows.extend(base_rows[end:])
-                    try:
-                        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
-                    except Exception:
-                        await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(new_rows))
-                    await query.answer("Provider updated")
-                    return
-            # Otherwise or if no opts, re-render the main keyboard
+                    await query.answer("No cloud models available", show_alert=True)
+            # Clear selection when switching provider type to avoid stale mismatches
+            if scope in ('A','B'):
+                if target == 'cloud':
+                    session.pop(f'ai2ai_model_{scope.lower()}', None)
+                else:
+                    session.pop(f'ai2ai_cloud_option_{scope.lower()}', None)
+            self.ollama_sessions[chat_id] = session
+            # Re-render full keyboard (markup only) with per-slot filtering
             kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
             try:
                 await query.edit_message_reply_markup(reply_markup=kb)
@@ -1923,40 +1888,14 @@ class YouTubeTelegramBot:
             if not opts:
                 await query.answer("No cloud models available", show_alert=True)
                 return
-            session['cloud_model_options'] = opts
+            # Store per-slot options and refresh
+            session[f'ai2ai_cloud_options_{which.lower()}'] = opts
             self.ollama_sessions[chat_id] = session
-            # Composite keyboard: replace only grid for target scope
-            base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page') or 0, session=session)
-            base_rows = list(base_kb.inline_keyboard or [])
-            header_text = f"Model {which}:"
-            hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == header_text), None)
-            if hdr_idx is None:
-                new_rows = base_rows[:]
-            else:
-                view_idx = hdr_idx + 1 if hdr_idx + 1 < len(base_rows) else hdr_idx
-                next_hdr_text = "Model B:" if which == 'A' else None
-                next_hdr_idx = None
-                if next_hdr_text:
-                    next_hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == next_hdr_text), None)
-                start = min(view_idx + 1, len(base_rows))
-                end = next_hdr_idx if next_hdr_idx is not None else len(base_rows)
-                new_rows = base_rows[:start]
-                row: List[InlineKeyboardButton] = []
-                for i, opt in enumerate(opts[:12]):
-                    label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                    if len(label) > 28:
-                        label = f"{label[:25]}…"
-                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{which}:{i}"))
-                    if len(row) == 2:
-                        new_rows.append(row)
-                        row = []
-                if row:
-                    new_rows.append(row)
-                new_rows.extend(base_rows[end:])
+            kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page') or 0, session=session)
             try:
-                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
+                await query.edit_message_reply_markup(reply_markup=kb)
             except Exception:
-                await query.edit_message_text(self._ollama_status_text(session), reply_markup=InlineKeyboardMarkup(new_rows))
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             return
         if callback_data.startswith("ollama_cloud_model:"):
             _, which, idx_str = callback_data.split(":", 2)
