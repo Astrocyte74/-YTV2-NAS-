@@ -576,6 +576,15 @@ class YouTubeTelegramBot:
         # Check for YouTube links first (primary flow)
         youtube_match = self.youtube_url_pattern.search(message_text)
         if youtube_match:
+            # OFF switch: allow disabling YouTube handling via env (e.g., cooldown for 429s)
+            yt_access_raw = os.getenv("YOUTUBE_ACCESS", "true").strip().lower()
+            yt_enabled = yt_access_raw in ("1", "true", "yes", "on")
+            if not yt_enabled:
+                await update.message.reply_text(
+                    "⏸️ YouTube summaries are temporarily paused.\n"
+                    "Please try again later, or send a Reddit or web article link in the meantime."
+                )
+                return
             video_url = self._extract_youtube_url(message_text)
             if not video_url:
                 await update.message.reply_text("❌ Could not extract a valid YouTube URL from your message.")
@@ -738,11 +747,19 @@ class YouTubeTelegramBot:
                 return
             seen.add(key)
             provider_name = self._friendly_llm_provider(resolved_provider)
-            label_core = provider_name if not resolved_model else f"{provider_name} • {resolved_model}"
+            # Prefer an abbreviated model label in buttons (e.g., show just `gpt-5-mini` for `openai/gpt-5-mini`)
+            short_model = None
+            if isinstance(resolved_model, str) and "/" in resolved_model:
+                short_model = resolved_model.split("/", 1)[1]
+            elif isinstance(resolved_model, str):
+                short_model = resolved_model
+
+            label_model = short_model or resolved_model
+            label_core = provider_name if not label_model else f"{provider_name} • {label_model}"
             display_provider = self._friendly_llm_provider(resolved_provider)
             button_text = f"☁️ {display_provider}"
-            if resolved_model:
-                button_text = f"{button_text} • {self._short_label(resolved_model, 24)}"
+            if label_model:
+                button_text = f"{button_text} • {self._short_label(label_model, 24)}"
             options.append(
                 {
                     "provider": resolved_provider,

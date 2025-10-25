@@ -131,6 +131,15 @@ class RedditFetcher:
 
         comment_limit = comment_limit or self.DEFAULT_COMMENT_LIMIT
 
+        # Resolve share/short links (e.g., /s/<code>) to canonical URL to avoid 307 issues
+        try:
+            import requests  # lazy import to avoid hard dependency at module import time
+            resp = requests.get(url, allow_redirects=True, timeout=8)
+            if getattr(resp, "url", None):
+                url = resp.url
+        except Exception:
+            pass
+
         try:
             submission = self._client.submission(url=url)
         except Exception as exc:

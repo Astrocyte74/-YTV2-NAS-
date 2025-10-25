@@ -32,7 +32,7 @@ services:
       - youtube-bot-logs:/app/logs
       - ./data:/app/data
       - ./exports:/app/exports
-      - ./logs:/app/logs
+      # Use named volume for logs to avoid duplicate mount
 
     ports:
       - "6452:6452"

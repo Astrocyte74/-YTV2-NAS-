@@ -2,24 +2,47 @@
 """
 Quick smoke test for Reddit API credentials.
 
-Run this inside the NAS container (env populated via .env.nas):
+Run this inside the NAS container:
     python tools/test_reddit_connection.py <reddit_post_url>
+
+This script loads .env/.env.nas automatically so you can manage
+credentials in files rather than Portainer env vars.
 
 Example URL:
     https://www.reddit.com/r/Python/comments/1f9vmxq/whats_everyone_working_on_this_week/
 
-The script verifies the required environment variables, logs in via PRAW,
-and prints basic details about the submission plus the top-level comment.
+It verifies required environment variables, logs in via PRAW, and prints
+basic details about the submission plus the top-level comment.
 """
 
 import os
 import sys
 
 import praw
+from pathlib import Path
+import requests
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
 
 
 REDDIT_REQUIRED_VARS = ("REDDIT_CLIENT_ID", "REDDIT_REFRESH_TOKEN", "REDDIT_USER_AGENT")
 REDDIT_OPTIONAL_VARS = ("REDDIT_CLIENT_SECRET",)
+
+def _load_env_files():
+    """Load .env and .env.nas if python-dotenv is available."""
+    if not load_dotenv:
+        return
+    # Project defaults first, then NAS overrides
+    load_dotenv(dotenv_path=Path('.env'), override=False)
+    load_dotenv(dotenv_path=Path('.env.nas'), override=True)
+
+def _env_stripped(key: str, default: str = "") -> str:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return val.strip()
 
 
 def ensure_env():
@@ -34,10 +57,10 @@ def ensure_env():
 def build_client() -> praw.Reddit:
     """Instantiate a PRAW client using refresh-token auth."""
     return praw.Reddit(
-        client_id=os.environ["REDDIT_CLIENT_ID"],
-        client_secret=os.environ.get("REDDIT_CLIENT_SECRET", ""),
-        refresh_token=os.environ["REDDIT_REFRESH_TOKEN"],
-        user_agent=os.environ["REDDIT_USER_AGENT"],
+        client_id=_env_stripped("REDDIT_CLIENT_ID"),
+        client_secret=_env_stripped("REDDIT_CLIENT_SECRET"),
+        refresh_token=_env_stripped("REDDIT_REFRESH_TOKEN"),
+        user_agent=_env_stripped("REDDIT_USER_AGENT"),
     )
 
 
@@ -71,6 +94,7 @@ def parse_args():
 
 
 def main() -> None:
+    _load_env_files()
     login_only, url = parse_args()
 
     ensure_env()
@@ -81,6 +105,13 @@ def main() -> None:
 
     if login_only:
         return
+
+    # Resolve share/short links to canonical URL first
+    try:
+        resp = requests.get(url, allow_redirects=True, timeout=8)
+        url = resp.url or url
+    except Exception:
+        pass
 
     submission = reddit.submission(url=url)
     try:
