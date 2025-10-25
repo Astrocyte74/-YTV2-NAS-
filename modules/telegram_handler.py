@@ -77,6 +77,7 @@ from modules.ollama_client import (
     pull as ollama_pull,
 )
 from modules.services import ollama_service, summary_service, tts_service
+from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
 import hashlib
 from pydub import AudioSegment
 
@@ -1439,6 +1440,19 @@ class YouTubeTelegramBot:
         if not self._is_user_allowed(user_id):
             await update.message.reply_text("❌ You are not authorized to use this bot.")
             return
+        # Quick preflight: detect hub/offline fast to avoid long timeouts
+        base = os.getenv('TTSHUB_API_BASE')
+        if not base or not reach_hub_ok(base):
+            await update.message.reply_text(
+                "⚠️ Ollama hub is unreachable. If your Mac is offline, try again later.\n"
+                "Tip: We can add Cloud chat here as a fallback — let me know to enable it."
+            )
+            return
+        if not reach_hub_ollama_ok(base):
+            await update.message.reply_text(
+                "⚠️ Hub is up but Ollama isn’t responding. Start Ollama on your Mac or check the hub’s upstream settings."
+            )
+            return
         try:
             raw = ollama_get_models()
             models = self._ollama_models_list(raw)
@@ -2304,6 +2318,16 @@ class YouTubeTelegramBot:
         if not client or not client.base_api_url:
             await update.message.reply_text("⚠️ TTS hub is not configured. Set TTSHUB_API_BASE and try again.")
             return
+        # Fast preflight to avoid waiting on multiple long hub calls when offline
+        try:
+            if not reach_hub_ok(client.base_api_url):
+                await update.message.reply_text(
+                    "⚠️ Local TTS hub is unreachable. The /tts preview uses the hub.\n"
+                    "Try again when your Mac is online, or generate audio via the summary flow using OpenAI."
+                )
+                return
+        except Exception:
+            pass
         self.tts_client = client
 
         full_text = (update.message.text or "").split(" ", 1)

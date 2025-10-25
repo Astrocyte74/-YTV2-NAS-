@@ -59,17 +59,24 @@ class TTSHubClient:
             raise RuntimeError("TTS hub base URL is not configured.")
 
     async def fetch_catalog(
-        self, engine: str = DEFAULT_ENGINE, timeout: float = 12.0
+        self, engine: str = DEFAULT_ENGINE, timeout: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         self._ensure_requests()
         self._ensure_base()
         loop = asyncio.get_running_loop()
 
         def _call() -> Optional[Dict[str, Any]]:
+            to = timeout
+            if to is None:
+                # Allow env override for faster failures when hub is down
+                try:
+                    to = float(os.getenv("TTSHUB_TIMEOUT_CATALOG", "8"))
+                except Exception:
+                    to = 8.0
             resp = requests.get(  # type: ignore
                 f"{self.base_api_url}/voices_catalog",
                 params={"engine": engine} if engine else None,
-                timeout=timeout,
+                timeout=to,
             )
             if resp.status_code == 404:
                 return None
@@ -79,16 +86,22 @@ class TTSHubClient:
         return await loop.run_in_executor(None, _call)
 
     async def fetch_favorites(
-        self, tag: Optional[str] = None, timeout: float = 10.0
+        self, tag: Optional[str] = None, timeout: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         self._ensure_requests()
         self._ensure_base()
         loop = asyncio.get_running_loop()
 
         def _call() -> List[Dict[str, Any]]:
+            to = timeout
+            if to is None:
+                try:
+                    to = float(os.getenv("TTSHUB_TIMEOUT_FAVORITES", "6"))
+                except Exception:
+                    to = 6.0
             params = {"tag": tag} if tag else None
             resp = requests.get(  # type: ignore
-                f"{self.base_api_url}/favorites", params=params, timeout=timeout
+                f"{self.base_api_url}/favorites", params=params, timeout=to
             )
             resp.raise_for_status()
             data = resp.json() or {}
@@ -104,7 +117,7 @@ class TTSHubClient:
         favorite_slug: Optional[str] = None,
         voice_id: Optional[str] = None,
         engine: Optional[str] = None,
-        timeout: float = 30.0,
+        timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
         self._ensure_requests()
         self._ensure_base()
@@ -125,9 +138,15 @@ class TTSHubClient:
         loop = asyncio.get_running_loop()
 
         def _call() -> Dict[str, Any]:
+            to = timeout
+            if to is None:
+                try:
+                    to = float(os.getenv("TTSHUB_TIMEOUT_SYNTH", "20"))
+                except Exception:
+                    to = 20.0
             try:
                 resp = requests.post(  # type: ignore
-                    f"{self.base_api_url}/synthesise", json=payload, timeout=timeout
+                    f"{self.base_api_url}/synthesise", json=payload, timeout=to
                 )
                 resp.raise_for_status()
                 data = resp.json() or {}

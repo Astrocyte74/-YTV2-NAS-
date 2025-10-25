@@ -14,7 +14,7 @@ Author: Mark Darby
 Branch: feature/ai2ai-prompt-optimization
 Primary Files:
     •    /data/persona_data.json  → canonical registry
-    •    /modules/services/persona_service.py  → loader + prompt builder (new)
+    •    /modules/services/persona_service.py  → loader + prompt builder (planned)
     •    /modules/telegram/...    → handlers consume persona_service
     •    /cli/persona_loader.py, /cli/persona_cli.py  → optional CLI layer (future)
 

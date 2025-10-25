@@ -23,6 +23,17 @@
   - `tools/debug_audio_variant.py` — inspect `content.has_audio` and `<audio>` HTML served from Postgres exports
   - `tools/test_reddit_connection.py`, `tools/debug_reddit_env.py` — Reddit diagnostics
 
+## Operational Toggles
+- YouTube access switch: set `YOUTUBE_ACCESS` to `1|true|yes|on` to enable handling of YouTube links; any other value pauses YouTube summaries (Telegram replies with a friendly pause message).
+- yt-dlp mitigation and pacing (honored by the Python code and surfaced in `docker-compose.yml`):
+  - `YTDLP_SAFE_MODE` — prefer resilient client profile (e.g., `true`)
+  - `YTDLP_FORCE_CLIENT` — `android|web|tv|web_safari`
+  - `YTDLP_SLEEP_REQUESTS` — seconds between requests (e.g., `3`)
+  - `YTDLP_RETRIES` — total retries (applies to fragments as well)
+  - `YTDLP_COOKIES_FILE` — path to a Netscape cookies file
+  - `YTDLP_FORCE_STACK` — `ipv4|ipv6` (maps to source address)
+  - `YT_DLP_OPTS` — raw flags appended to yt-dlp calls
+
 ## Dashboard Notes (Postgres-only)
 - Dashboard reads from Postgres only; it does not scan JSON or accept upload endpoints.
 - Ensure at least one summary variant has non-null HTML so a card appears.

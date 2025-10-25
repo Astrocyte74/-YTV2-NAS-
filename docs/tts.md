@@ -59,6 +59,8 @@
 - Engine chips surface both an `ALL` tab (aggregated) and per-engine tabs; the picker auto-selects the first engine that contains your favorites, shows a hint when it switches, and prefixes each button with the engine code.
 - The picker checkmarks reflect the current mode: “Favorites” or “All voices”.
 
+- Quick Favorite row: up to two recently used favorites appear as “Quick • <label>” buttons above the main list for one-tap synthesis. This mirrors the recent-favorites memory used across TTS flows.
+
 ## Environment
 
 - Local hub base URL: `TTSHUB_API_BASE` (required for `local` provider)
