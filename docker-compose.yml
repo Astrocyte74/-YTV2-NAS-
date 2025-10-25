@@ -15,6 +15,16 @@ services:
       - ENABLE_TTS_QUEUE_WORKER=1
       - TTS_QUEUE_INTERVAL=30
 
+      # Fast reachability probes (preflight)
+      - REACH_CONNECT_TIMEOUT=2
+      - REACH_HTTP_TIMEOUT=4
+      - REACH_TTL_SECONDS=20
+
+      # TTS hub request timeouts
+      - TTSHUB_TIMEOUT_CATALOG=8
+      - TTSHUB_TIMEOUT_FAVORITES=6
+      - TTSHUB_TIMEOUT_SYNTH=20
+
       # yt-dlp mitigation and pacing
       - YTDLP_SAFE_MODE=true
       - YTDLP_FORCE_CLIENT=android
