@@ -1478,9 +1478,15 @@ class YouTubeTelegramBot:
             prov = (session.get('provider') or 'ollama')
             if prov == 'cloud':
                 sel = session.get('cloud_single_option') or {}
-                prov_name = self._friendly_llm_provider(sel.get('provider')) if sel else 'Cloud'
-                model_name = sel.get('model') or 'Select…'
-                parts.append(f"Model: {prov_name} • {model_name} (Cloud)")
+                # Use selection if present; otherwise fall back to llm_config defaults and mark as default
+                provider = sel.get('provider') or getattr(llm_config, 'llm_provider', None)
+                model = sel.get('model') or getattr(llm_config, 'llm_model', None)
+                prov_name = self._friendly_llm_provider(provider) if provider else 'Cloud'
+                model_name = model or 'Select…'
+                default_hint = ''
+                if not sel and model:
+                    default_hint = ' (default)'
+                parts.append(f"Model: {prov_name} • {model_name}{default_hint} (Cloud)")
             else:
                 model = session.get('model') or '—'
                 parts.append(f"Model: {model} (Local)")
@@ -1549,7 +1555,7 @@ class YouTubeTelegramBot:
             text = self._ollama_status_text(sess)
             await update.message.reply_text(text, reply_markup=kb)
             if not hub_up:
-                await update.message.reply_text("Hub offline. Switched to Cloud provider. Open Options → Pick Cloud Model to start.")
+                await update.message.reply_text("Hub offline. Switched to Cloud provider. Open Options → Pick Model to start.")
             if prompt and sess.get("model"):
                 await self._ollama_handle_user_text(update, sess, prompt)
         except Exception as exc:
@@ -1718,6 +1724,9 @@ class YouTubeTelegramBot:
             ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
             if mode == "ai-ai" and ai2ai_active:
                 ai2ai_row = [InlineKeyboardButton("⏭️ Continue", callback_data="ollama_ai2ai:continue")]
+            # Providers for AI↔AI (for streaming toggle visibility/hints)
+            prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+            prov_b = (session.get('ai2ai_provider_b') or 'ollama')
             rows = [
                 [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
@@ -1733,19 +1742,6 @@ class YouTubeTelegramBot:
                         if len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
                             rows.pop(1)
                     elif (prov_a == 'cloud') != (prov_b == 'cloud'):
-                        rows.insert(2, [InlineKeyboardButton("ℹ️ Streaming applies to Local only", callback_data="ollama_nop")])
-            except Exception:
-                pass
-            # Hide streaming toggle for Single when Cloud; add hint when AI↔AI is mixed Local/Cloud
-            try:
-                if mode == "ai-human":
-                    prov = (session.get('provider') or 'ollama')
-                    if prov == 'cloud' and len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
-                        rows.pop(1)
-                else:
-                    pa = (session.get('ai2ai_provider_a') or 'ollama')
-                    pb = (session.get('ai2ai_provider_b') or 'ollama')
-                    if (pa == 'cloud') != (pb == 'cloud'):
                         rows.insert(2, [InlineKeyboardButton("ℹ️ Streaming applies to Local only", callback_data="ollama_nop")])
             except Exception:
                 pass
@@ -1851,14 +1847,17 @@ class YouTubeTelegramBot:
                 [InlineKeyboardButton(f"{mark_ai} Single", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
-            # Hide streaming in Single when Cloud; add hint in mixed AI↔AI
+            # Hide streaming in Single when Cloud; hide for AI↔AI when both Cloud; hint when mixed
             try:
                 if mode == "ai-human":
                     prov = (session.get('provider') or 'ollama')
                     if prov == 'cloud' and len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
                         rows.pop(1)
                 else:
-                    if (prov_a == 'cloud') != (prov_b == 'cloud'):
+                    if prov_a == 'cloud' and prov_b == 'cloud':
+                        if len(rows) >= 2 and any(btn.callback_data == 'ollama_toggle:stream' for btn in rows[1]):
+                            rows.pop(1)
+                    elif (prov_a == 'cloud') != (prov_b == 'cloud'):
                         rows.insert(2, [InlineKeyboardButton("ℹ️ Streaming applies to Local only", callback_data="ollama_nop")])
             except Exception:
                 pass
@@ -1871,7 +1870,7 @@ class YouTubeTelegramBot:
                     InlineKeyboardButton(("✅ Cloud" if prov == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:single:cloud"),
                 ])
                 if prov == 'cloud':
-                    rows.append([InlineKeyboardButton("Pick Cloud Model", callback_data="ollama_cloud_pick:single")])
+                    rows.append([InlineKeyboardButton("Pick Model", callback_data="ollama_cloud_pick:single")])
             else:
                 pa = (session.get('ai2ai_provider_a') or 'ollama')
                 pb = (session.get('ai2ai_provider_b') or 'ollama')
@@ -1886,9 +1885,9 @@ class YouTubeTelegramBot:
                     InlineKeyboardButton(("✅ Cloud" if pb == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:B:cloud"),
                 ])
                 if pa == 'cloud':
-                    rows.append([InlineKeyboardButton("Pick Cloud Model A", callback_data="ollama_cloud_pick:A")])
+                    rows.append([InlineKeyboardButton("Pick Model A", callback_data="ollama_cloud_pick:A")])
                 if pb == 'cloud':
-                    rows.append([InlineKeyboardButton("Pick Cloud Model B", callback_data="ollama_cloud_pick:B")])
+                    rows.append([InlineKeyboardButton("Pick Model B", callback_data="ollama_cloud_pick:B")])
             if mode == "ai-ai":
                 rows.append([
                     InlineKeyboardButton(f"A: {ai2ai_model_a}", callback_data="ollama_ai2ai:pick_a"),
