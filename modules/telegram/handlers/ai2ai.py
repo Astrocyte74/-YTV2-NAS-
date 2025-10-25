@@ -111,11 +111,11 @@ async def run(handler, chat_id: int, turns: int) -> None:
         return
     kb = InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("⏭️ Continue AI↔AI", callback_data="ollama_ai2ai:auto"),
+            InlineKeyboardButton("⏭️ Continue", callback_data="ollama_ai2ai:auto"),
             InlineKeyboardButton("🧠 Options", callback_data="ollama_ai2ai:opts"),
         ],
-        [InlineKeyboardButton("🔊 AI↔AI Audio", callback_data="ollama_ai2ai:tts")],
-        [InlineKeyboardButton("♻️ Clear AI↔AI", callback_data="ollama_ai2ai:clear")],
+        [InlineKeyboardButton("🔊 Audio", callback_data="ollama_ai2ai:tts")],
+        [InlineKeyboardButton("♻️ Clear", callback_data="ollama_ai2ai:clear")],
     ])
     await handler.application.bot.send_message(
         chat_id=chat_id,

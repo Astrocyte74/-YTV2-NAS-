@@ -826,14 +826,14 @@ class YouTubeTelegramBot:
         if quick_cloud_slug:
             rows.append([
                 InlineKeyboardButton(
-                    f"☁️ API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
+                    f"API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
                     callback_data=f"summary_quick:cloud:{quick_cloud_slug}",
                 )
             ])
         if quick_local_slug:
             rows.append([
                 InlineKeyboardButton(
-                    f"🏠 Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
+                    f"Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
                     callback_data=f"summary_quick:ollama:{quick_local_slug}",
                 )
             ])
@@ -890,7 +890,7 @@ class YouTubeTelegramBot:
             label_model = short_model or resolved_model
             label_core = provider_name if not label_model else f"{provider_name} • {label_model}"
             display_provider = self._friendly_llm_provider(resolved_provider)
-            button_text = f"☁️ {display_provider}"
+            button_text = f"{display_provider}"
             if label_model:
                 button_text = f"{button_text} • {self._short_label(label_model, 24)}"
             options.append(
@@ -950,7 +950,7 @@ class YouTubeTelegramBot:
                     "provider": "ollama",
                     "model": model,
                     "label": f"Ollama • {model}",
-                    "button_label": f"🏠 {self._short_label(model, 32)}",
+                    "button_label": f"{self._short_label(model, 32)}",
                 }
             )
         return options
@@ -973,8 +973,8 @@ class YouTubeTelegramBot:
         cloud_models = self._cloud_model_options(provider, model)
         if cloud_models:
             default_option = cloud_models[0]
-            default_label = "API / Cloud"
-            button_text = "☁️ API / Cloud"
+            default_label = "Cloud"
+            button_text = "Cloud"
             options["cloud"] = {
                 "label": default_label,
                 "button_label": button_text,
@@ -984,8 +984,8 @@ class YouTubeTelegramBot:
         local_models = self._ollama_model_options()
         if local_models:
             default_option = local_models[0]
-            default_label = "Ollama (Local)"
-            button_text = "🏠 Ollama (Local)"
+            default_label = "Local"
+            button_text = "Local"
             options["ollama"] = {
                 "label": default_label,
                 "button_label": button_text,
@@ -1137,7 +1137,7 @@ class YouTubeTelegramBot:
         session.pop("model_options", None)
         self._store_summary_session(chat_id, message_id, session)
 
-        cloud_button = (provider_options.get("cloud") or {}).get("button_label") or "☁️ Cloud"
+        cloud_button = (provider_options.get("cloud") or {}).get("button_label") or "Cloud"
         local_button = (provider_options.get("ollama") or {}).get("button_label")
         summary_type = session.get("summary_type") or "comprehensive"
         summary_label = self._friendly_variant_label(summary_type)
@@ -1532,7 +1532,7 @@ class YouTubeTelegramBot:
             text = self._ollama_status_text(sess)
             await update.message.reply_text(text, reply_markup=kb)
             if not hub_up:
-                await update.message.reply_text("☁️ Hub offline. Switched to Cloud provider. Open Options → Pick Cloud Model to start.")
+                await update.message.reply_text("Hub offline. Switched to Cloud provider. Open Options → Pick Cloud Model to start.")
             if prompt and sess.get("model"):
                 await self._ollama_handle_user_text(update, sess, prompt)
         except Exception as exc:
@@ -1632,7 +1632,7 @@ class YouTubeTelegramBot:
             if persona_single_name:
                 display_text = f"{persona_single_name} ({provider}/{model})\n\n{resp_text}"
             else:
-                display_text = f"☁️ {provider}/{model}\n\n{resp_text}"
+                display_text = f"{provider}/{model}\n\n{resp_text}"
         await self._send_long_text_reply(update, display_text)
         trimmed_history = (history + [{"role": "user", "content": text}])
         session["history"] = (trimmed_history + [{"role": "assistant", "content": resp_text}])[-16:]
@@ -1816,7 +1816,7 @@ class YouTubeTelegramBot:
                     InlineKeyboardButton(("✅ Cloud" if prov == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:single:cloud"),
                 ])
                 if prov == 'cloud':
-                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model", callback_data="ollama_cloud_pick:single")])
+                    rows.append([InlineKeyboardButton("Pick Cloud Model", callback_data="ollama_cloud_pick:single")])
             else:
                 pa = (session.get('ai2ai_provider_a') or 'ollama')
                 pb = (session.get('ai2ai_provider_b') or 'ollama')
@@ -1831,9 +1831,9 @@ class YouTubeTelegramBot:
                     InlineKeyboardButton(("✅ Cloud" if pb == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:B:cloud"),
                 ])
                 if pa == 'cloud':
-                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model A", callback_data="ollama_cloud_pick:A")])
+                    rows.append([InlineKeyboardButton("Pick Cloud Model A", callback_data="ollama_cloud_pick:A")])
                 if pb == 'cloud':
-                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model B", callback_data="ollama_cloud_pick:B")])
+                    rows.append([InlineKeyboardButton("Pick Cloud Model B", callback_data="ollama_cloud_pick:B")])
             if mode == "ai-ai":
                 rows.append([
                     InlineKeyboardButton(f"A: {ai2ai_model_a}", callback_data="ollama_ai2ai:pick_a"),
@@ -2084,7 +2084,7 @@ class YouTubeTelegramBot:
             }
             self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
             cloud_option = provider_options.get("cloud") or next(iter(provider_options.values()))
-            cloud_label = cloud_option.get("button_label") or "☁️ Cloud"
+        cloud_label = cloud_option.get("button_label") or "Cloud"
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
             picks = self._quick_pick_candidates(provider_options, user_id)
@@ -2144,14 +2144,14 @@ class YouTubeTelegramBot:
                         "provider": resolved_provider,
                         "model": resolved_model,
                         "label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
-                        "button_label": f"☁️ {self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
+                        "button_label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
                     }
                 else:
                     model_option = {
                         "provider": "ollama",
                         "model": model_slug,
                         "label": f"Ollama • {self._short_model_name(model_slug)}",
-                        "button_label": f"🏠 {self._short_label(self._short_model_name(model_slug), 24)}",
+                        "button_label": f"{self._short_label(self._short_model_name(model_slug), 24)}",
                     }
             except Exception:
                 await query.answer("Model unavailable. Choose a provider.")
@@ -2468,10 +2468,10 @@ class YouTubeTelegramBot:
     def _build_provider_keyboard(self, include_local: bool = True) -> InlineKeyboardMarkup:
         row = []
         if include_local:
-            row.append(InlineKeyboardButton("🏠 Local TTS hub", callback_data="tts_provider:local"))
+            row.append(InlineKeyboardButton("Local TTS hub", callback_data="tts_provider:local"))
         else:
-            row.append(InlineKeyboardButton("🏠 Local TTS hub", callback_data="tts_provider:local"))
-        row.append(InlineKeyboardButton("☁️ OpenAI TTS", callback_data="tts_provider:openai"))
+            row.append(InlineKeyboardButton("Local TTS hub", callback_data="tts_provider:local"))
+        row.append(InlineKeyboardButton("OpenAI TTS", callback_data="tts_provider:openai"))
         buttons = [row, [InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")]]
         return InlineKeyboardMarkup(buttons)
 
