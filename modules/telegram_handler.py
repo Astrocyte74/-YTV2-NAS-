@@ -1435,8 +1435,25 @@ class YouTubeTelegramBot:
                 cat_key_b = session.get("ai2ai_persona_category_b")
                 if cat_key_b:
                     cat_b = categories.get(cat_key_b, {}).get("label")
-            line_a = f"A: {a} · {pa_disp}"
-            line_b = f"B: {b} · {pb_disp}"
+            # Source labels for A/B (Local vs Cloud provider)
+            prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+            prov_b = (session.get('ai2ai_provider_b') or 'ollama')
+            cloud_opt_a = session.get('ai2ai_cloud_option_a') or {}
+            cloud_opt_b = session.get('ai2ai_cloud_option_b') or {}
+
+            def _slot_line(slot: str, local_model: Optional[str], persona_disp: str, prov_key: str, cloud_opt: Dict[str, Any]) -> str:
+                if prov_key == 'cloud':
+                    cp = (cloud_opt.get('provider') or getattr(llm_config, 'llm_provider', 'openrouter'))
+                    cm = (cloud_opt.get('model') or getattr(llm_config, 'llm_model', None) or 'Select…')
+                    src = f"Cloud/{self._friendly_llm_provider(cp)}"
+                    model_label = cm
+                else:
+                    src = "Local"
+                    model_label = local_model or '—'
+                return f"{slot}: {model_label} · {persona_disp} ({src})"
+
+            line_a = _slot_line("A", a, pa_disp, prov_a, cloud_opt_a)
+            line_b = _slot_line("B", b, pb_disp, prov_b, cloud_opt_b)
             if cat_a:
                 line_a = f"{line_a} ({cat_a})"
             if cat_b:
