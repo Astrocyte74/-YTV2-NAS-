@@ -1841,27 +1841,39 @@ class YouTubeTelegramBot:
                 else:
                     session['cloud_model_options'] = opts
                     self.ollama_sessions[chat_id] = session
-                    # Build a composite keyboard: keep top rows (mode + provider toggles), replace model rows with cloud options
+                    # Build a composite keyboard by replacing only the model grid for the selected slot
                     base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
                     base_rows = list(base_kb.inline_keyboard or [])
-                    mode = session.get('mode') or 'ai-human'
-                    top_count = 2 if mode == 'ai-human' else 3
-                    new_rows: List[List[InlineKeyboardButton]] = base_rows[:top_count]
-                    # Cloud option rows (2 per row)
-                    row: List[InlineKeyboardButton] = []
-                    for i, opt in enumerate(opts[:12]):
-                        label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                        if len(label) > 28:
-                            label = f"{label[:25]}…"
-                        row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{scope}:{i}"))
-                        if len(row) == 2:
+                    header_text = f"Model {scope}:"
+                    # Locate header for target slot and the next slot header (to delimit the model grid slice)
+                    hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == header_text), None)
+                    if hdr_idx is None:
+                        # Fallback: replace after top rows
+                        new_rows = base_rows[:]
+                    else:
+                        view_idx = hdr_idx + 1 if hdr_idx + 1 < len(base_rows) else hdr_idx
+                        # Next header for the other slot
+                        next_hdr_text = "Model B:" if scope == 'A' else None
+                        next_hdr_idx = None
+                        if next_hdr_text:
+                            next_hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == next_hdr_text), None)
+                        start = min(view_idx + 1, len(base_rows))
+                        end = next_hdr_idx if next_hdr_idx is not None else len(base_rows)
+                        new_rows = base_rows[:start]
+                        # Insert cloud options (2 per row)
+                        row: List[InlineKeyboardButton] = []
+                        for i, opt in enumerate(opts[:12]):
+                            label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
+                            if len(label) > 28:
+                                label = f"{label[:25]}…"
+                            row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{scope}:{i}"))
+                            if len(row) == 2:
+                                new_rows.append(row)
+                                row = []
+                        if row:
                             new_rows.append(row)
-                            row = []
-                    if row:
-                        new_rows.append(row)
-                    # Back returns to the main models grid
-                    page = int(session.get('page') or 0)
-                    new_rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"ollama_more:{page}")])
+                        # Append the remainder (keeping persona rows and the other slot intact)
+                        new_rows.extend(base_rows[end:])
                     try:
                         await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
                     except Exception:
@@ -1886,25 +1898,34 @@ class YouTubeTelegramBot:
                 return
             session['cloud_model_options'] = opts
             self.ollama_sessions[chat_id] = session
-            # Composite keyboard for cloud selection
-            base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+            # Composite keyboard: replace only grid for target scope
+            base_kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page') or 0, session=session)
             base_rows = list(base_kb.inline_keyboard or [])
-            mode = session.get('mode') or 'ai-human'
-            top_count = 2 if mode == 'ai-human' else 3
-            new_rows: List[List[InlineKeyboardButton]] = base_rows[:top_count]
-            row: List[InlineKeyboardButton] = []
-            for i, opt in enumerate(opts[:12]):
-                label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                if len(label) > 28:
-                    label = f"{label[:25]}…"
-                row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{which}:{i}"))
-                if len(row) == 2:
+            header_text = f"Model {which}:"
+            hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == header_text), None)
+            if hdr_idx is None:
+                new_rows = base_rows[:]
+            else:
+                view_idx = hdr_idx + 1 if hdr_idx + 1 < len(base_rows) else hdr_idx
+                next_hdr_text = "Model B:" if which == 'A' else None
+                next_hdr_idx = None
+                if next_hdr_text:
+                    next_hdr_idx = next((i for i, r in enumerate(base_rows) if r and getattr(r[0], 'text', '') == next_hdr_text), None)
+                start = min(view_idx + 1, len(base_rows))
+                end = next_hdr_idx if next_hdr_idx is not None else len(base_rows)
+                new_rows = base_rows[:start]
+                row: List[InlineKeyboardButton] = []
+                for i, opt in enumerate(opts[:12]):
+                    label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
+                    if len(label) > 28:
+                        label = f"{label[:25]}…"
+                    row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:{which}:{i}"))
+                    if len(row) == 2:
+                        new_rows.append(row)
+                        row = []
+                if row:
                     new_rows.append(row)
-                    row = []
-            if row:
-                new_rows.append(row)
-            page = int(session.get('page') or 0)
-            new_rows.append([InlineKeyboardButton("❌ Cancel", callback_data=f"ollama_more:{page}")])
+                new_rows.extend(base_rows[end:])
             try:
                 await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(new_rows))
             except Exception:
