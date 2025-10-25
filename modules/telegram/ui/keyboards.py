@@ -246,8 +246,8 @@ def build_ollama_models_keyboard(
                 row: List[InlineKeyboardButton] = []
                 for i, opt in enumerate(cloud_opts[:page_size*2]):  # show up to two rows by default
                     base_label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                    if len(base_label) > 28:
-                        base_label = f"{base_label[:25]}…"
+                    if len(base_label) > 24:
+                        base_label = f"{base_label[:22]}…"
                     ok = (opt.get('provider'), opt.get('model')) == sel_key
                     label = f"✅ {base_label}" if ok else base_label
                     row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:A:{i}"))
@@ -302,8 +302,8 @@ def build_ollama_models_keyboard(
                 row: List[InlineKeyboardButton] = []
                 for i, opt in enumerate(cloud_opts_b[:page_size*2]):
                     base_label = opt.get('button_label') or opt.get('label') or f"{opt.get('provider')}/{opt.get('model')}"
-                    if len(base_label) > 28:
-                        base_label = f"{base_label[:25]}…"
+                    if len(base_label) > 24:
+                        base_label = f"{base_label[:22]}…"
                     ok = (opt.get('provider'), opt.get('model')) == sel_key_b
                     label = f"✅ {base_label}" if ok else base_label
                     row.append(InlineKeyboardButton(label, callback_data=f"ollama_cloud_model:B:{i}"))

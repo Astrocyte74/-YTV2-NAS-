@@ -285,7 +285,6 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
         InlineKeyboardButton(f"{mark_fav} Favorites", callback_data="tts_mode:favorites"),
         InlineKeyboardButton(f"{mark_all} All", callback_data="tts_mode:all"),
     ])
-    rows.append([InlineKeyboardButton("↻ Refresh", callback_data="tts_refresh")])
 
     if len(engine_keys) > 1:
         remaining_engines = [eng for eng in engine_keys if eng != '__all__']
@@ -471,7 +470,8 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
     if quick_buttons:
         rows.append(quick_buttons)
     rows.extend(grouped)
-
+    # Place Refresh near the bottom for convenience
+    rows.append([InlineKeyboardButton("↻ Refresh", callback_data="tts_refresh")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
     return InlineKeyboardMarkup(rows)
 
