@@ -1400,7 +1400,6 @@ class YouTubeTelegramBot:
         return ai2ai_persona_list_rows(slot, session or {}, page_size, categories, self._persona_parse)
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
-        line = "--------------------------------------------------------------------------"
         # Determine mode
         a = session.get('ai2ai_model_a')
         b = session.get('ai2ai_model_b')
@@ -1408,8 +1407,7 @@ class YouTubeTelegramBot:
         mode_key = session.get('mode') or ('ai-ai' if (a and b) else 'ai-human')
         mode_label = 'AI↔AI' if mode_key == 'ai-ai' else 'AI→Human'
         parts = [
-            line,
-            f"🤖 Ollama Chat · Mode: {mode_label} · Streaming: ON",
+            f"🤖 Chat · Mode: {mode_label} · Streaming: On",
         ]
         if a and b:
             if not (session.get('persona_a') and session.get('persona_b')):
@@ -1474,10 +1472,9 @@ class YouTubeTelegramBot:
                 if cat_single:
                     persona_line = f"{persona_line} ({cat_single})"
                 parts.append(persona_line)
-        parts.append(line)
         if mode_key == 'ai-ai':
             if a and b:
-                parts.append("Type a prompt to begin the AI↔AI exchange. Use Options to adjust turns.")
+                parts.append("Type a prompt to start. Options adjusts turns.")
             else:
                 parts.append("Select models A and B below to enable AI↔AI chat.")
         else:
@@ -1577,7 +1574,7 @@ class YouTubeTelegramBot:
         turn_idx = (session.get("ai2ai_round") or 0) + 1
         coro = self._ollama_ai2ai_continue(chat_id, turn_number=turn_idx, total_turns=turn_total if isinstance(turn_total, int) and turn_total > 0 else None)
         if not self._ollama_start_ai2ai_task(chat_id, coro):
-            await update.message.reply_text("⚠️ AI↔AI exchange already running. Try again after the current turn or use /stop.")
+            await update.message.reply_text("⚠️ AI↔AI already running. Wait for this turn or use /stop.")
             return
         await update.message.reply_text("💬 New AI↔AI turn coming up…")
 

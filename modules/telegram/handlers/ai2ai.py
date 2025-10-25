@@ -119,7 +119,7 @@ async def run(handler, chat_id: int, turns: int) -> None:
     ])
     await handler.application.bot.send_message(
         chat_id=chat_id,
-        text="✅ AI↔AI session complete. Choose Continue to keep the exchange going, or Options to adjust turns.",
+        text="✅ Session complete. Continue to keep going, or use Options to adjust turns.",
         reply_markup=kb,
     )
 
@@ -454,7 +454,7 @@ async def handle_callback(
             handler.ollama_sessions[chat_id] = session
             await query.answer("AI↔AI started")
             try:
-                await query.edit_message_text("🤖 AI↔AI mode active. Use Options → Continue exchange to generate turns.")
+                await query.edit_message_text("🤖 AI↔AI active. Options → Continue to run turns.")
             except Exception:
                 pass
             if render_options is not None:
