@@ -1,3 +1,5 @@
+# Persona Metadata Spec v2
+
 Here’s the Unified Spec v2 you can drop into your repo as
 docs/Persona_Metadata_Spec_v2.md.
 It merges your original behavioural memo and Codex CLI’s engineering plan so you have one authoritative document.

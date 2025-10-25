@@ -79,7 +79,7 @@
 
 Use these commands to verify your TTS hub favorites and synth endpoints.
 
-Setup (pick your hub)
+### Setup
 
 ```bash
 export HUB=http://10.0.4.2:7860
@@ -88,7 +88,7 @@ export API=$HUB/api
 # export TTSHUB_API_KEY=your_key
 ```
 
-List favorites (shape and fields)
+### List favorites
 
 ```bash
 curl -sS ${API}/favorites | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
@@ -97,13 +97,13 @@ curl -sS "${API}/favorites?tag=ai2ai" | jq '.profiles[] | {label,engine,voiceId,
 curl -sS "${API}/favorites?engine=kokoro" | jq '.profiles[] | {label,engine,voiceId,slug,id,tags}'
 ```
 
-Single favorite
+### Single favorite
 
 ```bash
 curl -sS "${API}/favorites/<favorite_id>" | jq
 ```
 
-Call formats (two valid bodies)
+### Call formats
 
 ```bash
 # By favorite (recommended)
@@ -115,7 +115,7 @@ Call formats (two valid bodies)
 {"text":"Hello","engine":"kokoro","voice":"af_heart"}
 ```
 
-Synthesize examples
+### Synthesize examples
 
 ```bash
 # By slug (JSON back)
@@ -134,7 +134,7 @@ curl -sS -X POST "${API}/synthesise" \
   -d '{"text":"Hello","engine":"kokoro","voice":"af_heart"}' | jq
 ```
 
-Download the returned audio
+### Download the audio
 
 ```bash
 resp=$(curl -sS -X POST "${API}/synthesise" -H 'Content-Type: application/json' -d '{"text":"Hello","favoriteSlug":"favorite--af-heart"}')
@@ -142,7 +142,7 @@ u=$(printf %s "$resp" | jq -r '.url // .path // .filename // .file')
 curl -sS "${HUB}${u#/}" -o out.wav && echo "Saved: out.wav"
 ```
 
-Notes
+### Notes
 
 - Favorites JSON includes: `label`, `engine`, `voiceId`, `slug`, `id`, `tags`, `notes`.
 - If the hub enforces auth on favorites, add the header to favorites/CRUD calls:
