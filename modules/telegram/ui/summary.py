@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import urllib.parse
@@ -76,3 +76,40 @@ def existing_variants_message(
     lines.extend(f"• {friendly_variant_label(variant, variant_labels)}" for variant in variants_sorted)
     lines.append("\nRe-run a variant below or open the summary card.")
     return "\n".join(lines)
+
+
+def build_summary_provider_keyboard(
+    cloud_label: str,
+    *,
+    local_label: Optional[str] = None,
+) -> InlineKeyboardMarkup:
+    """Render provider selection keyboard for summary generation."""
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(cloud_label, callback_data="summary_provider:cloud")],
+    ]
+    if local_label:
+        rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+    return InlineKeyboardMarkup(rows)
+
+
+def build_summary_model_keyboard(
+    provider_key: str,
+    model_options: List[Dict[str, Any]],
+    *,
+    per_row: int = 2,
+) -> InlineKeyboardMarkup:
+    """Render model selection keyboard for the chosen provider."""
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for idx, option in enumerate(model_options):
+        label = option.get("button_label") or option.get("label") or f"Model {idx + 1}"
+        callback = f"summary_model:{provider_key}:{idx}"
+        row.append(InlineKeyboardButton(label, callback_data=callback))
+        if len(row) == per_row:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summary_model:back")])
+    return InlineKeyboardMarkup(rows)

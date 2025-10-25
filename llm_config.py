@@ -42,6 +42,18 @@ class LLMConfig:
             "primary": [("openrouter", "moonshotai/kimi-k2"), ("openrouter", "z-ai/glm-4.5"), ("openrouter", "qwen/qwen3-coder")],
             "fallback": [("openrouter", "anthropic/claude-3-5-sonnet-20241022"), ("openrouter", "openai/gpt-4o")]
         },
+        # User-preferred OpenRouter defaults
+        "openrouter_defaults": {
+            # Models requested to appear first in the Cloud picker
+            "primary": [
+                ("openrouter", "google/gemini-2.5-flash-lite"),
+                ("openrouter", "x-ai/grok-4-fast"),
+                ("openrouter", "openai/gpt-5-mini"),
+                ("openrouter", "openai/gpt-5-nano"),
+            ],
+            # Safe fallbacks that commonly exist on OpenRouter
+            "fallback": [],
+        },
         "local": {
             "primary": [("ollama", "gpt-oss:20b"), ("ollama", "gemma3:12b"), ("ollama", "qwen2.5-coder:7b")],
             "fallback": [("ollama", "phi3:latest"), ("ollama", "llama3.2:3b")]

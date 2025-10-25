@@ -448,6 +448,27 @@ def build_tts_catalog_keyboard(session: Dict[str, Any]) -> InlineKeyboardMarkup:
             row = []
     if row:
         grouped.append(row)
+    # Optional quick-pick favorites (up to 2) at the top
+    quick_list = []
+    q_any = session.get('quick_favorite_slugs')
+    if isinstance(q_any, list):
+        quick_list = [str(x).strip() for x in q_any if str(x).strip()]
+    else:
+        # Backward compatibility for single slug
+        quick_slug = (session.get('quick_favorite_slug') or '').strip()
+        if quick_slug:
+            quick_list = [quick_slug]
+
+    quick_buttons: List[InlineKeyboardButton] = []
+    for slug in quick_list[:2]:
+        entry = voice_lookup.get(slug)
+        if not entry:
+            continue
+        label = entry.get('display_label') or entry.get('button_label') or entry.get('label') or 'favorite'
+        quick_label = label if len(label) <= 28 else f"{label[:25]}…"
+        quick_buttons.append(InlineKeyboardButton(f"🎤 Quick • {quick_label}", callback_data=f"tts_voice:{slug}"))
+    if quick_buttons:
+        rows.append(quick_buttons)
     rows.extend(grouped)
 
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])

@@ -58,6 +58,8 @@ from modules.telegram.ui.summary import (
     build_summary_keyboard as ui_build_summary_keyboard,
     existing_variants_message as ui_existing_variants_message,
     friendly_variant_label as ui_friendly_variant_label,
+    build_summary_provider_keyboard as ui_build_summary_provider_keyboard,
+    build_summary_model_keyboard as ui_build_summary_model_keyboard,
 )
 from modules.telegram.ui.tts import (
     build_local_failure_keyboard as ui_build_local_failure_keyboard,
@@ -75,6 +77,8 @@ from modules.ollama_client import (
     pull as ollama_pull,
 )
 from modules.services import ollama_service, summary_service, tts_service
+from modules.services import cloud_service
+from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
 import hashlib
 from pydub import AudioSegment
 
@@ -116,8 +120,22 @@ class YouTubeTelegramBot:
         self.tts_client: Optional[TTSHubClient] = None
         # Interactive TTS sessions keyed by (chat_id, message_id)
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Interactive summary sessions keyed by (chat_id, message_id)
+        self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Cache of instantiated summarizers keyed by provider/model
+        self.summarizer_cache: Dict[str, YouTubeSummarizer] = {}
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
+        
+        # Persisted user preferences (e.g., last-used cloud/local models for quick picks)
+        self.user_prefs_path = Path("./data/user_prefs.json")
+        self.user_prefs: Dict[str, Any] = {}
+        try:
+            self.user_prefs_path.parent.mkdir(parents=True, exist_ok=True)
+            if self.user_prefs_path.exists():
+                self.user_prefs = json.loads(self.user_prefs_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            self.user_prefs = {}
         
         # YouTube URL regex pattern
         self.youtube_url_pattern = re.compile(
@@ -140,6 +158,7 @@ class YouTubeTelegramBot:
         try:
             llm_config.load_environment()
             self.summarizer = YouTubeSummarizer()
+            self._cache_summarizer_instance(self.summarizer)
             logging.info(f"✅ YouTube summarizer initialized with {self.summarizer.llm_provider}/{self.summarizer.model}")
         except Exception as e:
             logging.error(f"Failed to initialize YouTubeSummarizer: {e}")
@@ -569,6 +588,15 @@ class YouTubeTelegramBot:
         # Check for YouTube links first (primary flow)
         youtube_match = self.youtube_url_pattern.search(message_text)
         if youtube_match:
+            # OFF switch: allow disabling YouTube handling via env (e.g., cooldown for 429s)
+            yt_access_raw = os.getenv("YOUTUBE_ACCESS", "true").strip().lower()
+            yt_enabled = yt_access_raw in ("1", "true", "yes", "on")
+            if not yt_enabled:
+                await update.message.reply_text(
+                    "⏸️ YouTube summaries are temporarily paused.\n"
+                    "Please try again later, or send a Reddit or web article link in the meantime."
+                )
+                return
             video_url = self._extract_youtube_url(message_text)
             if not video_url:
                 await update.message.reply_text("❌ Could not extract a valid YouTube URL from your message.")
@@ -660,6 +688,465 @@ class YouTubeTelegramBot:
             "• Any https:// link (except YouTube/Reddit)"
         )
 
+    # ------------------------- Summary provider helpers -------------------------
+
+    def _summary_session_key(self, chat_id: int, message_id: int) -> tuple:
+        return (chat_id, message_id)
+
+    def _store_summary_session(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
+        self.summary_sessions[self._summary_session_key(chat_id, message_id)] = payload
+
+    def _get_summary_session(self, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        return self.summary_sessions.get(self._summary_session_key(chat_id, message_id))
+
+    def _remove_summary_session(self, chat_id: int, message_id: int) -> None:
+        self.summary_sessions.pop(self._summary_session_key(chat_id, message_id), None)
+
+    def _summarizer_cache_key(self, provider: Optional[str], model: Optional[str]) -> str:
+        provider_key = (provider or "unknown").strip().lower()
+        model_key = (model or "").strip()
+        return f"{provider_key}::{model_key}"
+
+    def _cache_summarizer_instance(self, summarizer: Optional[YouTubeSummarizer]) -> None:
+        if not summarizer:
+            return
+        key = self._summarizer_cache_key(
+            getattr(summarizer, "llm_provider", None),
+            getattr(summarizer, "model", None),
+        )
+        self.summarizer_cache[key] = summarizer
+
+    def _cached_ollama_summarizer(self) -> Optional[YouTubeSummarizer]:
+        for cached in self.summarizer_cache.values():
+            if getattr(cached, "llm_provider", "").lower() == "ollama":
+                return cached
+        return None
+
+    # ------------------------- Quick pick helpers -------------------------
+    def _save_user_prefs(self) -> None:
+        try:
+            self.user_prefs_path.write_text(json.dumps(self.user_prefs, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _remember_last_model(self, user_id: int, provider_key: str, model_slug: Optional[str]) -> None:
+        if not model_slug:
+            return
+        uid = str(user_id)
+        prefs = self.user_prefs.get(uid) or {}
+        if provider_key == "ollama":
+            prefs["last_local_model"] = model_slug
+        else:
+            prefs["last_cloud_model"] = model_slug
+        self.user_prefs[uid] = prefs
+        self._save_user_prefs()
+
+    def _short_model_name(self, model: Optional[str]) -> str:
+        if not model:
+            return ""
+        return model.split("/", 1)[1] if "/" in model else model
+
+    def _quick_pick_candidates(self, provider_options: Dict[str, Dict[str, Any]], user_id: int) -> Dict[str, Optional[str]]:
+        mode = (os.getenv("QUICK_PICK_MODE") or "auto").strip().lower()
+        env_cloud = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+        env_local = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+
+        uid = str(user_id)
+        last = self.user_prefs.get(uid) or {}
+        last_cloud = (last.get("last_cloud_model") or "").strip()
+        last_local = (last.get("last_local_model") or "").strip()
+
+        def first_slug(key: str) -> Optional[str]:
+            opt = provider_options.get(key) or {}
+            models = opt.get("models") or []
+            if not models:
+                return None
+            return (models[0].get("model") or "").strip() or None
+
+        pick_cloud: Optional[str] = None
+        pick_local: Optional[str] = None
+
+        if provider_options.get("cloud"):
+            if mode == "env" and env_cloud:
+                pick_cloud = env_cloud
+            elif mode == "last" and last_cloud:
+                pick_cloud = last_cloud
+            else:  # auto or fallback
+                pick_cloud = env_cloud or last_cloud or first_slug("cloud")
+
+        if provider_options.get("ollama"):
+            if mode == "env" and env_local:
+                pick_local = env_local
+            elif mode == "last" and last_local:
+                pick_local = last_local
+            else:  # auto or fallback
+                pick_local = env_local or last_local or first_slug("ollama")
+
+        return {"cloud": pick_cloud, "ollama": pick_local}
+
+    # ------------------------- TTS quick pick memory -------------------------
+    def _remember_last_tts_voice(self, user_id: int, alias_slug: Optional[str]) -> None:
+        if not alias_slug:
+            return
+        uid = str(user_id)
+        prefs = self.user_prefs.get(uid) or {}
+        # Maintain recent list (most-recent first, unique, capped)
+        recent: List[str] = list(prefs.get("recent_tts_favorites") or [])
+        alias_slug = str(alias_slug).strip()
+        recent = [s for s in recent if s != alias_slug]
+        recent.insert(0, alias_slug)
+        prefs["recent_tts_favorites"] = recent[:5]
+        # Keep single last for compatibility
+        prefs["last_tts_favorite"] = alias_slug
+        self.user_prefs[uid] = prefs
+        self._save_user_prefs()
+
+    def _last_tts_voice(self, user_id: int) -> Optional[str]:
+        prefs = self.user_prefs.get(str(user_id)) or {}
+        slug = (prefs.get("last_tts_favorite") or "").strip()
+        return slug or None
+
+    def _last_tts_voices(self, user_id: int, n: int = 2) -> List[str]:
+        prefs = self.user_prefs.get(str(user_id)) or {}
+        recent = prefs.get("recent_tts_favorites") or []
+        # Fallback to single last if list empty
+        if not recent:
+            last = (prefs.get("last_tts_favorite") or "").strip()
+            return [last] if last else []
+        return [str(s).strip() for s in recent if str(s).strip()][:n]
+
+    def _build_provider_with_quick_keyboard(
+        self,
+        cloud_label: str,
+        local_label: Optional[str],
+        quick_cloud_slug: Optional[str],
+        quick_local_slug: Optional[str],
+    ) -> InlineKeyboardMarkup:
+        rows: List[List[InlineKeyboardButton]] = []
+        if quick_cloud_slug:
+            rows.append([
+                InlineKeyboardButton(
+                    f"☁️ API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
+                    callback_data=f"summary_quick:cloud:{quick_cloud_slug}",
+                )
+            ])
+        if quick_local_slug:
+            rows.append([
+                InlineKeyboardButton(
+                    f"🏠 Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
+                    callback_data=f"summary_quick:ollama:{quick_local_slug}",
+                )
+            ])
+        rows.append([InlineKeyboardButton(cloud_label, callback_data="summary_provider:cloud")])
+        if local_label:
+            rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+        return InlineKeyboardMarkup(rows)
+
+    def _friendly_llm_provider(self, provider: Optional[str]) -> str:
+        mapping = {
+            "openai": "OpenAI",
+            "anthropic": "Anthropic",
+            "openrouter": "OpenRouter",
+            "ollama": "Ollama",
+        }
+        if not provider:
+            return "LLM"
+        return mapping.get(provider.lower(), provider.title())
+
+    @staticmethod
+    def _short_label(text: str, limit: int = 48) -> str:
+        if not isinstance(text, str):
+            return ""
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1].rstrip() + "…"
+
+    def _cloud_model_options(self, base_provider: Optional[str], base_model: Optional[str]) -> List[Dict[str, Any]]:
+        options: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
+        def add_option(provider: Optional[str], model: Optional[str]) -> None:
+            try:
+                resolved_provider, resolved_model, api_key = llm_config.get_model_config(provider, model)
+            except ValueError:
+                return
+            if resolved_provider == "ollama":
+                return
+            if resolved_provider in ("openai", "anthropic", "openrouter") and not api_key:
+                return
+            key = self._summarizer_cache_key(resolved_provider, resolved_model)
+            if key in seen:
+                return
+            seen.add(key)
+            provider_name = self._friendly_llm_provider(resolved_provider)
+            # Prefer an abbreviated model label in buttons (e.g., show just `gpt-5-mini` for `openai/gpt-5-mini`)
+            short_model = None
+            if isinstance(resolved_model, str) and "/" in resolved_model:
+                short_model = resolved_model.split("/", 1)[1]
+            elif isinstance(resolved_model, str):
+                short_model = resolved_model
+
+            label_model = short_model or resolved_model
+            label_core = provider_name if not label_model else f"{provider_name} • {label_model}"
+            display_provider = self._friendly_llm_provider(resolved_provider)
+            button_text = f"☁️ {display_provider}"
+            if label_model:
+                button_text = f"{button_text} • {self._short_label(label_model, 24)}"
+            options.append(
+                {
+                    "provider": resolved_provider,
+                    "model": resolved_model,
+                    "label": label_core,
+                    "button_label": button_text,
+                }
+            )
+
+        add_option(base_provider, base_model)
+
+        explicit_model = getattr(llm_config, "llm_model", None)
+        if explicit_model:
+            try:
+                resolved_provider, resolved_model, _ = llm_config.get_model_config(None, explicit_model)
+                add_option(resolved_provider, resolved_model)
+            except ValueError:
+                pass
+
+        shortlist_name = getattr(llm_config, "llm_shortlist", None)
+        shortlist = llm_config.SHORTLISTS.get(shortlist_name, {}) if shortlist_name else {}
+        for provider, model in shortlist.get("primary", []):
+            add_option(provider, model)
+        for provider, model in shortlist.get("fallback", []):
+            add_option(provider, model)
+
+        return options[:6]
+
+    def _ollama_model_options(self) -> List[Dict[str, Any]]:
+        models: List[str] = []
+        try:
+            raw = ollama_get_models()
+            models = self._ollama_models_list(raw)
+        except Exception as exc:
+            logging.debug(f"Ollama model list unavailable: {exc}")
+
+        preferred = os.getenv("OLLAMA_SUMMARY_MODEL")
+        cached = self._cached_ollama_summarizer()
+        cached_model = getattr(cached, "model", None) if cached else None
+
+        ordered: List[str] = []
+        for candidate in (cached_model, preferred):
+            if candidate and candidate not in ordered:
+                ordered.append(candidate)
+        for model in models:
+            if model and model not in ordered:
+                ordered.append(model)
+
+        options: List[Dict[str, Any]] = []
+        for model in ordered[:8]:
+            if not model:
+                continue
+            options.append(
+                {
+                    "provider": "ollama",
+                    "model": model,
+                    "label": f"Ollama • {model}",
+                    "button_label": f"🏠 {self._short_label(model, 32)}",
+                }
+            )
+        return options
+
+
+    def _summary_provider_options(self) -> Dict[str, Dict[str, Any]]:
+        options: Dict[str, Dict[str, Any]] = {}
+        base_summarizer = self.summarizer
+        if not base_summarizer:
+            try:
+                base_summarizer = YouTubeSummarizer()
+                self.summarizer = base_summarizer
+                self._cache_summarizer_instance(base_summarizer)
+            except Exception as exc:
+                logging.error(f"Failed to initialize default summarizer: {exc}")
+                return options
+        provider = getattr(base_summarizer, "llm_provider", "")
+        model = getattr(base_summarizer, "model", None)
+
+        cloud_models = self._cloud_model_options(provider, model)
+        if cloud_models:
+            default_option = cloud_models[0]
+            default_label = "API / Cloud"
+            button_text = "☁️ API / Cloud"
+            options["cloud"] = {
+                "label": default_label,
+                "button_label": button_text,
+                "models": cloud_models,
+            }
+
+        local_models = self._ollama_model_options()
+        if local_models:
+            default_option = local_models[0]
+            default_label = "Ollama (Local)"
+            button_text = "🏠 Ollama (Local)"
+            options["ollama"] = {
+                "label": default_label,
+                "button_label": button_text,
+                "models": local_models,
+            }
+        return options
+
+    def _get_summary_summarizer(self, provider: str, model: Optional[str] = None) -> YouTubeSummarizer:
+        provider_key = (provider or "").strip().lower()
+        model_key = (model or "").strip()
+        if (
+            self.summarizer
+            and getattr(self.summarizer, "llm_provider", "").lower() == provider_key
+            and (not model_key or getattr(self.summarizer, "model", None) == model_key)
+        ):
+            return self.summarizer
+        cache_key = self._summarizer_cache_key(provider_key, model_key)
+        cached = self.summarizer_cache.get(cache_key)
+        if cached:
+            return cached
+        kwargs = {"llm_provider": provider_key}
+        if model_key:
+            kwargs["model"] = model_key
+        summarizer = YouTubeSummarizer(**kwargs)
+        if not self.summarizer and provider_key != "ollama":
+            self.summarizer = summarizer
+        self._cache_summarizer_instance(summarizer)
+        return summarizer
+
+    async def _handle_summary_provider_callback(self, query, provider_key: str) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_summary_session(chat_id, message_id)
+        if not session:
+            await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+            await self._show_main_summary_options(query)
+            return
+
+        provider_options: Dict[str, Dict[str, Any]] = session.get("provider_options") or {}
+        option = provider_options.get(provider_key)
+        if not option:
+            self._remove_summary_session(chat_id, message_id)
+            await query.answer("That option is no longer available.", show_alert=True)
+            await self._show_main_summary_options(query)
+            return
+
+        model_options = option.get("models") or []
+        if not model_options:
+            self._remove_summary_session(chat_id, message_id)
+            await query.edit_message_text("❌ No models available for this provider.")
+            return
+
+        if len(model_options) > 1:
+            session["selected_provider"] = provider_key
+            session["model_options"] = model_options
+            self._store_summary_session(chat_id, message_id, session)
+            provider_label = option.get("label") or provider_key.title()
+            per_row = 1 if provider_key == "cloud" else 2
+            keyboard = ui_build_summary_model_keyboard(provider_key, model_options, per_row=per_row)
+            await query.edit_message_text(
+                f"⚙️ Choose a model for {provider_label}",
+                reply_markup=keyboard,
+            )
+            return
+
+        selected_model = model_options[0]
+        await self._execute_summary_with_model(query, session, provider_key, selected_model)
+
+    async def _execute_summary_with_model(
+        self,
+        query,
+        session: Dict[str, Any],
+        provider_key: str,
+        model_option: Dict[str, Any],
+    ) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        try:
+            summarizer = self._get_summary_summarizer(model_option.get("provider"), model_option.get("model"))
+            # Persist last-used choice for quick picks
+            try:
+                user_id = query.from_user.id
+                self._remember_last_model(user_id, provider_key, model_option.get("model"))
+            except Exception:
+                pass
+        except Exception as exc:
+            logging.error(f"Summary provider init failed: {exc}")
+            self._remove_summary_session(chat_id, message_id)
+            await query.edit_message_text("❌ Failed to initialize the selected summarizer. Please try again later.")
+            return
+
+        summary_type = session.get("summary_type")
+        user_name = session.get("user_name") or "Unknown"
+        proficiency_level = session.get("proficiency_level")
+        provider_label = model_option.get("label")
+
+        self._remove_summary_session(chat_id, message_id)
+
+        if not summary_type:
+            await self._show_main_summary_options(query)
+            return
+
+        await self._process_content_summary(
+            query,
+            summary_type,
+            user_name,
+            proficiency_level,
+            provider_key=provider_key,
+            summarizer=summarizer,
+            provider_label=provider_label,
+        )
+
+    async def _handle_summary_model_callback(self, query, provider_key: str, index: int) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_summary_session(chat_id, message_id)
+        if not session:
+            await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+            await self._show_main_summary_options(query)
+            return
+
+        if session.get("selected_provider") != provider_key:
+            await query.answer("Please choose a provider first.", show_alert=True)
+            return
+
+        model_options = session.get("model_options") or []
+        if not (0 <= index < len(model_options)):
+            await query.answer("Invalid model selection.", show_alert=True)
+            return
+
+        selected_model = model_options[index]
+        await self._execute_summary_with_model(query, session, provider_key, selected_model)
+
+    async def _handle_summary_model_back(self, query) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_summary_session(chat_id, message_id)
+        if not session:
+            await self._show_main_summary_options(query)
+            return
+
+        provider_options: Dict[str, Dict[str, Any]] = session.get("provider_options") or {}
+        if len(provider_options) <= 1:
+            self._remove_summary_session(chat_id, message_id)
+            await self._show_main_summary_options(query)
+            return
+
+        session.pop("selected_provider", None)
+        session.pop("model_options", None)
+        self._store_summary_session(chat_id, message_id, session)
+
+        cloud_button = (provider_options.get("cloud") or {}).get("button_label") or "☁️ Cloud"
+        local_button = (provider_options.get("ollama") or {}).get("button_label")
+        summary_type = session.get("summary_type") or "comprehensive"
+        summary_label = self._friendly_variant_label(summary_type)
+        keyboard = ui_build_summary_provider_keyboard(cloud_button, local_label=local_button)
+        await query.edit_message_text(
+            f"⚙️ Choose summarization engine for {summary_label}",
+            reply_markup=keyboard,
+        )
+
     # ------------------------- Ollama chat integration -------------------------
     def _ollama_models_list(self, raw: Dict[str, Any]) -> List[str]:
         models = []
@@ -676,7 +1163,7 @@ class YouTubeTelegramBot:
         allow_same = os.getenv('OLLAMA_AI2AI_ALLOW_SAME', '0').lower() in ('1', 'true', 'yes')
         categories = self._ollama_persona_categories()
         sess = session if session is not None else {}
-        return ui_build_models_keyboard(
+        kb = ui_build_models_keyboard(
             models=models,
             page=page,
             page_size=page_size,
@@ -686,6 +1173,37 @@ class YouTubeTelegramBot:
             ai2ai_default_models=self._ollama_ai2ai_default_models,
             allow_same_models=allow_same,
         )
+        # Insert provider toggle rows (Local vs Cloud) to enable Cloud chat in /o
+        try:
+            rows = list(kb.inline_keyboard or [])
+            mode = sess.get('mode') or ('ai-ai' if (sess.get('ai2ai_model_a') and sess.get('ai2ai_model_b')) else 'ai-human')
+            if mode == 'ai-human':
+                prov = (sess.get('provider') or 'ollama')
+                mark_local = '✅' if prov != 'cloud' else '⬜'
+                mark_cloud = '✅' if prov == 'cloud' else '⬜'
+                rows.insert(1, [
+                    InlineKeyboardButton(f"{mark_local} Local", callback_data="ollama_provider:single:local"),
+                    InlineKeyboardButton(f"{mark_cloud} Cloud", callback_data="ollama_provider:single:cloud"),
+                ])
+            else:
+                prov_a = (sess.get('ai2ai_provider_a') or 'ollama')
+                prov_b = (sess.get('ai2ai_provider_b') or 'ollama')
+                mark_la = '✅' if prov_a != 'cloud' else '⬜'
+                mark_ca = '✅' if prov_a == 'cloud' else '⬜'
+                mark_lb = '✅' if prov_b != 'cloud' else '⬜'
+                mark_cb = '✅' if prov_b == 'cloud' else '⬜'
+                rows.insert(1, [
+                    InlineKeyboardButton(f"A: {mark_la} Local", callback_data="ollama_provider:A:local"),
+                    InlineKeyboardButton(f"A: {mark_ca} Cloud", callback_data="ollama_provider:A:cloud"),
+                ])
+                rows.insert(2, [
+                    InlineKeyboardButton(f"B: {mark_lb} Local", callback_data="ollama_provider:B:local"),
+                    InlineKeyboardButton(f"B: {mark_cb} Cloud", callback_data="ollama_provider:B:cloud"),
+                ])
+            kb = InlineKeyboardMarkup(rows)
+        except Exception:
+            pass
+        return kb
 
     def _ollama_stream_default(self) -> bool:
         val = os.getenv('OLLAMA_STREAM_DEFAULT', '1').lower()
@@ -917,8 +1435,25 @@ class YouTubeTelegramBot:
                 cat_key_b = session.get("ai2ai_persona_category_b")
                 if cat_key_b:
                     cat_b = categories.get(cat_key_b, {}).get("label")
-            line_a = f"A: {a} · {pa_disp}"
-            line_b = f"B: {b} · {pb_disp}"
+            # Source labels for A/B (Local vs Cloud provider)
+            prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+            prov_b = (session.get('ai2ai_provider_b') or 'ollama')
+            cloud_opt_a = session.get('ai2ai_cloud_option_a') or {}
+            cloud_opt_b = session.get('ai2ai_cloud_option_b') or {}
+
+            def _slot_line(slot: str, local_model: Optional[str], persona_disp: str, prov_key: str, cloud_opt: Dict[str, Any]) -> str:
+                if prov_key == 'cloud':
+                    cp = (cloud_opt.get('provider') or getattr(llm_config, 'llm_provider', 'openrouter'))
+                    cm = (cloud_opt.get('model') or getattr(llm_config, 'llm_model', None) or 'Select…')
+                    src = f"Cloud/{self._friendly_llm_provider(cp)}"
+                    model_label = cm
+                else:
+                    src = "Local"
+                    model_label = local_model or '—'
+                return f"{slot}: {model_label} · {persona_disp} ({src})"
+
+            line_a = _slot_line("A", a, pa_disp, prov_a, cloud_opt_a)
+            line_b = _slot_line("B", b, pb_disp, prov_b, cloud_opt_b)
             if cat_a:
                 line_a = f"{line_a} ({cat_a})"
             if cat_b:
@@ -954,12 +1489,15 @@ class YouTubeTelegramBot:
         if not self._is_user_allowed(user_id):
             await update.message.reply_text("❌ You are not authorized to use this bot.")
             return
+        # Preflight: detect hub/offline fast; still allow Cloud chat if hub/down
+        base = os.getenv('TTSHUB_API_BASE')
+        hub_up = bool(base and reach_hub_ok(base))
+        ollama_up = hub_up and reach_hub_ollama_ok(base) if hub_up else False
         try:
-            raw = ollama_get_models()
-            models = self._ollama_models_list(raw)
-            if not models:
-                await update.message.reply_text("⚠️ No models available on the hub.")
-                return
+            models = []
+            if ollama_up:
+                raw = ollama_get_models()
+                models = self._ollama_models_list(raw)
             raw_text = update.message.text or ""
             prompt = ""
             if raw_text:
@@ -984,11 +1522,17 @@ class YouTubeTelegramBot:
             if default_model:
                 sess["model"] = default_model
                 sess["active"] = True
+            if not ollama_up:
+                # Switch to Cloud provider by default when hub is unavailable
+                sess["provider"] = "cloud"
+                sess["active"] = False
             self.ollama_sessions[update.effective_chat.id] = sess
             kb = self._build_ollama_models_keyboard(models, 0, session=sess)
             # Render dynamic status above the picker
             text = self._ollama_status_text(sess)
             await update.message.reply_text(text, reply_markup=kb)
+            if not hub_up:
+                await update.message.reply_text("☁️ Hub offline. Switched to Cloud provider. Open Options → Pick Cloud Model to start.")
             if prompt and sess.get("model"):
                 await self._ollama_handle_user_text(update, sess, prompt)
         except Exception as exc:
@@ -1038,7 +1582,63 @@ class YouTubeTelegramBot:
         await update.message.reply_text("💬 New AI↔AI turn coming up…")
 
     async def _ollama_handle_user_text(self, update: Update, session: Dict[str, Any], text: str):
-        await ollama_service.handle_user_text(self, update, session, text)
+        provider_mode = (session.get('provider') or 'ollama').lower()
+        if provider_mode == 'cloud':
+            await self._cloud_handle_user_text(update, session, text)
+        else:
+            await ollama_service.handle_user_text(self, update, session, text)
+
+    async def _cloud_handle_user_text(self, update: Update, session: Dict[str, Any], text: str) -> None:
+        chat_id = update.effective_chat.id
+        # Resolve provider/model from selection or shortlist
+        opt = session.get('cloud_single_option') or {}
+        provider = opt.get('provider') or getattr(llm_config, 'llm_provider', None) or 'openrouter'
+        model = opt.get('model') or getattr(llm_config, 'llm_model', None)
+        if not model:
+            shortlist = llm_config.SHORTLISTS.get(getattr(llm_config, 'llm_shortlist', 'openrouter_defaults'), {})
+            for p, m in (shortlist.get('primary') or []):
+                if p != 'ollama':
+                    provider, model = p, m
+                    break
+        if not model:
+            await update.message.reply_text("⚠️ No cloud model available. Configure LLM_SHORTLIST/LLM_MODEL.")
+            return
+        messages: List[Dict[str, str]] = []
+        persona_single = session.get("persona_single")
+        if persona_single and session.get("persona_single_custom"):
+            intro_pending = bool(session.get("persona_single_intro_pending"))
+            messages.append({
+                "role": "system",
+                "content": self._ollama_persona_system_prompt(persona_single, "user", intro_pending),
+            })
+        history = list(session.get("history") or [])
+        messages.extend(history)
+        messages.append({"role": "user", "content": text})
+        try:
+            from telegram.constants import ChatAction
+            app = getattr(self, 'application', None)
+            if app and getattr(app, 'bot', None):
+                await app.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            pass
+        try:
+            resp_text = cloud_service.chat(messages, provider=provider, model=model)
+        except Exception as exc:
+            await update.message.reply_text(f"❌ Cloud chat error: {str(exc)[:200]}")
+            return
+        display_text = resp_text
+        if session.get('mode') == 'ai-human':
+            persona_single_name = session.get("persona_single")
+            if persona_single_name:
+                display_text = f"{persona_single_name} ({provider}/{model})\n\n{resp_text}"
+            else:
+                display_text = f"☁️ {provider}/{model}\n\n{resp_text}"
+        await self._send_long_text_reply(update, display_text)
+        trimmed_history = (history + [{"role": "user", "content": text}])
+        session["history"] = (trimmed_history + [{"role": "assistant", "content": resp_text}])[-16:]
+        if session.get("persona_single_custom"):
+            session["persona_single_intro_pending"] = False
+        self.ollama_sessions[chat_id] = session
 
     async def _ollama_stream_chat(
         self,
@@ -1188,8 +1788,18 @@ class YouTubeTelegramBot:
             mark_stream = "✅" if stream else "⬜"
             # AI↔AI scaffolding controls
             ai2ai_active = bool(session.get("ai2ai_active"))
-            ai2ai_model_a = session.get("ai2ai_model_a") or session.get("model") or "—"
-            ai2ai_model_b = session.get("ai2ai_model_b") or session.get("model") or "—"
+            prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+            prov_b = (session.get('ai2ai_provider_b') or 'ollama')
+            cloud_opt_a = session.get('ai2ai_cloud_option_a') or {}
+            cloud_opt_b = session.get('ai2ai_cloud_option_b') or {}
+            def _slot_label(local_model: Optional[str], prov_key: str, cloud_opt: Dict[str, Any]) -> str:
+                if prov_key == 'cloud':
+                    cm = cloud_opt.get('model') or 'Select…'
+                    cp = cloud_opt.get('provider') or getattr(llm_config, 'llm_provider', 'openrouter')
+                    return f"{cm} (Cloud/{self._friendly_llm_provider(cp)})"
+                return local_model or '—'
+            ai2ai_model_a = _slot_label(session.get("ai2ai_model_a"), prov_a, cloud_opt_a)
+            ai2ai_model_b = _slot_label(session.get("ai2ai_model_b"), prov_b, cloud_opt_b)
             ai2ai_row = [InlineKeyboardButton("▶️ Start AI↔AI", callback_data="ollama_ai2ai:start")] if (mode == "ai-ai" and not ai2ai_active) else []
             if mode == "ai-ai" and ai2ai_active:
                 ai2ai_row = [InlineKeyboardButton("⏭️ Continue exchange", callback_data="ollama_ai2ai:continue")]
@@ -1197,6 +1807,33 @@ class YouTubeTelegramBot:
                 [InlineKeyboardButton(f"{mark_ai} AI→Human", callback_data="ollama_mode:ai-human"), InlineKeyboardButton(f"{mark_ai2ai} AI↔AI", callback_data="ollama_mode:ai-ai")],
                 [InlineKeyboardButton(f"{mark_stream} Streaming", callback_data="ollama_toggle:stream")],
             ]
+            # Provider toggles and cloud pickers
+            if mode == "ai-human":
+                prov = (session.get('provider') or 'ollama')
+                rows.append([
+                    InlineKeyboardButton("Provider:", callback_data="ollama_nop"),
+                    InlineKeyboardButton(("✅ Local" if prov != 'cloud' else "⬜ Local"), callback_data="ollama_provider:single:local"),
+                    InlineKeyboardButton(("✅ Cloud" if prov == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:single:cloud"),
+                ])
+                if prov == 'cloud':
+                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model", callback_data="ollama_cloud_pick:single")])
+            else:
+                pa = (session.get('ai2ai_provider_a') or 'ollama')
+                pb = (session.get('ai2ai_provider_b') or 'ollama')
+                rows.append([
+                    InlineKeyboardButton("A Provider:", callback_data="ollama_nop"),
+                    InlineKeyboardButton(("✅ Local" if pa != 'cloud' else "⬜ Local"), callback_data="ollama_provider:A:local"),
+                    InlineKeyboardButton(("✅ Cloud" if pa == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:A:cloud"),
+                ])
+                rows.append([
+                    InlineKeyboardButton("B Provider:", callback_data="ollama_nop"),
+                    InlineKeyboardButton(("✅ Local" if pb != 'cloud' else "⬜ Local"), callback_data="ollama_provider:B:local"),
+                    InlineKeyboardButton(("✅ Cloud" if pb == 'cloud' else "⬜ Cloud"), callback_data="ollama_provider:B:cloud"),
+                ])
+                if pa == 'cloud':
+                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model A", callback_data="ollama_cloud_pick:A")])
+                if pb == 'cloud':
+                    rows.append([InlineKeyboardButton("☁️ Pick Cloud Model B", callback_data="ollama_cloud_pick:B")])
             if mode == "ai-ai":
                 rows.append([
                     InlineKeyboardButton(f"A: {ai2ai_model_a}", callback_data="ollama_ai2ai:pick_a"),
@@ -1208,6 +1845,84 @@ class YouTubeTelegramBot:
             kb = InlineKeyboardMarkup(rows)
             await query.edit_message_text("⚙️ Ollama options", reply_markup=kb)
             await query.answer("Options")
+            return
+        if callback_data.startswith("ollama_provider:"):
+            parts = callback_data.split(":")
+            scope = parts[1]
+            target = parts[2]
+            # Update provider selection in session
+            if scope == 'single':
+                session['provider'] = 'cloud' if target == 'cloud' else 'ollama'
+            else:
+                key = f"ai2ai_provider_{scope.lower()}"
+                session[key] = 'cloud' if target == 'cloud' else 'ollama'
+            # Compute per-slot cloud options if switching to cloud
+            if scope in ('A','B') and target == 'cloud':
+                base_provider = getattr(llm_config, 'llm_provider', None)
+                base_model = getattr(llm_config, 'llm_model', None)
+                opts = self._cloud_model_options(base_provider, base_model)
+                if opts:
+                    session[f'ai2ai_cloud_options_{scope.lower()}'] = opts
+                else:
+                    await query.answer("No cloud models available", show_alert=True)
+            # Clear selection when switching provider type to avoid stale mismatches
+            if scope in ('A','B'):
+                if target == 'cloud':
+                    session.pop(f'ai2ai_model_{scope.lower()}', None)
+                else:
+                    session.pop(f'ai2ai_cloud_option_{scope.lower()}', None)
+            self.ollama_sessions[chat_id] = session
+            # Re-render full keyboard (markup only) with per-slot filtering
+            kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+            try:
+                await query.edit_message_reply_markup(reply_markup=kb)
+            except Exception:
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            await query.answer("Provider updated")
+            return
+        if callback_data.startswith("ollama_cloud_pick:"):
+            which = callback_data.split(":", 1)[1]
+            base_provider = getattr(llm_config, 'llm_provider', None)
+            base_model = getattr(llm_config, 'llm_model', None)
+            opts = self._cloud_model_options(base_provider, base_model)
+            if not opts:
+                await query.answer("No cloud models available", show_alert=True)
+                return
+            # Store per-slot options and refresh
+            session[f'ai2ai_cloud_options_{which.lower()}'] = opts
+            self.ollama_sessions[chat_id] = session
+            kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page') or 0, session=session)
+            try:
+                await query.edit_message_reply_markup(reply_markup=kb)
+            except Exception:
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
+            return
+        if callback_data.startswith("ollama_cloud_model:"):
+            _, which, idx_str = callback_data.split(":", 2)
+            try:
+                idx = int(idx_str)
+            except Exception:
+                idx = 0
+            opts = session.get('cloud_model_options') or []
+            if not (0 <= idx < len(opts)):
+                await query.answer("Invalid selection", show_alert=True)
+                return
+            sel = opts[idx]
+            if which == 'single':
+                session['provider'] = 'cloud'
+                session['cloud_single_option'] = sel
+            elif which in ('A', 'B'):
+                session[f'ai2ai_provider_{which.lower()}'] = 'cloud'
+                session[f'ai2ai_cloud_option_{which.lower()}'] = sel
+            self.ollama_sessions[chat_id] = session
+            await query.answer("Cloud model set")
+            # Update only the markup to reflect provider toggles and selections
+            kb = self._build_ollama_models_keyboard(session.get('models') or [], session.get('page', 0), session=session)
+            try:
+                await query.edit_message_reply_markup(reply_markup=kb)
+            except Exception:
+                # Fallback to full edit if reply_markup fails
+                await query.edit_message_text(self._ollama_status_text(session), reply_markup=kb)
             return
         if callback_data.startswith("ollama_pull:"):
             model = callback_data.split(":", 1)[1]
@@ -1312,28 +2027,143 @@ class YouTubeTelegramBot:
         # Handle summary requests
         if callback_data.startswith("summarize_"):
             raw = callback_data.replace("summarize_", "")  # e.g. "audio-fr" or "audio-fr:beginner"
-            
+
             # Handle back button
             if raw == "back_to_main":
+                self._remove_summary_session(query.message.chat.id, query.message.message_id)
                 await self._show_main_summary_options(query)
                 return
-            
+
             parts = raw.split(":", 1)
             summary_type = parts[0]  # "audio-fr" / "audio-es" / "audio"
             proficiency_level = parts[1] if len(parts) == 2 else None
-            
+
             # If French/Spanish audio without level specified, show level picker
             if summary_type in ("audio-fr", "audio-es") and proficiency_level is None:
+                self._remove_summary_session(query.message.chat.id, query.message.message_id)
                 await self._show_proficiency_selector(query, summary_type)
                 return
-            
-            # Process with proficiency level (None for regular summaries)
-            await self._process_content_summary(query, summary_type, user_name, proficiency_level)
-        
+
+            provider_options = self._summary_provider_options()
+            if not provider_options:
+                await query.edit_message_text("❌ Summarizer not configured. Please try /status for details.")
+                return
+
+            # If only one provider is available, skip provider selection
+            if len(provider_options) == 1:
+                provider_key, option = next(iter(provider_options.items()))
+                model_options = option.get("models") or []
+                session_payload = {
+                    "summary_type": summary_type,
+                    "proficiency_level": proficiency_level,
+                    "user_name": user_name,
+                    "provider_options": provider_options,
+                }
+                if len(model_options) <= 1:
+                    selected_model = model_options[0] if model_options else {}
+                    await self._execute_summary_with_model(query, session_payload, provider_key, selected_model)
+                else:
+                    session_payload["selected_provider"] = provider_key
+                    session_payload["model_options"] = model_options
+                    self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
+                    provider_label = option.get("label") or provider_key.title()
+                    per_row = 1 if provider_key == "cloud" else 2
+                    keyboard = ui_build_summary_model_keyboard(provider_key, model_options, per_row=per_row)
+                    await query.edit_message_text(
+                        f"⚙️ Choose a model for {provider_label}",
+                        reply_markup=keyboard,
+                    )
+                return
+
+            summary_label = self._friendly_variant_label(summary_type)
+            session_payload = {
+                "summary_type": summary_type,
+                "proficiency_level": proficiency_level,
+                "user_name": user_name,
+                "provider_options": provider_options,
+            }
+            self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
+            cloud_option = provider_options.get("cloud") or next(iter(provider_options.values()))
+            cloud_label = cloud_option.get("button_label") or "☁️ Cloud"
+            local_label = (provider_options.get("ollama") or {}).get("button_label")
+            prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
+            picks = self._quick_pick_candidates(provider_options, user_id)
+            keyboard = self._build_provider_with_quick_keyboard(
+                cloud_label,
+                local_label,
+                picks.get("cloud"),
+                picks.get("ollama"),
+            )
+            await query.edit_message_text(prompt_text, reply_markup=keyboard)
+            return
+
         elif callback_data.startswith("tts_"):
             await self._handle_tts_callback(query, callback_data)
         elif callback_data.startswith("ollama_"):
             await self._handle_ollama_callback(query, callback_data)
+        elif callback_data.startswith("summary_model:"):
+            suffix = callback_data.split(":", 1)[1]
+            if suffix == "back":
+                await self._handle_summary_model_back(query)
+            else:
+                parts = callback_data.split(":")
+                if len(parts) == 3:
+                    provider_key = parts[1]
+                    try:
+                        index = int(parts[2])
+                    except ValueError:
+                        await query.answer("Invalid selection", show_alert=True)
+                        return
+                    await self._handle_summary_model_callback(query, provider_key, index)
+                else:
+                    await query.answer("Invalid selection", show_alert=True)
+            return
+        elif callback_data.startswith("summary_provider:"):
+            provider_key = callback_data.split(":", 1)[1]
+            await self._handle_summary_provider_callback(query, provider_key)
+            return
+        elif callback_data.startswith("summary_quick:"):
+            parts = callback_data.split(":", 2)
+            if len(parts) != 3:
+                await query.answer("Invalid selection", show_alert=True)
+                return
+            _, provider_key, model_slug = parts
+            chat_id = query.message.chat.id
+            message_id = query.message.message_id
+            session = self._get_summary_session(chat_id, message_id)
+            if not session:
+                await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+                await self._show_main_summary_options(query)
+                return
+            # Build a model option similar to list entries
+            try:
+                if provider_key == "cloud":
+                    from llm_config import llm_config as _lc
+                    resolved_provider, resolved_model, _ = _lc.get_model_config(None, model_slug)
+                    model_option = {
+                        "provider": resolved_provider,
+                        "model": resolved_model,
+                        "label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                        "button_label": f"☁️ {self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
+                    }
+                else:
+                    model_option = {
+                        "provider": "ollama",
+                        "model": model_slug,
+                        "label": f"Ollama • {self._short_model_name(model_slug)}",
+                        "button_label": f"🏠 {self._short_label(self._short_model_name(model_slug), 24)}",
+                    }
+            except Exception:
+                await query.answer("Model unavailable. Choose a provider.")
+                await self._handle_summary_provider_callback(query, provider_key if provider_key in ("cloud", "ollama") else "cloud")
+                return
+            # Remember last used
+            try:
+                self._remember_last_model(user_id, provider_key, model_option.get("model"))
+            except Exception:
+                pass
+            await self._execute_summary_with_model(query, session, provider_key, model_option)
+            return
         
         elif callback_data.startswith('listen_this'):
             # One-off TTS for the exact summary on this message
@@ -1704,6 +2534,16 @@ class YouTubeTelegramBot:
         if not client or not client.base_api_url:
             await update.message.reply_text("⚠️ TTS hub is not configured. Set TTSHUB_API_BASE and try again.")
             return
+        # Fast preflight to avoid waiting on multiple long hub calls when offline
+        try:
+            if not reach_hub_ok(client.base_api_url):
+                await update.message.reply_text(
+                    "⚠️ Local TTS hub is unreachable. The /tts preview uses the hub.\n"
+                    "Try again when your Mac is online, or generate audio via the summary flow using OpenAI."
+                )
+                return
+        except Exception:
+            pass
         self.tts_client = client
 
         full_text = (update.message.text or "").split(" ", 1)
@@ -1811,6 +2651,65 @@ class YouTubeTelegramBot:
                 "tts_base": client.base_api_url,
                 "mode": "oneoff_tts",
             }
+            # Determine up to 2 quick favorites based on mode: env | last | auto
+            mode = (os.getenv("TTS_QUICK_MODE") or "auto").strip().lower()
+            env_val = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
+            env_list = [s.strip() for s in env_val.split(",") if s.strip()] if env_val else []
+
+            def map_env_to_alias(items: List[str]) -> List[str]:
+                aliases: List[str] = []
+                for item in items:
+                    if "|" in item:
+                        eng, slug = item.split("|", 1)
+                        eng = eng.strip(); slug = slug.strip()
+                        if eng and slug:
+                            aliases.append(f"fav|{eng}|{slug}")
+                    else:
+                        # Resolve engine from favorites list
+                        for fav in favorites_list:
+                            if not isinstance(fav, dict):
+                                continue
+                            slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
+                            if slug and slug == item:
+                                eng = (fav.get('engine') or '').strip()
+                                if eng:
+                                    aliases.append(f"fav|{eng}|{slug}")
+                                    break
+                # Deduplicate preserving order
+                seen = set()
+                result = []
+                for a in aliases:
+                    if a in seen:
+                        continue
+                    seen.add(a)
+                    result.append(a)
+                return result
+
+            quick_slugs: List[str] = []
+            if mode == "env" and env_list:
+                quick_slugs = map_env_to_alias(env_list)
+            elif mode == "last":
+                quick_slugs = self._last_tts_voices(user_id, n=2)
+            else:  # auto
+                if env_list:
+                    quick_slugs = map_env_to_alias(env_list)
+                if not quick_slugs:
+                    quick_slugs = self._last_tts_voices(user_id, n=2)
+                if not quick_slugs and favorites_list:
+                    # Take first two favorites
+                    acc = []
+                    for fav in favorites_list:
+                        if not isinstance(fav, dict):
+                            continue
+                        slug = (fav.get('slug') or fav.get('voiceId') or '').strip()
+                        eng = (fav.get('engine') or '').strip()
+                        if slug and eng:
+                            acc.append(f"fav|{eng}|{slug}")
+                        if len(acc) >= 2:
+                            break
+                    quick_slugs = acc
+            if quick_slugs:
+                session_payload["quick_favorite_slugs"] = quick_slugs[:2]
             prompt = self._tts_prompt_text(speak_text, catalog=active_catalog)
             keyboard = self._build_tts_catalog_keyboard(session_payload)
             prompt_message = await update.message.reply_text(prompt, reply_markup=keyboard)
@@ -1902,8 +2801,27 @@ class YouTubeTelegramBot:
             await query.edit_message_text("🇪🇸 **Elige tu nivel de español:**", 
                                         parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
     
-    async def _process_content_summary(self, query, summary_type: str, user_name: str, proficiency_level: str = None):
-        await summary_service.process_content_summary(self, query, summary_type, user_name, proficiency_level)
+    async def _process_content_summary(
+        self,
+        query,
+        summary_type: str,
+        user_name: str,
+        proficiency_level: str = None,
+        *,
+        provider_key: str = "cloud",
+        summarizer: Optional[YouTubeSummarizer] = None,
+        provider_label: Optional[str] = None,
+    ):
+        await summary_service.process_content_summary(
+            self,
+            query,
+            summary_type,
+            user_name,
+            proficiency_level,
+            provider_key=provider_key,
+            summarizer=summarizer,
+            provider_label=provider_label,
+        )
 
     async def _send_formatted_response(self, query, result: Dict[str, Any], summary_type: str, export_info: Dict = None):
         await summary_service.send_formatted_response(self, query, result, summary_type, export_info)

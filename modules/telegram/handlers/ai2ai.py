@@ -199,13 +199,45 @@ async def continue_exchange(
 
     u = U(handler.application, chat_id)
     pa_disp, _ = handler._persona_parse(persona_a)
-    a_text = await handler._ollama_stream_chat(
-        u,
-        model_a,
-        a_messages,
-        label=f"{pa_disp} ({model_a}){turn_suffix}",
-        cancel_checker=lambda: bool((handler.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
-    )
+    # Allow per-slot provider: default to local (ollama)
+    prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+    if prov_a == 'cloud':
+        # Resolve cloud model for A
+        opt_a = session.get('ai2ai_cloud_option_a') or {}
+        cp = opt_a.get('provider') or getattr(handler, 'llm_config', None) or None
+        cm = opt_a.get('model') or None
+        if cp is None or cm is None:
+            # Use handler.llm_config or global llm_config via handler import
+            from llm_config import llm_config as _cfg
+            cp = getattr(_cfg, 'llm_provider', None)
+            cm = getattr(_cfg, 'llm_model', None)
+            if not cm:
+                sl = _cfg.SHORTLISTS.get(getattr(_cfg, 'llm_shortlist', 'openrouter_defaults'), {})
+                for p, m in (sl.get('primary') or []):
+                    if p != 'ollama':
+                        cp, cm = p, m
+                        break
+        a_text = ""
+        try:
+            from modules.services.cloud_service import chat as cloud_chat
+            a_text = cloud_chat(a_messages, provider=cp, model=cm)
+        except Exception as exc:
+            await u.message.reply_text(f"❌ Cloud (A) error: {str(exc)[:200]}")
+            a_text = ""
+        # Post combined label + text
+        label = f"{pa_disp} ({cp}/{cm}){turn_suffix}"
+        try:
+            await u.message.reply_text(f"{label}\n\n{a_text}")
+        except Exception:
+            pass
+    else:
+        a_text = await handler._ollama_stream_chat(
+            u,
+            model_a,
+            a_messages,
+            label=f"{pa_disp} ({model_a}){turn_suffix}",
+            cancel_checker=lambda: bool((handler.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
+        )
     session["ai2ai_last_a"] = a_text
     try:
         tr = session.get("ai2ai_transcript")
@@ -233,13 +265,41 @@ async def continue_exchange(
         },
     ]
     pb_disp, _ = handler._persona_parse(persona_b)
-    b_text = await handler._ollama_stream_chat(
-        u,
-        model_b,
-        b_messages,
-        label=f"{pb_disp} ({model_b}){turn_suffix}",
-        cancel_checker=lambda: bool((handler.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
-    )
+    prov_b = (session.get('ai2ai_provider_b') or 'ollama')
+    if prov_b == 'cloud':
+        opt_b = session.get('ai2ai_cloud_option_b') or {}
+        cp = opt_b.get('provider') or getattr(handler, 'llm_config', None) or None
+        cm = opt_b.get('model') or None
+        if cp is None or cm is None:
+            from llm_config import llm_config as _cfg
+            cp = getattr(_cfg, 'llm_provider', None)
+            cm = getattr(_cfg, 'llm_model', None)
+            if not cm:
+                sl = _cfg.SHORTLISTS.get(getattr(_cfg, 'llm_shortlist', 'openrouter_defaults'), {})
+                for p, m in (sl.get('primary') or []):
+                    if p != 'ollama':
+                        cp, cm = p, m
+                        break
+        b_text = ""
+        try:
+            from modules.services.cloud_service import chat as cloud_chat
+            b_text = cloud_chat(b_messages, provider=cp, model=cm)
+        except Exception as exc:
+            await u.message.reply_text(f"❌ Cloud (B) error: {str(exc)[:200]}")
+            b_text = ""
+        label = f"{pb_disp} ({cp}/{cm}){turn_suffix}"
+        try:
+            await u.message.reply_text(f"{label}\n\n{b_text}")
+        except Exception:
+            pass
+    else:
+        b_text = await handler._ollama_stream_chat(
+            u,
+            model_b,
+            b_messages,
+            label=f"{pb_disp} ({model_b}){turn_suffix}",
+            cancel_checker=lambda: bool((handler.ollama_sessions.get(chat_id) or {}).get("ai2ai_cancel")),
+        )
     session["ai2ai_last_b"] = b_text
     try:
         tr = session.get("ai2ai_transcript")

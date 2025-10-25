@@ -45,8 +45,9 @@ load_dotenv()
 # Try to load .env.nas first (for NAS deployment)
 nas_env_path = Path('./.env.nas')
 if nas_env_path.exists():
-    load_dotenv(nas_env_path)
-    print(f"📁 Loaded NAS environment from {nas_env_path}")
+    # Allow .env.nas to override any existing env (Portainer) so we can manage creds in-file
+    load_dotenv(nas_env_path, override=True)
+    print(f"📁 Loaded NAS environment from {nas_env_path} (override=True)")
 
 # Also try to load from stack.env in parent directories for API keys
 stack_env_paths = [

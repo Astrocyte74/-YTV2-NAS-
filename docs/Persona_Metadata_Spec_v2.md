@@ -1,3 +1,5 @@
+# Persona Metadata Spec v2
+
 Here’s the Unified Spec v2 you can drop into your repo as
 docs/Persona_Metadata_Spec_v2.md.
 It merges your original behavioural memo and Codex CLI’s engineering plan so you have one authoritative document.
@@ -14,7 +16,7 @@ Author: Mark Darby
 Branch: feature/ai2ai-prompt-optimization
 Primary Files:
     •    /data/persona_data.json  → canonical registry
-    •    /modules/services/persona_service.py  → loader + prompt builder (new)
+    •    /modules/services/persona_service.py  → loader + prompt builder (planned)
     •    /modules/telegram/...    → handlers consume persona_service
     •    /cli/persona_loader.py, /cli/persona_cli.py  → optional CLI layer (future)
 

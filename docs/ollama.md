@@ -74,6 +74,7 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - Top row toggles between **Single AI Chat** and **AI↔AI Chat**. Single mode shows a 4×3 grid of installed models; tap a model and type a prompt to start.
   - Single chat auto-selects the first available model (override with `OLLAMA_DEFAULT_MODEL=<model>`), so you can begin typing immediately.
   - Single chat also exposes a **Models / Personas** toggle: choose a persona category, pick a persona, and the bot will role-play that identity (first reply introduces itself and invites you to introduce yourself).
+  - Provider quick-picks: at the top, quick-pick buttons for “API” and “Local” can appear, showing either env-specified or last-used models for one-tap start. Controlled by `QUICK_PICK_MODE`, `QUICK_CLOUD_MODEL`, and `QUICK_LOCAL_MODEL`.
 - AI↔AI mode:
   - Pick model **A** and **B** in the integrated picker (model B list filters out A by default; allow same model with `OLLAMA_AI2AI_ALLOW_SAME=1`).
   - The first two available models are pre-selected automatically (override with `OLLAMA_AI2AI_DEFAULT_MODELS=ModelA,ModelB`).
@@ -89,6 +90,14 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - Client: `modules/ollama_client.py` (non-stream + SSE streaming helpers, handles SSE payloads such as `data: b'…'`)
   - Telegram: `modules/telegram_handler.py` (model picker, streaming updates, AI↔AI automation)
 
+## Reachability & Fallbacks
+- The bot runs a fast preflight before opening the /o picker to avoid long waits when your Mac is offline:
+  - Hub probe: `GET ${TTSHUB_API_BASE}/meta` — if unreachable, the bot replies immediately.
+  - Upstream probe: `GET ${TTSHUB_API_BASE}/ollama/ps` (fallback `/ollama/tags`) — detects when the hub is up but Ollama isn’t responding.
+- Tuning (optional):
+  - `REACH_CONNECT_TIMEOUT` (default 2), `REACH_HTTP_TIMEOUT` (default 4), `REACH_TTL_SECONDS` (default 20)
+- If you want Cloud chat inside /o as a fallback, you can enable it in the bot; ask us to wire a simple Cloud tab using your `llm_config` defaults.
+
 ## Environment
 - NAS/bot:
   - `TTSHUB_API_BASE` (required)
@@ -99,9 +108,13 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
   - `OLLAMA_AI2AI_DEFAULT_MODELS` (optional comma-separated defaults for AI↔AI; first entry is model A, second entry model B)
   - `OLLAMA_PERSONA` (optional comma-separated fallback personas for AI↔AI, first entry used for A, second for B)
   - `OLLAMA_PERSONA_<CATEGORY>` (optional comma-separated persona lists grouped by category; the `<CATEGORY>` suffix becomes the label in the Telegram picker, e.g. `OLLAMA_PERSONA_ARTISTS`)
+  - `QUICK_PICK_MODE` (optional): `auto` (default), `env` (prefer env vars), or `last` (prefer last-used)
+  - `QUICK_CLOUD_MODEL` (optional): provider/model slug for the API quick-pick
+  - `QUICK_LOCAL_MODEL` (optional): local model name for the Ollama quick-pick
 - Hub on Mac (optional):
   - `OLLAMA_URL` if Ollama is not on `http://127.0.0.1:11434`
   - `OLLAMA_ALLOW_CLI` to control delete fallback via the local `ollama` CLI
+  - Fast reachability (optional): `REACH_CONNECT_TIMEOUT`, `REACH_HTTP_TIMEOUT`, `REACH_TTL_SECONDS`
 
 ## Status & Errors
 - Non‑stream returns `200` JSON; stream returns SSE events.
