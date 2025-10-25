@@ -1403,12 +1403,23 @@ class YouTubeTelegramBot:
         # Determine mode
         a = session.get('ai2ai_model_a')
         b = session.get('ai2ai_model_b')
-        stream_on = True  # default on
         mode_key = session.get('mode') or ('ai-ai' if (a and b) else 'ai-human')
         mode_label = 'AI↔AI' if mode_key == 'ai-ai' else 'AI→Human'
-        parts = [
-            f"🤖 Chat · Mode: {mode_label} · Streaming: On",
-        ]
+        # Streaming indicator only applies to local (Ollama)
+        show_stream = False
+        if mode_key == 'ai-human':
+            prov_single = (session.get('provider') or 'ollama')
+            if prov_single != 'cloud' and self._ollama_stream_default():
+                show_stream = True
+        else:
+            prov_a = (session.get('ai2ai_provider_a') or 'ollama')
+            prov_b = (session.get('ai2ai_provider_b') or 'ollama')
+            if prov_a != 'cloud' and prov_b != 'cloud' and self._ollama_stream_default():
+                show_stream = True
+        header = f"🤖 Chat · Mode: {mode_label}"
+        if show_stream:
+            header += " · Streaming: On"
+        parts = [header]
         if a and b:
             if not (session.get('persona_a') and session.get('persona_b')):
                 rand_a, rand_b = self._ollama_persona_random_pair()
@@ -1461,9 +1472,19 @@ class YouTubeTelegramBot:
             turns = session.get('ai2ai_turns_left')
             if isinstance(turns, int):
                 parts.append(f"Turns remaining: {turns}")
+            topic = (session.get('topic') or '').strip()
+            if topic:
+                parts.append(f"Topic: {topic}")
         else:
-            model = session.get('model') or '—'
-            parts.append(f"Model: {model}")
+            prov = (session.get('provider') or 'ollama')
+            if prov == 'cloud':
+                sel = session.get('cloud_single_option') or {}
+                prov_name = self._friendly_llm_provider(sel.get('provider')) if sel else 'Cloud'
+                model_name = sel.get('model') or 'Select…'
+                parts.append(f"Model: {prov_name} • {model_name} (Cloud)")
+            else:
+                model = session.get('model') or '—'
+                parts.append(f"Model: {model} (Local)")
             persona_single = session.get("persona_single")
             if persona_single:
                 cat_single = session.get("persona_single_category")
