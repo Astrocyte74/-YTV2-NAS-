@@ -1175,7 +1175,6 @@ class YouTubeTelegramBot:
         )
         # Insert provider toggle rows (Local vs Cloud) to enable Cloud chat in /o
         try:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             rows = list(kb.inline_keyboard or [])
             mode = sess.get('mode') or ('ai-ai' if (sess.get('ai2ai_model_a') and sess.get('ai2ai_model_b')) else 'ai-human')
             if mode == 'ai-human':
@@ -1842,7 +1841,6 @@ class YouTubeTelegramBot:
                 else:
                     session['cloud_model_options'] = opts
                     self.ollama_sessions[chat_id] = session
-                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
                     rows: List[List[InlineKeyboardButton]] = []
                     row: List[InlineKeyboardButton] = []
                     for i, opt in enumerate(opts[:12]):
@@ -1874,7 +1872,6 @@ class YouTubeTelegramBot:
                 return
             session['cloud_model_options'] = opts
             self.ollama_sessions[chat_id] = session
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             rows: List[List[InlineKeyboardButton]] = []
             row: List[InlineKeyboardButton] = []
             for i, opt in enumerate(opts[:12]):
