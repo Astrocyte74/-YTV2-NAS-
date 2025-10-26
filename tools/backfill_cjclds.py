@@ -94,10 +94,6 @@ def main() -> int:
         if args.only_host and (not url or args.only_host not in url):
             continue
 
-        # Skip if already tagged
-        if _has_cjclds(data):
-            continue
-
         new_data = classify_and_apply_cjclds(dict(data), url)
 
         # If no change, continue
@@ -105,7 +101,7 @@ def main() -> int:
             continue
 
         eligible += 1
-        print(f"📝 CJCLDS tag will be applied: {path.name}")
+        print(f"📝 Update will be applied: {path.name}")
         if args.dry_run:
             continue
 

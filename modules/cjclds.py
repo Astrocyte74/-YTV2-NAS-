@@ -136,6 +136,17 @@ def classify_and_apply_cjclds(report: Dict[str, Any], url: Optional[str]) -> Dic
     analysis.setdefault("speaker_role", role)
     report["analysis_json"] = analysis
 
+    # Normalize channel name for church site
+    try:
+        report["channel_name"] = "ChurchofJesusChrist"
+        meta = report.get("metadata")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.setdefault("uploader", "ChurchofJesusChrist")
+        report["metadata"] = meta
+    except Exception:
+        pass
+
     return report
 
 
