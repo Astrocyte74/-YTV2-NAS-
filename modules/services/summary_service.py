@@ -681,6 +681,26 @@ async def process_content_summary(
         await query.edit_message_text("❌ Could not resolve the source URL. Please resend the link.")
         return
 
+    # Optional: post resolved preview for shortlinks like flip.it so Telegram shows a rich preview
+    try:
+        show_preview = os.getenv('TELEGRAM_SHOW_RESOLVED_PREVIEW', '0').lower() in ('1','true','yes')
+        if show_preview and isinstance(url, str):
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.netloc or '').lower()
+            if host.endswith('flip.it'):
+                try:
+                    resolved = handler._resolve_redirects(url)
+                    if isinstance(resolved, str) and resolved and resolved != url:
+                        # Send a one-liner with the resolved URL to trigger Telegram's preview
+                        try:
+                            await query.message.reply_text(resolved, disable_web_page_preview=False)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
     summarizer = summarizer or handler.summarizer
     if not summarizer:
         await query.edit_message_text("❌ Summarizer not available. Please try /status for more info.")

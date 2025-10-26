@@ -2306,8 +2306,12 @@ class YouTubeTelegramBot:
                 self._remember_last_model(user_id, provider_key, model_option.get("model"))
             except Exception:
                 pass
-            # Early TTS: prompt for TTS provider/voice before running summary
-            await self._start_tts_preselect_flow(query, session, provider_key, model_option)
+            # Early TTS only for audio variants; otherwise run summary directly
+            summary_type = (session.get("summary_type") or "").strip().lower()
+            if summary_type.startswith("audio"):
+                await self._start_tts_preselect_flow(query, session, provider_key, model_option)
+            else:
+                await self._execute_summary_with_model(query, session, provider_key, model_option)
             return
         elif callback_data.startswith("summary_combo:"):
             # One-tap combo: derive model + TTS from env quicks and auto-run end-to-end
