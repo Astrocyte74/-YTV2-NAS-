@@ -3276,6 +3276,15 @@ class YouTubeTelegramBot:
         summary_type = (os.getenv('AUTO_PROCESS_SUMMARY', 'bullet-points') or 'bullet-points').strip()
         provider_key = (os.getenv('AUTO_PROCESS_PROVIDER', 'cloud') or 'cloud').strip().lower()
 
+        # If auto-provider is ollama but hub is unreachable, fall back to cloud
+        if provider_key == 'ollama':
+            try:
+                if not reach_hub_ollama_ok():
+                    provider_key = 'cloud'
+                    logging.info("AUTO_PROCESS: Ollama unreachable; falling back to cloud")
+            except Exception:
+                provider_key = 'cloud'
+
         # Avoid duplicates: if variant already exists, do not schedule
         current = set(self._discover_summary_types(content_id) or [])
         if any((summary_type == v.split(':', 1)[0]) for v in current):

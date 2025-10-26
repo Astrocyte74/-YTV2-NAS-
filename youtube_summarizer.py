@@ -210,7 +210,8 @@ class YouTubeSummarizer:
                 "Web summarization support is unavailable – install BeautifulSoup4/readability/trafilatura."
             )
         if self._web_fetcher is None:
-            self._web_fetcher = WebPageFetcher()
+            allow_dyn = str(os.getenv('WEB_EXTRACT_ALLOW_DYNAMIC', '0')).strip().lower() in ('1','true','yes')
+            self._web_fetcher = WebPageFetcher(allow_dynamic=allow_dyn)
         return self._web_fetcher
 
     async def process_text_content(

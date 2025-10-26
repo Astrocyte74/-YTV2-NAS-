@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+import os
 from typing import Dict, Optional, Tuple
 from urllib.parse import urljoin
 
@@ -112,6 +113,11 @@ class WebPageExtractor:
         self.allow_dynamic = allow_dynamic and PLAYWRIGHT_AVAILABLE
         self.session = session or self._create_session()
         self.session.headers.update(DEFAULT_HEADERS)
+        logger.info(
+            "WebExtractor init: allow_dynamic=%s (playwright_available=%s)",
+            bool(self.allow_dynamic),
+            bool(PLAYWRIGHT_AVAILABLE),
+        )
 
     @staticmethod
     def _create_session() -> requests.Session:
@@ -134,7 +140,14 @@ class WebPageExtractor:
         """Fetch, clean, and return article content for ``url``."""
 
         fetch_start = time.time()
+        logger.info("WebExtractor: fetching %s", url)
         response, final_url = self._fetch(url)
+        logger.debug(
+            "WebExtractor: fetch done status=%s len=%s final_url=%s",
+            getattr(response, "status_code", "-"),
+            len(getattr(response, "content", b"")),
+            final_url,
+        )
         html, metadata = self._prepare_html(response)
         text, meta = self._extract_static(html, final_url, metadata)
 
@@ -175,7 +188,11 @@ class WebPageExtractor:
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
 
         if best_quality != "good" and self.allow_dynamic:
-            logger.info("Attempting dynamic rendering for %s", final_url)
+            logger.info(
+                "Attempting dynamic rendering for %s (playwright_available=%s)",
+                final_url,
+                bool(PLAYWRIGHT_AVAILABLE),
+            )
             result = self._extract_via_playwright(final_url, notes)
             if result:
                 cand_text, cand_meta = result
@@ -211,13 +228,61 @@ class WebPageExtractor:
 
     # -- Fetch helpers -------------------------------------------------- #
     def _fetch(self, url: str) -> Tuple[requests.Response, str]:
+        """Fetch URL with fallbacks for sites that block non-browser clients.
+
+        Steps:
+        - Try default request
+        - On 403: retry with Safari UA + referer hint (WEB_EXTRACT_REFERER or Flipboard)
+        - On 403 again: strip utm_* and retry once
+        Logs each step for diagnostics.
+        """
+        def _do_get(target: str, extra: Optional[Dict[str, str]] = None) -> requests.Response:
+            headers = dict(self.session.headers)
+            if extra:
+                headers.update(extra)
+            logger.debug("WebExtractor GET %s headers=%s", target, {k: headers[k] for k in ['User-Agent','Referer'] if k in headers})
+            return self.session.get(target, timeout=REQUEST_TIMEOUT, allow_redirects=True, headers=headers)
+
         try:
-            resp = self.session.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+            resp = _do_get(url)
         except requests.RequestException as exc:
             logger.error("HTTP fetch failed for %s: %s", url, exc)
             raise
 
         final_url = resp.url
+        if resp.status_code == 403:
+            logger.info("WebExtractor: 403 on first attempt for %s", final_url)
+            safari_ua = (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+            )
+            referer = os.getenv("WEB_EXTRACT_REFERER", "https://flipboard.com/")
+            try:
+                resp = _do_get(final_url, {
+                    "User-Agent": safari_ua,
+                    "Referer": referer,
+                    "Accept-Encoding": "gzip, deflate, br",
+                })
+                final_url = resp.url
+            except requests.RequestException:
+                pass
+            if resp.status_code == 403:
+                # Strip tracking params (utm_*) and retry once more
+                try:
+                    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+                    parts = list(urlsplit(final_url))
+                    q = [(k, v) for k, v in parse_qsl(parts[3]) if not k.lower().startswith("utm_")]
+                    parts[3] = urlencode(q)
+                    cleaned = urlunsplit(parts)
+                    logger.info("WebExtractor: 403 persists, retrying without utm_*: %s", cleaned)
+                    resp = _do_get(cleaned, {
+                        "User-Agent": safari_ua,
+                        "Referer": referer,
+                        "Accept-Encoding": "gzip, deflate, br",
+                    })
+                    final_url = resp.url
+                except Exception:
+                    pass
         content_type = (resp.headers.get("Content-Type") or "").lower()
         if "text/html" not in content_type:
             logger.warning("URL %s returned non-HTML content-type: %s", final_url, content_type)
