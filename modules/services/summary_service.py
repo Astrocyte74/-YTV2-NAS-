@@ -725,28 +725,30 @@ async def process_content_summary(
     except Exception:
         preselected = None
 
-    if base_type.startswith("audio") and isinstance(preselected, dict) and preselected.get('auto_run'):
-        # LLM label
+    if base_type.startswith("audio"):
+        # Always show LLM label; include TTS if known/preselected
         llm_provider = getattr(summarizer, "llm_provider", "") or provider_key
         llm_model = getattr(summarizer, "model", "") or ''
         short_model = llm_model.split("/", 1)[1] if isinstance(llm_model, str) and "/" in llm_model else llm_model
-        llm_label = f"{llm_provider.title()} • {short_model}".strip(" •")
-        # TTS label
-        tts_provider = (preselected.get('provider') or '').lower()
-        sel = preselected.get('selected_voice') or {}
+        llm_label = f"{(llm_provider or '').title()} • {short_model}".strip(" •")
+
         tts_label = None
-        if tts_provider == 'openai':
-            voice = (sel.get('voice_id') or os.getenv('TTS_CLOUD_VOICE') or 'fable')
-            tts_label = f"OpenAI • {voice}"
-        elif tts_provider == 'local':
-            eng = (sel.get('engine') or '').strip()
-            fav = (sel.get('favorite_slug') or '').strip()
-            if eng and fav:
-                tts_label = f"Local • {eng}:{fav}"
-            else:
-                tts_label = "Local TTS"
+        if isinstance(preselected, dict):
+            tts_provider = (preselected.get('provider') or '').lower()
+            sel = preselected.get('selected_voice') or {}
+            if tts_provider == 'openai':
+                voice = (sel.get('voice_id') or os.getenv('TTS_CLOUD_VOICE') or 'fable')
+                tts_label = f"OpenAI • {voice}"
+            elif tts_provider == 'local':
+                eng = (sel.get('engine') or '').strip()
+                fav = (sel.get('favorite_slug') or '').strip()
+                if eng and fav:
+                    tts_label = f"Local • {eng}:{fav}"
+                else:
+                    tts_label = "Local TTS"
+
         extra = []
-        if llm_label:
+        if llm_label and llm_label.strip():
             extra.append(f"LLM: {llm_label}")
         if tts_label:
             extra.append(f"TTS: {tts_label}")
