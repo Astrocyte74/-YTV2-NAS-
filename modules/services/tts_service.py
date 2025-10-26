@@ -26,11 +26,43 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
     else:
         session_payload['tts_base'] = None
 
+    # Build a keyboard that includes quick favorite voices (if any) on the first screen
+    rows = []
+    quick_favs = []
+    try:
+        env_val = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
+        env_list = [s.strip() for s in env_val.split(",") if s.strip()]
+        for item in env_list[:3]:
+            label = item
+            if "|" in item:
+                eng, slug = item.split("|", 1)
+                short = slug if len(slug) <= 24 else (slug[:23] + "…")
+                label = f"Quick • {eng}:{short}"
+                alias = f"fav|{eng}|{slug}"
+            else:
+                short = item if len(item) <= 24 else (item[:23] + "…")
+                label = f"Quick • {short}"
+                alias = f"fav|{item}"
+            quick_favs.append((label, alias))
+    except Exception:
+        quick_favs = []
+
+    if quick_favs:
+        for label, alias in quick_favs:
+            rows.append([InlineKeyboardButton(label, callback_data=f"tts_voice:{alias}")])
+
+    # Provider choices
+    provider_row = []
+    provider_row.append(InlineKeyboardButton("Local TTS hub", callback_data="tts_provider:local"))
+    provider_row.append(InlineKeyboardButton("OpenAI TTS", callback_data="tts_provider:openai"))
+    rows.append(provider_row)
+    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
+
     prompt_text = f"🎙️ Choose how to generate audio for **{handler._escape_markdown(title)}**"
     prompt_message = await query.message.reply_text(
         prompt_text,
         parse_mode=ParseMode.MARKDOWN,
-        reply_markup=handler._build_provider_keyboard(include_local=True),
+        reply_markup=InlineKeyboardMarkup(rows),
     )
     handler._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 

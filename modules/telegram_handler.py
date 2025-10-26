@@ -1193,7 +1193,12 @@ class YouTubeTelegramBot:
             return
 
         selected_model = model_options[index]
-        await self._execute_summary_with_model(query, session, provider_key, selected_model)
+        # For audio variants, prompt TTS preselection before starting summary
+        summary_type = session.get("summary_type") or ""
+        if isinstance(summary_type, str) and summary_type.startswith("audio"):
+            await self._start_tts_preselect_flow(query, session, provider_key, selected_model)
+        else:
+            await self._execute_summary_with_model(query, session, provider_key, selected_model)
 
     async def _handle_summary_model_back(self, query) -> None:
         chat_id = query.message.chat.id
