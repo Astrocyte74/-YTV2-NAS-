@@ -137,12 +137,13 @@ class YouTubeTelegramBot:
         except Exception:
             self.user_prefs = {}
         
-        # YouTube URL regex pattern
+        # YouTube URL regex pattern (supports www./m., watch, embed, v, shorts, live, and youtu.be)
         self.youtube_url_pattern = re.compile(
-            r'(?:https?://)?(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|youtube\.com/v/)([a-zA-Z0-9_-]{11})'
+            r'(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|embed/|v/|shorts/|live/)|youtu\.be/)([a-zA-Z0-9_-]{11})'
         )
+        # Reddit URL regex pattern (support subdomains like www., old., m.)
         self.reddit_url_pattern = re.compile(
-            r'(https?://(?:www\.)?(?:reddit\.com|redd\.it)/[^\s]+)',
+            r'(https?://(?:[a-z]+\.)?(?:reddit\.com|redd\.it)/[^\s]+)',
             re.IGNORECASE,
         )
         self.web_url_pattern = re.compile(r'(https?://[^\s<>]+)', re.IGNORECASE)
@@ -655,6 +656,10 @@ class YouTubeTelegramBot:
         web_url = self._extract_web_url(message_text)
         if web_url:
             web_url = web_url.strip()
+            # Resolve shorteners (e.g., flip.it) to the final URL for better summaries and dedupe
+            resolved = self._resolve_redirects(web_url)
+            if isinstance(resolved, str) and resolved.strip():
+                web_url = resolved.strip()
             hashed = hashlib.sha256(web_url.encode('utf-8')).hexdigest()[:24]
             content_id = f"web:{hashed}"
             self.current_item = {
@@ -2885,6 +2890,29 @@ class YouTubeTelegramBot:
 
     async def _prompt_tts_provider(self, query, session_payload: Dict[str, Any], title: str) -> None:
         await tts_service.prompt_provider(self, query, session_payload, title)
+
+    def _resolve_redirects(self, url: str, timeout: int = 8) -> str:
+        """Resolve short links/redirects (e.g., flip.it) to their final destination.
+
+        Returns the final URL on success; on errors or if requests is unavailable,
+        returns the original URL.
+        """
+        try:
+            if not url or not isinstance(url, str):
+                return url
+            if requests is None:  # type: ignore[name-defined]
+                return url
+            resp = requests.get(url, allow_redirects=True, timeout=timeout)
+            try:
+                final = getattr(resp, 'url', None) or url
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+            return final
+        except Exception:
+            return url
     def _extract_youtube_url(self, text: str) -> Optional[str]:
         """Extract YouTube URL from text."""
         match = self.youtube_url_pattern.search(text)
