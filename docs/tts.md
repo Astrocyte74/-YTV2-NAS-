@@ -65,6 +65,19 @@
 
 - Local hub base URL: `TTSHUB_API_BASE` (required for `local` provider)
 - OpenAI key: `OPENAI_API_KEY` (required for `openai` provider)
+- Audio combos and quick picks (Telegram UI):
+  - `QUICK_LOCAL_MODEL` – default local LLM model (e.g., `gemma3:12b`)
+  - `QUICK_CLOUD_MODEL` – default cloud LLM model (e.g., `google/gemini-2.5-flash-lite`)
+  - `TTS_QUICK_FAVORITE` – comma‑separated local favorites to show as one‑tap quicks (e.g., `kokoro|favorite--bm-daniel,xtts|favorite--mkb-2`)
+  - `TTS_CLOUD_VOICE` – default OpenAI voice for cloud combo/quick paths (e.g., `fable`)
+
+### Audio Combos and Early TTS (Telegram)
+
+- Audio combos are one‑tap runs that choose both LLM + TTS:
+  - Local Combo → `QUICK_LOCAL_MODEL` + first item from `TTS_QUICK_FAVORITE`
+  - Cloud Combo → `QUICK_CLOUD_MODEL` + `TTS_CLOUD_VOICE`
+- When you choose “Other LLM from Cloud/Local” and select a model, the UI now prompts for TTS first (favorites surface immediately). After TTS selection, summary generation starts and TTS auto‑runs at completion.
+- The in‑progress status line shows the selected LLM and, when known, the TTS provider/voice.
 - Dashboard sync (summary audio only):
   - `DATABASE_URL` – Postgres connection for direct upserts
   - `AUDIO_PUBLIC_BASE` – Base used to construct public audio URLs (e.g., `https://your-host` → `${AUDIO_PUBLIC_BASE}/exports/<file>.mp3`)
