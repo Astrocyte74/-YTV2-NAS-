@@ -30,6 +30,7 @@ from modules.event_stream import emit_report_event
 from modules.services import sync_service
 from modules.summary_queue import enqueue as enqueue_summary_job
 from modules.ollama_client import OllamaClientError
+from modules.cjclds import classify_and_apply_cjclds
 
 
 def _format_duration_and_savings(metadata: Dict[str, Any]) -> str:
@@ -833,6 +834,11 @@ async def process_content_summary(
         export_info = {"html_path": None, "json_path": None}
         try:
             report_dict = create_report_from_youtube_summarizer(result)
+            # Apply CJCLDS categorization when applicable (General Conference talks)
+            try:
+                report_dict = classify_and_apply_cjclds(report_dict, url)
+            except Exception:
+                pass
             json_path = handler.json_exporter.save_report(report_dict)
             export_info["json_path"] = Path(json_path).name
 
