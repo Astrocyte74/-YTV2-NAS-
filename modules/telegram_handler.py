@@ -895,6 +895,30 @@ class YouTubeTelegramBot:
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
         return InlineKeyboardMarkup(rows)
 
+    async def _start_tts_preselect_flow(self, query, summary_session: Dict[str, Any], provider_key: str, model_option: Dict[str, Any]) -> None:
+        """Prompt for TTS selection first, then run summary with preselected TTS.
+
+        Stores a preselect-only TTS session with a pending summary payload. After the
+        user selects provider/voice, the TTS session handler will kick off the summary.
+        """
+        title = "Audio Summary"
+        anchor = (query.message.chat.id, query.message.message_id)
+        pending = {
+            'provider_key': provider_key,
+            'model_option': model_option,
+            'session': summary_session,
+            'origin': anchor,
+        }
+        tts_payload = {
+            'mode': 'summary_audio',
+            'summary_type': summary_session.get('summary_type') or 'audio',
+            'title': title,
+            'video_info': (self.current_item or {}),
+            'preselect_only': True,
+            'pending_summary': pending,
+        }
+        await self._prompt_tts_provider(query, tts_payload, title)
+
     def _friendly_llm_provider(self, provider: Optional[str]) -> str:
         mapping = {
             "openai": "OpenAI",
@@ -2277,7 +2301,8 @@ class YouTubeTelegramBot:
                 self._remember_last_model(user_id, provider_key, model_option.get("model"))
             except Exception:
                 pass
-            await self._execute_summary_with_model(query, session, provider_key, model_option)
+            # Early TTS: prompt for TTS provider/voice before running summary
+            await self._start_tts_preselect_flow(query, session, provider_key, model_option)
             return
         elif callback_data.startswith("summary_combo:"):
             # One-tap combo: derive model + TTS from env quicks and auto-run end-to-end

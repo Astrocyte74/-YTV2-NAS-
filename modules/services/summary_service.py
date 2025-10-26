@@ -487,6 +487,20 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         chat_id = query.message.chat.id if query.message else None
         message_id = query.message.message_id if query.message else None
         preselected = handler._get_tts_session(chat_id, message_id) if (chat_id and message_id) else None
+        # Fallback: find any auto-run TTS session anchored to this chat that matches the summary type
+        if not preselected and chat_id is not None:
+            try:
+                for (c_id, m_id), sess in list(getattr(handler, 'tts_sessions', {}).items()):
+                    if c_id != chat_id or not isinstance(sess, dict):
+                        continue
+                    if not sess.get('auto_run'):
+                        continue
+                    st = sess.get('summary_type')
+                    if not st or st == summary_type:
+                        preselected = sess
+                        break
+            except Exception:
+                pass
     except Exception:
         preselected = None
 

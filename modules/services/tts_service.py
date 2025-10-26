@@ -335,6 +335,7 @@ async def handle_callback(handler, query, callback_data: str) -> None:
     if callback_data.startswith("tts_provider:"):
         provider = callback_data.split(":", 1)[1]
         session['provider'] = provider
+        preselect_only = bool(session.get('preselect_only'))
         if provider == 'local':
             client = handler._resolve_tts_client(session.get('tts_base'))
             session['tts_base'] = client.base_api_url if client else None
@@ -399,7 +400,34 @@ async def handle_callback(handler, query, callback_data: str) -> None:
             await query.answer("Select a voice")
             return
         else:
-            await execute_job(handler, query, session, provider)
+            if preselect_only:
+                # Preselect OpenAI voice (default from env) and start pending summary
+                voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+                session['selected_voice'] = {'favorite_slug': None, 'voice_id': voice, 'engine': None}
+                session['auto_run'] = True
+                handler._store_tts_session(query.message.chat_id, query.message.message_id, session)
+                pending = session.get('pending_summary') or {}
+                origin = pending.get('origin')  # (chat_id, message_id)
+                if origin and isinstance(origin, tuple) and len(origin) == 2:
+                    try:
+                        handler._store_tts_session(origin[0], origin[1], {
+                            'auto_run': True,
+                            'provider': 'openai',
+                            'selected_voice': session['selected_voice'],
+                            'summary_type': session.get('summary_type') or 'audio',
+                        })
+                    except Exception:
+                        pass
+                pend_sess = pending.get('session') or {}
+                pend_provider = pending.get('provider_key') or 'cloud'
+                pend_model = pending.get('model_option') or {}
+                try:
+                    await handler._execute_summary_with_model(query, pend_sess, pend_provider, pend_model)
+                finally:
+                    handler._remove_tts_session(query.message.chat_id, query.message.message_id)
+                return
+            else:
+                await execute_job(handler, query, session, provider)
         return
 
     if callback_data.startswith("tts_queue:"):
@@ -458,11 +486,36 @@ async def handle_callback(handler, query, callback_data: str) -> None:
         engine_id,
     )
 
-    try:
-        await execute_job(handler, query, session, provider_choice)
-    except LocalTTSUnavailable as exc:
-        await handle_local_unavailable(handler, query, session, message=str(exc))
+    if session.get('preselect_only'):
+        # Store selection and kick off pending summary; do not synthesize yet
+        session['auto_run'] = True
+        handler._store_tts_session(chat_id, message_id, session)
+        pending = session.get('pending_summary') or {}
+        origin = pending.get('origin')
+        if origin and isinstance(origin, tuple) and len(origin) == 2:
+            try:
+                handler._store_tts_session(origin[0], origin[1], {
+                    'auto_run': True,
+                    'provider': 'local',
+                    'selected_voice': session.get('selected_voice') or {},
+                    'summary_type': session.get('summary_type') or 'audio',
+                })
+            except Exception:
+                pass
+        pend_sess = pending.get('session') or {}
+        pend_provider = pending.get('provider_key') or 'ollama'
+        pend_model = pending.get('model_option') or {}
+        try:
+            await handler._execute_summary_with_model(query, pend_sess, pend_provider, pend_model)
+        finally:
+            handler._remove_tts_session(chat_id, message_id)
         return
+    else:
+        try:
+            await execute_job(handler, query, session, provider_choice)
+        except LocalTTSUnavailable as exc:
+            await handle_local_unavailable(handler, query, session, message=str(exc))
+            return
 
 async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path: Path, provider: str) -> None:
     provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
