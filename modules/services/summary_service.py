@@ -391,8 +391,24 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             gen_at = (export_info or {}).get('generated_at') if export_info else None
             prov = (export_info or {}).get('llm_provider') if export_info else None
             model = (export_info or {}).get('llm_model') if export_info else None
+            # Fallback to current summarizer if export_info missing
+            if not prov or not model:
+                try:
+                    prov = prov or getattr(handler.summarizer, 'llm_provider', None)
+                    model = model or getattr(handler.summarizer, 'model', None)
+                except Exception:
+                    pass
             if not gen_at:
-                gen_at = datetime.now().isoformat(timespec='seconds')
+                # Localize timestamp per SUMMARY_TIMEZONE
+                tz_name = os.getenv('SUMMARY_TIMEZONE', 'America/Denver')
+                try:
+                    if ZoneInfo:
+                        gen_local = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+                        gen_at = gen_local.strftime('%Y-%m-%d %H:%M:%S %Z')
+                    else:
+                        gen_at = datetime.now().isoformat(timespec='seconds')
+                except Exception:
+                    gen_at = datetime.now().isoformat(timespec='seconds')
             if prov or model:
                 prov_label = handler._friendly_llm_provider(prov) if hasattr(handler, '_friendly_llm_provider') else (prov or '')
                 short_model = model.split('/',1)[1] if isinstance(model,str) and '/' in model else model

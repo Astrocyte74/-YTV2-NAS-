@@ -78,7 +78,7 @@ from modules.ollama_client import (
 )
 from modules.services import ollama_service, summary_service, tts_service
 from modules.services import cloud_service
-from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
+from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok, local_ollama_ok as reach_local_ollama_ok
 import hashlib
 from pydub import AudioSegment
 
@@ -3295,8 +3295,13 @@ class YouTubeTelegramBot:
         for p in candidates:
             if p == 'ollama':
                 try:
-                    if reach_hub_ollama_ok():
+                    if reach_local_ollama_ok():
                         chosen = 'ollama'
+                        logging.info("AUTO_PROCESS: picked ollama (local reachable)")
+                        break
+                    elif reach_hub_ollama_ok():  # optional secondary check via hub
+                        chosen = 'ollama'
+                        logging.info("AUTO_PROCESS: picked ollama (hub proxy reachable)")
                         break
                     else:
                         logging.info("AUTO_PROCESS: Ollama unreachable; skipping to next provider")
@@ -3305,11 +3310,14 @@ class YouTubeTelegramBot:
                     continue
             elif p == 'cloud':
                 chosen = 'cloud'
+                logging.info("AUTO_PROCESS: picked cloud (preference/candidates=%s)", candidates)
                 break
             else:
                 # Unknown entry, skip
                 continue
         provider_key = chosen or 'cloud'
+        if not chosen:
+            logging.info("AUTO_PROCESS: no providers available from %s; defaulting to cloud", candidates)
 
         # Avoid duplicates: if variant already exists, do not schedule
         current = set(self._discover_summary_types(content_id) or [])
