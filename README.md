@@ -254,7 +254,7 @@ Let the bot automatically start a summary after you paste a URL and wait a few s
 
 - `AUTO_PROCESS_DELAY_SECONDS` – enable by setting a positive integer (e.g., `8`). When set, the bot will schedule an auto‑run after the inline keyboard appears. Any tap on the inline buttons cancels the pending auto‑run.
 - `AUTO_PROCESS_SUMMARY` – comma‑separated preference list; the first recognized type is chosen. Allowed values: `bullet-points`, `comprehensive`, `key-insights`, `audio`, `audio-fr`, `audio-es`.
-- `AUTO_PROCESS_PROVIDER` – comma‑separated provider preferences. Supported values: `ollama`, `cloud`. The first available is chosen.
+- `AUTO_PROCESS_PROVIDER` – comma‑separated provider preferences. Supported values: `ollama`, `cloud`. Aliases: `local`/`hub`/`wireguard` → `ollama`, `api` → `cloud`. The first available is chosen.
   - Ollama availability is probed through the hub (`TTSHUB_API_BASE`). If the hub or its Ollama proxy is unreachable, the bot falls back to `cloud`. Logs show: `AUTO_PROCESS: picked ollama (hub proxy reachable)` or the fallback reason.
 - `SUMMARY_TIMEZONE` – time zone name for the timestamp appended to summary headers (default: `America/Denver`).
 - `TELEGRAM_SHOW_RESOLVED_PREVIEW` – set to `1`/`true` to post the resolved URL (e.g., expanding `flip.it/…`) so Telegram can show a rich preview before processing.

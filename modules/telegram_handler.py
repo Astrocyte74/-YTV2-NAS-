@@ -3288,7 +3288,17 @@ class YouTubeTelegramBot:
         if not summary_type:
             summary_type = 'bullet-points'
         providers_raw = (os.getenv('AUTO_PROCESS_PROVIDER', 'cloud') or 'cloud').strip().lower()
-        candidates = [p.strip() for p in providers_raw.split(',') if p.strip()] or ['cloud']
+        raw_candidates = [p.strip() for p in providers_raw.split(',') if p.strip()] or ['cloud']
+        # Normalize common aliases to canonical provider keys
+        alias_map = {
+            'local': 'ollama',
+            'hub': 'ollama',
+            'wireguard': 'ollama',
+            'ollama': 'ollama',
+            'api': 'cloud',
+            'cloud': 'cloud',
+        }
+        candidates = [alias_map.get(p, p) for p in raw_candidates]
 
         # Choose first available provider from the preference list
         chosen = None
@@ -3297,7 +3307,7 @@ class YouTubeTelegramBot:
         for p in candidates:
             if p == 'ollama':
                 try:
-                    if via_hub and reach_hub_ollama_ok():
+                    if via_hub and reach_hub_ollama_ok(os.getenv('TTSHUB_API_BASE')):
                         chosen = 'ollama'
                         logging.info("AUTO_PROCESS: picked ollama (hub proxy reachable)")
                         break
