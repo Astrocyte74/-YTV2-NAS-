@@ -248,6 +248,22 @@ docker-compose down && docker-compose up -d
 4. Render stores the MP3 under `/app/data/exports/audio/` and serves it at `/exports/by_video/<video_id>.mp3`; dashboard Listen chips stream it.
 5. Health/ops: `GET /health/ingest` shows `token_set` and `pg_dsn_set`. Details in `docs/NAS_INTEGRATION.md`.
 
+## ⚡ Auto‑Process (Idle Run)
+
+Let the bot automatically start a summary after you paste a URL and wait a few seconds. Configure via environment variables:
+
+- `AUTO_PROCESS_DELAY_SECONDS` – enable by setting a positive integer (e.g., `8`). When set, the bot will schedule an auto‑run after the inline keyboard appears. Any tap on the inline buttons cancels the pending auto‑run.
+- `AUTO_PROCESS_SUMMARY` – comma‑separated preference list; the first recognized type is chosen. Allowed values: `bullet-points`, `comprehensive`, `key-insights`, `audio`, `audio-fr`, `audio-es`.
+- `AUTO_PROCESS_PROVIDER` – comma‑separated provider preferences. Supported values: `ollama`, `cloud`. The first available is chosen.
+  - Ollama availability is probed through the hub (`TTSHUB_API_BASE`). If the hub or its Ollama proxy is unreachable, the bot falls back to `cloud`. Logs show: `AUTO_PROCESS: picked ollama (hub proxy reachable)` or the fallback reason.
+- `SUMMARY_TIMEZONE` – time zone name for the timestamp appended to summary headers (default: `America/Denver`).
+- `TELEGRAM_SHOW_RESOLVED_PREVIEW` – set to `1`/`true` to post the resolved URL (e.g., expanding `flip.it/…`) so Telegram can show a rich preview before processing.
+
+Notes:
+- Provider model selection for auto‑runs uses `QUICK_LOCAL_MODEL` (for `ollama`) or `QUICK_CLOUD_MODEL` (for `cloud`) when set. Otherwise, it uses the bot’s defaults.
+- For Ollama summaries, the bot prefers your TTS hub proxy if `TTSHUB_API_BASE` is set; no `OLLAMA_HOST` is needed for this path.
+
+
 ## 🛠️ Troubleshooting
 
 ### Common Issues
@@ -263,6 +279,13 @@ docker-compose down && docker-compose up -d
 - **Bot Activity**: Check Telegram bot responses (multi-part summaries noted)
 - **Sync Status**: Monitor dashboard ingest or build a WebSocket/SSE listener for “report created” events
 - **Diagnostics**: See `tools/README.md` for targeted scripts (DB tests, ffprobe)
+
+### Back up Portainer environment
+
+- Keep a checked‑in copy of `.env.nas.template` and a private `.env.nas` alongside your stack.
+- In Portainer, export your stack (Stacks → your stack → Duplicate/Edit → Copy as text) to capture both the Compose file and env values.
+- Optionally, maintain a `runtime.env` inside the container volume (this repo includes one) and source it in your entrypoint; this gives you a quick, human‑readable snapshot after changes.
+
 
 ## 🔐 Codex CLI Authentication (Headless NAS)
 

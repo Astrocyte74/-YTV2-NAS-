@@ -78,7 +78,7 @@ from modules.ollama_client import (
 )
 from modules.services import ollama_service, summary_service, tts_service
 from modules.services import cloud_service
-from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok, local_ollama_ok as reach_local_ollama_ok
+from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
 import hashlib
 from pydub import AudioSegment
 
@@ -3292,18 +3292,16 @@ class YouTubeTelegramBot:
 
         # Choose first available provider from the preference list
         chosen = None
+        # Prefer hub proxy for provider checks (we only support hub-based Ollama here)
+        via_hub = bool(os.getenv('TTSHUB_API_BASE'))
         for p in candidates:
             if p == 'ollama':
                 try:
-                    if reach_local_ollama_ok():
-                        chosen = 'ollama'
-                        logging.info("AUTO_PROCESS: picked ollama (local reachable)")
-                        break
-                    elif reach_hub_ollama_ok():  # optional secondary check via hub
+                    if via_hub and reach_hub_ollama_ok():
                         chosen = 'ollama'
                         logging.info("AUTO_PROCESS: picked ollama (hub proxy reachable)")
                         break
-                    else:
+                    if chosen != 'ollama':
                         logging.info("AUTO_PROCESS: Ollama unreachable; skipping to next provider")
                 except Exception:
                     logging.info("AUTO_PROCESS: Ollama probe failed; skipping to next provider")

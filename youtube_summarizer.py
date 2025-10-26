@@ -84,8 +84,17 @@ class YouTubeSummarizer:
             print(f"🔴 {e}")
             raise
 
-        # Set Ollama base URL
-        self.ollama_base_url = ollama_base_url or llm_config.ollama_host
+        # Set Ollama base URL; if a hub is configured, prefer its Ollama proxy
+        self.ollama_base_url = ollama_base_url or None
+        try:
+            if self.llm_provider == "ollama" and not self.ollama_base_url:
+                hub_base = os.getenv("TTSHUB_API_BASE")
+                if hub_base:
+                    self.ollama_base_url = hub_base.rstrip("/") + "/ollama"
+                else:
+                    self.ollama_base_url = llm_config.ollama_host
+        except Exception:
+            self.ollama_base_url = self.ollama_base_url or llm_config.ollama_host
 
         # Initialize LLM based on determined configuration
         self._initialize_llm(api_key)
@@ -188,6 +197,10 @@ class YouTubeSummarizer:
                 }
             )
         elif self.llm_provider == "ollama":
+            try:
+                print(f"🧠 Ollama base: {self.ollama_base_url}")
+            except Exception:
+                pass
             self.llm = ChatOllama(
                 model=self.model,
                 base_url=self.ollama_base_url
