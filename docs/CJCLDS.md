@@ -15,6 +15,15 @@ Integration
 - Applied during summary processing in `modules/services/summary_service.py` before the JSON report is saved.
 - The dashboard will automatically surface CJCLDS + subcategories under filters.
 
+Backfill existing content
+
+- Run a quick backfill from NAS:
+  - Dry run: `python3 tools/backfill_cjclds.py --dry-run`
+  - Apply (limit first N items): `python3 tools/backfill_cjclds.py --limit 50`
+  - Restrict by host: `python3 tools/backfill_cjclds.py --only-host churchofjesuschrist.org`
+
+This updates JSON under `/app/data/reports` and upserts to the dashboard using the NAS dual-sync path.
+
 Current Apostles (canonical subcategories)
 - Dallin H. Oaks
 - Henry B. Eyring
@@ -34,4 +43,3 @@ Current Apostles (canonical subcategories)
 Notes
 - Unknown or non-Apostle talks are labeled `Other` under `CJCLDS`.
 - Multiple speakers (rare) can be supported by extending the mapping logic.
-
