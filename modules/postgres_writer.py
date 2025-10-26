@@ -378,7 +378,8 @@ class PostgresWriter:
             return None
 
         if not self.audio_public_base:
-            logger.warning("AUDIO_PUBLIC_BASE not set; cannot publish audio URL. Skipping audio variant insert.")
+            # Downgraded from WARNING to INFO; coordinator will attempt HTTP ingest fallback when configured.
+            logger.info("AUDIO_PUBLIC_BASE not set; skipping DB audio variant (HTTP ingest fallback may upload the MP3).")
             return None
 
         base = self.audio_public_base.rstrip("/")
