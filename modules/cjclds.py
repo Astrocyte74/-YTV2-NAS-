@@ -35,7 +35,7 @@ APOSTLES_LASTNAME_TO_CANONICAL: Dict[str, str] = {
 }
 
 
-def _is_cjclds_talk(url: Optional[str]) -> bool:
+def _is_church_site(url: Optional[str]) -> bool:
     if not url or not isinstance(url, str):
         return False
     try:
@@ -43,11 +43,18 @@ def _is_cjclds_talk(url: Optional[str]) -> bool:
     except Exception:
         return False
     host = (parsed.netloc or "").lower()
+    return "churchofjesuschrist.org" in host
+
+
+def _is_cjclds_talk(url: Optional[str]) -> bool:
+    if not _is_church_site(url):
+        return False
+    try:
+        parsed = urlparse(url or "")
+    except Exception:
+        return False
     path = (parsed.path or "")
-    return (
-        "churchofjesuschrist.org" in host
-        and "/general-conference/" in path
-    )
+    return "/general-conference/" in path
 
 
 def _extract_slug_lastname(url: str) -> Optional[str]:
@@ -104,13 +111,18 @@ def classify_and_apply_cjclds(report: Dict[str, Any], url: Optional[str]) -> Dic
     - Adds/merges subcategories_json with { category: CJCLDS, subcategories: [speaker or Other] }
     - Adds analysis_json fields: speaker, speaker_role
     """
-    if not _is_cjclds_talk(url):
+    if not _is_church_site(url):
         return report
 
-    lastname = _extract_slug_lastname(url or "") or ""
-    canonical = APOSTLES_LASTNAME_TO_CANONICAL.get(lastname)
-    speaker = canonical or "Other"
-    role = "apostle" if canonical else "other"
+    if _is_cjclds_talk(url):
+        lastname = _extract_slug_lastname(url or "") or ""
+        canonical = APOSTLES_LASTNAME_TO_CANONICAL.get(lastname)
+        speaker = canonical or "Other"
+        role = "apostle" if canonical else "other"
+    else:
+        # Non‑conference church content → tag as CJCLDS: Non GC
+        speaker = "Non GC"
+        role = "non-gc"
 
     # Merge categories
     existing = report.get("subcategories_json") if isinstance(report, dict) else None
@@ -130,4 +142,3 @@ def classify_and_apply_cjclds(report: Dict[str, Any], url: Optional[str]) -> Dic
 __all__ = [
     "classify_and_apply_cjclds",
 ]
-

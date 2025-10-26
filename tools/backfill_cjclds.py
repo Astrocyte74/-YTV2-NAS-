@@ -23,7 +23,18 @@ from typing import Any, Dict, Optional
 from modules.cjclds import classify_and_apply_cjclds
 from modules.services import sync_service
 
-REPORTS_DIR = Path("/app/data/reports")
+def _resolve_reports_dir() -> Path:
+    # Prefer container path
+    p = Path("/app/data/reports")
+    if p.exists():
+        return p
+    # Fallback to workspace paths
+    for candidate in (Path("./data/reports"), Path("data/reports")):
+        if candidate.exists():
+            return candidate
+    return p  # default (may not exist)
+
+REPORTS_DIR = _resolve_reports_dir()
 
 
 def _get_url(report: Dict[str, Any]) -> Optional[str]:
@@ -130,4 +141,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

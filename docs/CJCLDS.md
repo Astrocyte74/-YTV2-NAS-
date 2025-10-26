@@ -4,8 +4,14 @@ Purpose
 - Auto-tag General Conference talks from churchofjesuschrist.org with a CJCLDS category and a subcategory for the speaker (one of the 14 current Apostles) or "Other".
 
 How it works
-- Detection: URLs under `https://www.churchofjesuschrist.org/study/general-conference/...` are considered.
-- Speaker extraction: parse the trailing slug from the URL (e.g., `41holland` → `holland`) and map to a canonical speaker name.
+- Detection:
+  - All `churchofjesuschrist.org` links are considered CJCLDS.
+  - General Conference talks: URLs under `/study/general-conference/...`.
+  - Non‑conference church content: any other path on the same domain.
+- Speaker / subcategory assignment:
+  - General Conference → parse trailing slug (e.g., `41holland` → `holland`) and map to canonical Apostle.
+    - If unknown/non‑Apostle → subcategory `Other`.
+  - Non‑conference → subcategory `Non GC`.
 - Mapping lives in `modules/cjclds.py` (`APOSTLES_LASTNAME_TO_CANONICAL`).
 - When matched:
   - `subcategories_json` merged with `{ category: "CJCLDS", subcategories: ["<Speaker>"] }`
@@ -41,5 +47,6 @@ Current Apostles (canonical subcategories)
 - Patrick Kearon
 
 Notes
-- Unknown or non-Apostle talks are labeled `Other` under `CJCLDS`.
+- Unknown or non‑Apostle General Conference talks are labeled `Other` under `CJCLDS`.
+- Non‑conference church content is labeled `Non GC` under `CJCLDS`.
 - Multiple speakers (rare) can be supported by extending the mapping logic.
