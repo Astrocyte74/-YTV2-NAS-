@@ -888,10 +888,10 @@ class YouTubeTelegramBot:
                 )
             ])
 
-        # Provider choices
-        rows.append([InlineKeyboardButton(cloud_label, callback_data="summary_provider:cloud")])
+        # Provider choices (labeled as “Other …” to distinguish from combos)
+        rows.append([InlineKeyboardButton("Other LLM from Cloud", callback_data="summary_provider:cloud")])
         if local_label:
-            rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
+            rows.append([InlineKeyboardButton("Other LLM (Local)", callback_data="summary_provider:ollama")])
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
         return InlineKeyboardMarkup(rows)
 

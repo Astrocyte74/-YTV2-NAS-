@@ -703,6 +703,42 @@ async def process_content_summary(
         default_prefix = prefix_map.get(source, "🔄")
         message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
 
+    # If a combo preselection exists, enrich the status with chosen LLM and TTS
+    try:
+        chat_id = query.message.chat.id if query.message else None
+        message_id = query.message.message_id if query.message else None
+        preselected = handler._get_tts_session(chat_id, message_id) if (chat_id and message_id) else None
+    except Exception:
+        preselected = None
+
+    if base_type.startswith("audio") and isinstance(preselected, dict) and preselected.get('auto_run'):
+        # LLM label
+        llm_provider = getattr(summarizer, "llm_provider", "") or provider_key
+        llm_model = getattr(summarizer, "model", "") or ''
+        short_model = llm_model.split("/", 1)[1] if isinstance(llm_model, str) and "/" in llm_model else llm_model
+        llm_label = f"{llm_provider.title()} • {short_model}".strip(" •")
+        # TTS label
+        tts_provider = (preselected.get('provider') or '').lower()
+        sel = preselected.get('selected_voice') or {}
+        tts_label = None
+        if tts_provider == 'openai':
+            voice = (sel.get('voice_id') or os.getenv('TTS_CLOUD_VOICE') or 'fable')
+            tts_label = f"OpenAI • {voice}"
+        elif tts_provider == 'local':
+            eng = (sel.get('engine') or '').strip()
+            fav = (sel.get('favorite_slug') or '').strip()
+            if eng and fav:
+                tts_label = f"Local • {eng}:{fav}"
+            else:
+                tts_label = "Local TTS"
+        extra = []
+        if llm_label:
+            extra.append(f"LLM: {llm_label}")
+        if tts_label:
+            extra.append(f"TTS: {tts_label}")
+        if extra:
+            message = f"{message}\n\n" + " • ".join(extra)
+
     await query.edit_message_text(message)
 
     try:
