@@ -118,8 +118,37 @@ class LLMConfig:
         # If explicit provider and model specified, use those
         if provider and model:
             api_key = self._get_api_key(provider)
-            if api_key:
+            # Ollama does not need an API key
+            if api_key is not None or provider.strip().lower() == "ollama":
                 return provider, model, api_key
+
+        # If explicit provider given (no model), choose sensible defaults/env overrides
+        if provider and not model:
+            p = provider.strip().lower()
+            # Normalize aliases
+            if p in ("local", "hub", "wireguard"):
+                p = "ollama"
+            if p == "api" or p == "cloud":
+                # Prefer OpenRouter for cloud if available
+                p = "openrouter" if self.openrouter_key else ("openai" if self.openai_key else "anthropic")
+
+            if p == "ollama":
+                # Prefer QUICK_LOCAL_MODEL when set
+                local_model = os.getenv("QUICK_LOCAL_MODEL") or self.DEFAULT_MODELS["ollama"]
+                return "ollama", local_model, None
+            else:
+                # QUICK_CLOUD_MODEL can carry a provider hint; prefer it
+                quick = os.getenv("QUICK_CLOUD_MODEL")
+                if quick:
+                    detected = self._detect_provider_from_model(quick) or p
+                    api_key = self._get_api_key(detected)
+                    if api_key is not None:
+                        return detected, quick, api_key
+                # Fall back to provider defaults
+                api_key = self._get_api_key(p)
+                default_model = self.DEFAULT_MODELS.get(p) or self.DEFAULT_MODELS["openrouter"]
+                if api_key is not None or p == "openrouter":
+                    return p, default_model, api_key
         
         # If LLM_MODEL is set in environment, use it
         if self.llm_model:
