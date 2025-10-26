@@ -64,11 +64,17 @@ class PostgreSQLSyncClient:
             base_url: PostgreSQL dashboard URL (e.g., https://ytv2-dashboard-postgres.onrender.com)
             ingest_token: X-INGEST-TOKEN for authentication
         """
-        self.base_url = base_url or os.getenv('POSTGRES_DASHBOARD_URL', '')
+        # Prefer RENDER_DASHBOARD_URL if present; fall back to POSTGRES_DASHBOARD_URL or legacy RENDER_API_URL
+        self.base_url = (
+            base_url
+            or os.getenv('RENDER_DASHBOARD_URL')
+            or os.getenv('POSTGRES_DASHBOARD_URL')
+            or os.getenv('RENDER_API_URL', '')
+        )
         self.ingest_token = ingest_token or os.getenv('INGEST_TOKEN', '')
 
         if not self.base_url:
-            raise ValueError("POSTGRES_DASHBOARD_URL environment variable is required")
+            raise ValueError("RENDER_DASHBOARD_URL (or POSTGRES_DASHBOARD_URL) environment variable is required")
         if not self.ingest_token:
             raise ValueError("INGEST_TOKEN environment variable is required")
 
