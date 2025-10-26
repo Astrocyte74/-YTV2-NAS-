@@ -9,7 +9,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **🔧 NAS Component** (This project): YouTube processing + Telegram bot
 - **🌐 Dashboard Component**: Web interface + audio playback (deployed to Render)
 
-### How It Works (Postgres-only)
+### How It Works (Postgres‑only)
 
 1. **📱 Telegram Bot** receives YouTube URLs from users
 2. **🤖 AI Processing** downloads, transcribes, and summarizes videos (Gemini Flash Lite by default)  
@@ -25,7 +25,7 @@ YTV2 uses a **hybrid architecture** with separated concerns:
 - **🔄 Duplicate Prevention**: JSON ledger system prevents reprocessing videos
 - **🎵 Audio Generation**: Multi-language TTS with vocabulary scaffolding (FR/ES variants)
 - **📊 Structured Reports**: JSON + HTML summaries with language metadata and key topics
-- **🗄️ Direct Postgres Writes**: No dashboard upload endpoints; writes happen via UPSERTs
+- **🗄️ Postgres‑only**: No SQLite; metadata is written via UPSERTs to Postgres
 - **🧵 Reddit Thread Support**: Fetch saved Reddit submissions and summarize them alongside YouTube videos
 - **📰 Web Article Support**: Layered extractor cleans arbitrary https links (Readability + Trafilatura fallbacks)
 - **⚠️ Resilient Metadata**: Falls back to YouTube watch-page parsing when yt-dlp formats are blocked
@@ -100,8 +100,8 @@ YTV2 uses a **hybrid architecture** with separated concerns:
    Clean up with `python tools/delete_postgres_video.py TEST1234567`.
 
 4. **Confirm audio uploads**  
-   Set `RENDER_DASHBOARD_URL` and `SYNC_SECRET` on the NAS, use the same secret on Render.  
-   Each TTS run then pushes MP3s to Postgres (for Listen chips) and to `/app/data/exports/audio/` on Render.
+   Set `RENDER_DASHBOARD_URL` and `INGEST_TOKEN` on the NAS (match `INGEST_TOKEN` on Render).  
+   Each TTS run uploads the MP3 to Render via `/ingest/audio` and flips `has_audio` in Postgres. See `docs/NAS_INTEGRATION.md`.
 
 ## 🔧 Configuration
 
@@ -241,10 +241,12 @@ docker-compose down && docker-compose up -d
 ## 🎵 Audio Delivery Path
 
 1. NAS generates `exports/audio_<video_id>_<timestamp>.mp3` after TTS.
-2. `PostgresWriter.upload_content(...)` upserts metadata and HTML-bearing variants.
-3. `PostgresWriter.upload_audio(...)` sets `content.has_audio=true` and stores an `<audio>` tag referencing `/exports/audio/<file>.mp3`.
-4. NAS uploads the MP3 to Render via `/api/upload-audio` (requires matching `SYNC_SECRET`).
-5. Render serves the file via `/exports/by_video/<video_id>.mp3`; dashboard Listen chips stream it instantly.
+2. `PostgresWriter.upload_content(...)` upserts metadata and HTML‑bearing variants into Postgres.
+3. Audio upload to Render:
+   - Preferred (default): HTTP ingest fallback via `POST /ingest/audio` (auth `X-INGEST-TOKEN`). No `AUDIO_PUBLIC_BASE` required.
+   - Optional (advanced): direct Postgres audio variant when `AUDIO_PUBLIC_BASE` points to a public base that serves NAS files.
+4. Render stores the MP3 under `/app/data/exports/audio/` and serves it at `/exports/by_video/<video_id>.mp3`; dashboard Listen chips stream it.
+5. Health/ops: `GET /health/ingest` shows `token_set` and `pg_dsn_set`. Details in `docs/NAS_INTEGRATION.md`.
 
 ## 🛠️ Troubleshooting
 
