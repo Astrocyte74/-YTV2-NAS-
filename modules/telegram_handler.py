@@ -126,6 +126,8 @@ class YouTubeTelegramBot:
         self.summarizer_cache: Dict[str, YouTubeSummarizer] = {}
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
+        # Auto-process scheduler for idle URLs (keyed by (chat_id, message_id))
+        self._auto_tasks: Dict[tuple, asyncio.Task] = {}
         
         # Persisted user preferences (e.g., last-used cloud/local models for quick picks)
         self.user_prefs_path = Path("./data/user_prefs.json")
@@ -618,9 +620,17 @@ class YouTubeTelegramBot:
             reply_markup = self._build_summary_keyboard(existing_variants, normalized_id)
             message_text = self._existing_variants_message(normalized_id, existing_variants, source="youtube")
 
-            await update.message.reply_text(
+            reply_msg = await update.message.reply_text(
                 message_text,
                 reply_markup=reply_markup
+            )
+            # Auto-process if configured
+            await self._maybe_schedule_auto_process(
+                reply_msg,
+                source="youtube",
+                url=video_url,
+                content_id=normalized_id,
+                user_name=user_name,
             )
             return
 
@@ -646,9 +656,16 @@ class YouTubeTelegramBot:
             reply_markup = self._build_summary_keyboard(existing_variants, content_id)
             message_text = self._existing_variants_message(content_id, existing_variants, source="reddit")
 
-            await update.message.reply_text(
+            reply_msg = await update.message.reply_text(
                 message_text,
                 reply_markup=reply_markup
+            )
+            await self._maybe_schedule_auto_process(
+                reply_msg,
+                source="reddit",
+                url=reddit_url,
+                content_id=content_id,
+                user_name=user_name,
             )
             return
 
@@ -674,9 +691,16 @@ class YouTubeTelegramBot:
             reply_markup = self._build_summary_keyboard(existing_variants, hashed)
             message_text = self._existing_variants_message(content_id, existing_variants, source="web")
 
-            await update.message.reply_text(
+            reply_msg = await update.message.reply_text(
                 message_text,
                 reply_markup=reply_markup
+            )
+            await self._maybe_schedule_auto_process(
+                reply_msg,
+                source="web",
+                url=web_url,
+                content_id=content_id,
+                user_name=user_name,
             )
             return
 
@@ -2148,6 +2172,14 @@ class YouTubeTelegramBot:
             await query.answer()
         except Exception as e:
             logging.debug(f"callback answer() failed: {e}")
+        # Cancel any pending auto-process for this message
+        try:
+            key = (query.message.chat.id, query.message.message_id)
+            t = self._auto_tasks.pop(key, None)
+            if t and not t.done():
+                t.cancel()
+        except Exception:
+            pass
         
         user_id = query.from_user.id
         user_name = query.from_user.first_name or "Unknown"
@@ -3215,6 +3247,103 @@ class YouTubeTelegramBot:
     def _escape_markdown(self, text: str) -> str:
         # Delegate to UI helper for escaping
         return ui_escape_markdown(text)
+
+    # ------------------------- Auto-process helpers -------------------------
+    async def _maybe_schedule_auto_process(
+        self,
+        reply_message,
+        *,
+        source: str,
+        url: str,
+        content_id: str,
+        user_name: str,
+    ) -> None:
+        """Schedule auto-processing of a default summary after an idle delay.
+
+        Controlled by env:
+          - AUTO_PROCESS_DELAY_SECONDS (int > 0 to enable)
+          - AUTO_PROCESS_SUMMARY (e.g., 'bullet-points')
+          - AUTO_PROCESS_PROVIDER ('cloud' or 'ollama')
+        """
+        try:
+            raw = str(os.getenv('AUTO_PROCESS_DELAY_SECONDS', '0')).strip()
+            delay = int(raw)
+        except Exception:
+            delay = 0
+        if delay <= 0:
+            return
+
+        summary_type = (os.getenv('AUTO_PROCESS_SUMMARY', 'bullet-points') or 'bullet-points').strip()
+        provider_key = (os.getenv('AUTO_PROCESS_PROVIDER', 'cloud') or 'cloud').strip().lower()
+
+        # Avoid duplicates: if variant already exists, do not schedule
+        current = set(self._discover_summary_types(content_id) or [])
+        if any((summary_type == v.split(':', 1)[0]) for v in current):
+            return
+
+        chat_id = reply_message.chat.id
+        msg_id = reply_message.message_id
+
+        async def _runner():
+            try:
+                await asyncio.sleep(delay)
+                # Check again before running
+                again = set(self._discover_summary_types(content_id) or [])
+                if any((summary_type == v.split(':', 1)[0]) for v in again):
+                    return
+
+                # Provide a minimal Query-like wrapper so downstream uses edit_message_text
+                class _Q:
+                    def __init__(self, m):
+                        self.message = m
+                    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+                        return await reply_message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+                fake_query = _Q(reply_message)
+
+                # Resolve summarizer for target provider/model
+                model_slug = None
+                if provider_key == 'cloud':
+                    model_slug = (os.getenv('QUICK_CLOUD_MODEL') or '').strip() or None
+                else:
+                    model_slug = (os.getenv('QUICK_LOCAL_MODEL') or '').strip() or None
+                summarizer = self._get_summary_summarizer(provider_key, model_slug)
+
+                # Ensure current item context is set
+                self.current_item = {
+                    'source': source,
+                    'url': url,
+                    'content_id': content_id if source != 'youtube' else f"yt:{content_id}",
+                    'raw_id': content_id,
+                    'normalized_id': content_id,
+                }
+
+                await summary_service.process_content_summary(
+                    self,
+                    fake_query,
+                    summary_type,
+                    user_name,
+                    None,
+                    provider_key=provider_key,
+                    summarizer=summarizer,
+                    provider_label=None,
+                )
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                try:
+                    await reply_message.reply_text(f"⚠️ Auto-process failed: {str(exc)[:120]}")
+                except Exception:
+                    pass
+            finally:
+                self._auto_tasks.pop((chat_id, msg_id), None)
+
+        # Cancel any existing task for this message and schedule a new one
+        key = (chat_id, msg_id)
+        old = self._auto_tasks.pop(key, None)
+        if old and not old.done():
+            old.cancel()
+        self._auto_tasks[key] = asyncio.create_task(_runner())
 
     def _ai2ai_audio_caption(self, session: Dict[str, Any]) -> str:
         defaults = self._ollama_persona_defaults()
