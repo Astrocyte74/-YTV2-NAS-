@@ -482,8 +482,35 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         "base_variant": base_variant,
         "result_id": result.get('id'),
     }
+    # If a preselected TTS choice exists (from combo/early selection), auto-run TTS
+    try:
+        chat_id = query.message.chat.id if query.message else None
+        message_id = query.message.message_id if query.message else None
+        preselected = handler._get_tts_session(chat_id, message_id) if (chat_id and message_id) else None
+    except Exception:
+        preselected = None
 
-    await handler._prompt_tts_provider(query, session_payload, title)
+    provider = None
+    if isinstance(preselected, dict) and preselected.get('auto_run'):
+        provider = (preselected.get('provider') or '').strip().lower() or None
+        sel = preselected.get('selected_voice') or {}
+        if sel:
+            session_payload['selected_voice'] = sel
+        last_voice = preselected.get('last_voice')
+        if last_voice:
+            session_payload['last_voice'] = last_voice
+
+    if provider:
+        try:
+            await handler._execute_tts_job(query, session_payload, provider)
+        finally:
+            try:
+                # Consume the one-shot preselection so it doesn't affect later flows
+                handler._remove_tts_session(chat_id, message_id)
+            except Exception:
+                pass
+    else:
+        await handler._prompt_tts_provider(query, session_payload, title)
 
 
 async def handle_audio_summary(handler, query, result: Dict[str, Any], summary_type: str) -> None:

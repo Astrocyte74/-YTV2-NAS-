@@ -848,6 +848,53 @@ class YouTubeTelegramBot:
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
         return InlineKeyboardMarkup(rows)
 
+    def _build_provider_with_combos_keyboard(
+        self,
+        cloud_label: str,
+        local_label: Optional[str],
+        quick_cloud_slug: Optional[str],
+        quick_local_slug: Optional[str],
+    ) -> InlineKeyboardMarkup:
+        rows: List[List[InlineKeyboardButton]] = []
+        # Determine availability of combos from env
+        cloud_model = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+        local_model = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+        cloud_voice = (os.getenv("TTS_CLOUD_VOICE") or "fable").strip()
+        fav_env = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
+        has_local_voice = any(s.strip() for s in fav_env.split(",")) if fav_env else False
+
+        combo_buttons: List[InlineKeyboardButton] = []
+        if local_model and has_local_voice and local_label:
+            combo_buttons.append(InlineKeyboardButton("Local Combo", callback_data="summary_combo:local"))
+        if cloud_model and cloud_voice:
+            combo_buttons.append(InlineKeyboardButton("Cloud Combo", callback_data="summary_combo:cloud"))
+        if combo_buttons:
+            # Put both on one row when available
+            rows.append(combo_buttons)
+
+        # Quick picks (same as non-combo keyboard)
+        if quick_cloud_slug:
+            rows.append([
+                InlineKeyboardButton(
+                    f"API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
+                    callback_data=f"summary_quick:cloud:{quick_cloud_slug}",
+                )
+            ])
+        if quick_local_slug:
+            rows.append([
+                InlineKeyboardButton(
+                    f"Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
+                    callback_data=f"summary_quick:ollama:{quick_local_slug}",
+                )
+            ])
+
+        # Provider choices
+        rows.append([InlineKeyboardButton(cloud_label, callback_data="summary_provider:cloud")])
+        if local_label:
+            rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+        return InlineKeyboardMarkup(rows)
+
     def _friendly_llm_provider(self, provider: Optional[str]) -> str:
         mapping = {
             "openai": "OpenAI",
@@ -2147,12 +2194,21 @@ class YouTubeTelegramBot:
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
             picks = self._quick_pick_candidates(provider_options, user_id)
-            keyboard = self._build_provider_with_quick_keyboard(
-                cloud_label,
-                local_label,
-                picks.get("cloud"),
-                picks.get("ollama"),
-            )
+            # For audio variants, surface combo buttons that will auto-run end-to-end
+            if summary_type.startswith("audio"):
+                keyboard = self._build_provider_with_combos_keyboard(
+                    cloud_label,
+                    local_label,
+                    picks.get("cloud"),
+                    picks.get("ollama"),
+                )
+            else:
+                keyboard = self._build_provider_with_quick_keyboard(
+                    cloud_label,
+                    local_label,
+                    picks.get("cloud"),
+                    picks.get("ollama"),
+                )
             await query.edit_message_text(prompt_text, reply_markup=keyboard)
             return
 
@@ -2223,6 +2279,81 @@ class YouTubeTelegramBot:
                 pass
             await self._execute_summary_with_model(query, session, provider_key, model_option)
             return
+        elif callback_data.startswith("summary_combo:"):
+            # One-tap combo: derive model + TTS from env quicks and auto-run end-to-end
+            parts = callback_data.split(":", 1)
+            combo_kind = parts[1] if len(parts) > 1 else ""
+            chat_id = query.message.chat.id
+            message_id = query.message.message_id
+            session = self._get_summary_session(chat_id, message_id)
+            if not session:
+                await query.answer("Session expired. Please pick a summary again.", show_alert=True)
+                await self._show_main_summary_options(query)
+                return
+            try:
+                if combo_kind == "cloud":
+                    # Resolve cloud model via llm_config
+                    from llm_config import llm_config as _lc
+                    cloud_model_slug = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+                    if not cloud_model_slug:
+                        await query.answer("No QUICK_CLOUD_MODEL set", show_alert=True)
+                        await self._handle_summary_provider_callback(query, "cloud")
+                        return
+                    resolved_provider, resolved_model, _ = _lc.get_model_config(None, cloud_model_slug)
+                    model_option = {
+                        "provider": resolved_provider,
+                        "model": resolved_model,
+                        "label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                        "button_label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
+                    }
+                    # Preselect OpenAI TTS voice from env (default: fable)
+                    cloud_voice = (os.getenv("TTS_CLOUD_VOICE") or "fable").strip()
+                    preselected = {
+                        'auto_run': True,
+                        'provider': 'openai',
+                        'selected_voice': {'favorite_slug': None, 'voice_id': cloud_voice, 'engine': None},
+                    }
+                    self._store_tts_session(chat_id, message_id, preselected)
+                    await self._execute_summary_with_model(query, session, "cloud", model_option)
+                    return
+                elif combo_kind == "local":
+                    local_model_slug = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+                    if not local_model_slug:
+                        await query.answer("No QUICK_LOCAL_MODEL set", show_alert=True)
+                        await self._handle_summary_provider_callback(query, "ollama")
+                        return
+                    model_option = {
+                        "provider": "ollama",
+                        "model": local_model_slug,
+                        "label": f"Ollama • {self._short_model_name(local_model_slug)}",
+                        "button_label": f"{self._short_label(self._short_model_name(local_model_slug), 24)}",
+                    }
+                    # Pick first favorite from TTS_QUICK_FAVORITE for local combos
+                    fav_env = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
+                    selected_voice = None
+                    if fav_env:
+                        first = [s.strip() for s in fav_env.split(",") if s.strip()]
+                        if first:
+                            token = first[0]
+                            if "|" in token:
+                                eng, slug = token.split("|", 1)
+                                selected_voice = {'favorite_slug': slug.strip(), 'voice_id': None, 'engine': eng.strip()}
+                    preselected = {
+                        'auto_run': True,
+                        'provider': 'local',
+                        'selected_voice': selected_voice or {},
+                    }
+                    self._store_tts_session(chat_id, message_id, preselected)
+                    await self._execute_summary_with_model(query, session, "ollama", model_option)
+                    return
+                else:
+                    await query.answer("Unknown combo", show_alert=True)
+                    await self._show_main_summary_options(query)
+                    return
+            except Exception as exc:
+                logging.error("Combo start failed: %s", exc)
+                await self._show_main_summary_options(query)
+                return
         
         elif callback_data.startswith('listen_this'):
             # One-off TTS for the exact summary on this message
