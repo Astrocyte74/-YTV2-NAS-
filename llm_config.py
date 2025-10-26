@@ -5,6 +5,7 @@ Integrates with mkpy LLM Management System for centralized API keys and model se
 """
 
 import os
+import logging
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 
@@ -136,14 +137,20 @@ class LLMConfig:
             for shortlist_provider, shortlist_model in shortlist["primary"]:
                 api_key = self._get_api_key(shortlist_provider)
                 if api_key or shortlist_provider == "ollama":  # Ollama doesn't need API key
-                    print(f"🎯 Using {self.llm_shortlist} shortlist: {shortlist_provider}/{shortlist_model}")
+                    logging.debug(
+                        "LLM shortlist primary: %s/%s (list=%s)",
+                        shortlist_provider, shortlist_model, self.llm_shortlist
+                    )
                     return shortlist_provider, shortlist_model, api_key
             
             # Try fallback models
             for shortlist_provider, shortlist_model in shortlist["fallback"]:
                 api_key = self._get_api_key(shortlist_provider)
                 if api_key:
-                    print(f"🔄 Using {self.llm_shortlist} fallback: {shortlist_provider}/{shortlist_model}")
+                    logging.debug(
+                        "LLM shortlist fallback: %s/%s (list=%s)",
+                        shortlist_provider, shortlist_model, self.llm_shortlist
+                    )
                     return shortlist_provider, shortlist_model, api_key
         
         # Ultimate fallback - use any available provider
@@ -151,7 +158,7 @@ class LLMConfig:
             api_key = self._get_api_key(fallback_provider)
             if api_key:
                 fallback_model = self.DEFAULT_MODELS[fallback_provider]
-                print(f"⚠️  Using fallback: {fallback_provider}/{fallback_model}")
+                logging.debug("LLM fallback: %s/%s", fallback_provider, fallback_model)
                 return fallback_provider, fallback_model, api_key
         
         # No API keys available

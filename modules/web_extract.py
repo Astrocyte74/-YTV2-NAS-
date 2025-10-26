@@ -283,6 +283,23 @@ class WebPageExtractor:
                     final_url = resp.url
                 except Exception:
                     pass
+            # Try AMP variant as a last resort if still blocked
+            if resp.status_code == 403:
+                try:
+                    from urllib.parse import urlsplit, urlunsplit
+                    parts = list(urlsplit(final_url))
+                    if not parts[2].endswith('/amp'):
+                        parts[2] = parts[2].rstrip('/') + '/amp'
+                        amp_url = urlunsplit(parts)
+                        logger.info("WebExtractor: 403 still present, trying AMP variant: %s", amp_url)
+                        resp = _do_get(amp_url, {
+                            "User-Agent": safari_ua,
+                            "Referer": referer,
+                            "Accept-Encoding": "gzip, deflate, br",
+                        })
+                        final_url = resp.url
+                except Exception:
+                    pass
         content_type = (resp.headers.get("Content-Type") or "").lower()
         if "text/html" not in content_type:
             logger.warning("URL %s returned non-HTML content-type: %s", final_url, content_type)

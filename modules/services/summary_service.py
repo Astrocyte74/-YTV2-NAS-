@@ -7,7 +7,11 @@ import os
 import re
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # type: ignore
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import unicodedata
@@ -381,10 +385,32 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             'web': '📰',
         }.get(source, '🎬')
         channel_icon = '👤' if source == 'reddit' else '📺'
+        # Augment header with generated-at timestamp and model label (when available)
+        gen_line = None
+        try:
+            gen_at = (export_info or {}).get('generated_at') if export_info else None
+            prov = (export_info or {}).get('llm_provider') if export_info else None
+            model = (export_info or {}).get('llm_model') if export_info else None
+            if not gen_at:
+                gen_at = datetime.now().isoformat(timespec='seconds')
+            if prov or model:
+                prov_label = handler._friendly_llm_provider(prov) if hasattr(handler, '_friendly_llm_provider') else (prov or '')
+                short_model = model.split('/',1)[1] if isinstance(model,str) and '/' in model else model
+                model_label = f"{prov_label} • {short_model}".strip(" •")
+            else:
+                model_label = None
+            if model_label:
+                gen_line = f"🕒 {gen_at} • Model: {model_label}"
+            else:
+                gen_line = f"🕒 {gen_at}"
+        except Exception:
+            gen_line = None
+
         header_parts = [
             f"{source_icon} **{handler._escape_markdown(title)}**",
             f"{channel_icon} {handler._escape_markdown(channel)}",
             duration_info,
+            gen_line or "",
             "",
             f"📝 **{summary_type.replace('-', ' ').title()} Summary:**"
         ]
@@ -738,7 +764,7 @@ async def process_content_summary(
         default_prefix = prefix_map.get(source, "🔄")
         message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
 
-    # If a combo preselection exists, enrich the status with chosen LLM and TTS
+    # Enrich the status with chosen LLM (always); include TTS if preselected for audio
     try:
         chat_id = query.message.chat.id if query.message else None
         message_id = query.message.message_id if query.message else None
@@ -746,35 +772,27 @@ async def process_content_summary(
     except Exception:
         preselected = None
 
-    if base_type.startswith("audio"):
-        # Always show LLM label; include TTS if known/preselected
-        llm_provider = getattr(summarizer, "llm_provider", "") or provider_key
-        llm_model = getattr(summarizer, "model", "") or ''
-        short_model = llm_model.split("/", 1)[1] if isinstance(llm_model, str) and "/" in llm_model else llm_model
-        llm_label = f"{(llm_provider or '').title()} • {short_model}".strip(" •")
-
-        tts_label = None
-        if isinstance(preselected, dict):
-            tts_provider = (preselected.get('provider') or '').lower()
-            sel = preselected.get('selected_voice') or {}
-            if tts_provider == 'openai':
-                voice = (sel.get('voice_id') or os.getenv('TTS_CLOUD_VOICE') or 'fable')
-                tts_label = f"OpenAI • {voice}"
-            elif tts_provider == 'local':
-                eng = (sel.get('engine') or '').strip()
-                fav = (sel.get('favorite_slug') or '').strip()
-                if eng and fav:
-                    tts_label = f"Local • {eng}:{fav}"
-                else:
-                    tts_label = "Local TTS"
-
-        extra = []
-        if llm_label and llm_label.strip():
-            extra.append(f"LLM: {llm_label}")
-        if tts_label:
-            extra.append(f"TTS: {tts_label}")
-        if extra:
-            message = f"{message}\n\n" + " • ".join(extra)
+    # LLM line
+    llm_provider = getattr(summarizer, "llm_provider", "") or provider_key
+    llm_model = getattr(summarizer, "model", "") or ''
+    short_model = llm_model.split("/", 1)[1] if isinstance(llm_model, str) and "/" in llm_model else llm_model
+    llm_label = f"{(llm_provider or '').title()} • {short_model}".strip(" •")
+    extra_lines = []
+    if llm_label:
+        extra_lines.append(f"LLM: {llm_label}")
+    # TTS line (audio only)
+    if base_type.startswith("audio") and isinstance(preselected, dict):
+        tts_provider = (preselected.get('provider') or '').lower()
+        sel = preselected.get('selected_voice') or {}
+        if tts_provider == 'openai':
+            voice = (sel.get('voice_id') or os.getenv('TTS_CLOUD_VOICE') or 'fable')
+            extra_lines.append(f"TTS: OpenAI • {voice}")
+        elif tts_provider == 'local':
+            eng = (sel.get('engine') or '').strip()
+            fav = (sel.get('favorite_slug') or '').strip()
+            extra_lines.append(f"TTS: {('Local • ' + eng + ':' + fav) if (eng and fav) else 'Local TTS'}")
+    if extra_lines:
+        message = f"{message}\n\n" + " • ".join(extra_lines)
 
     await query.edit_message_text(message)
 
@@ -799,6 +817,22 @@ async def process_content_summary(
         llm_model = getattr(summarizer, "model", "unknown")
         llm_label = provider_label or f"{llm_provider}/{llm_model}"
         logging.info("🧠 LLM: %s", llm_label)
+        # Pass LLM + timestamp to render layer for header augmentation
+        try:
+            export_info["llm_provider"] = llm_provider
+            export_info["llm_model"] = llm_model
+            # Format timestamp in a local timezone for readability
+            tz_name = os.getenv('SUMMARY_TIMEZONE', 'America/Denver')
+            try:
+                if ZoneInfo:
+                    now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+                else:
+                    now_local = datetime.now()
+                export_info["generated_at"] = now_local.strftime('%Y-%m-%d %H:%M:%S %Z')
+            except Exception:
+                export_info["generated_at"] = datetime.now().isoformat(timespec='seconds')
+        except Exception:
+            pass
 
         try:
             if source == "reddit":

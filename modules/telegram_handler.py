@@ -3273,17 +3273,43 @@ class YouTubeTelegramBot:
         if delay <= 0:
             return
 
-        summary_type = (os.getenv('AUTO_PROCESS_SUMMARY', 'bullet-points') or 'bullet-points').strip()
-        provider_key = (os.getenv('AUTO_PROCESS_PROVIDER', 'cloud') or 'cloud').strip().lower()
+        # Parse summary preference list (comma-separated); choose first known type
+        types_raw = (os.getenv('AUTO_PROCESS_SUMMARY', 'bullet-points') or 'bullet-points').strip()
+        preferred_types = [t.strip() for t in types_raw.split(',') if t.strip()]
+        allowed_types = {
+            'bullet-points', 'comprehensive', 'key-insights',
+            'audio', 'audio-fr', 'audio-es'
+        }
+        summary_type = None
+        for t in preferred_types:
+            if t in allowed_types:
+                summary_type = t
+                break
+        if not summary_type:
+            summary_type = 'bullet-points'
+        providers_raw = (os.getenv('AUTO_PROCESS_PROVIDER', 'cloud') or 'cloud').strip().lower()
+        candidates = [p.strip() for p in providers_raw.split(',') if p.strip()] or ['cloud']
 
-        # If auto-provider is ollama but hub is unreachable, fall back to cloud
-        if provider_key == 'ollama':
-            try:
-                if not reach_hub_ollama_ok():
-                    provider_key = 'cloud'
-                    logging.info("AUTO_PROCESS: Ollama unreachable; falling back to cloud")
-            except Exception:
-                provider_key = 'cloud'
+        # Choose first available provider from the preference list
+        chosen = None
+        for p in candidates:
+            if p == 'ollama':
+                try:
+                    if reach_hub_ollama_ok():
+                        chosen = 'ollama'
+                        break
+                    else:
+                        logging.info("AUTO_PROCESS: Ollama unreachable; skipping to next provider")
+                except Exception:
+                    logging.info("AUTO_PROCESS: Ollama probe failed; skipping to next provider")
+                    continue
+            elif p == 'cloud':
+                chosen = 'cloud'
+                break
+            else:
+                # Unknown entry, skip
+                continue
+        provider_key = chosen or 'cloud'
 
         # Avoid duplicates: if variant already exists, do not schedule
         current = set(self._discover_summary_types(content_id) or [])
