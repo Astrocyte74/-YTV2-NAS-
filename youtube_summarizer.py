@@ -41,6 +41,8 @@ from langchain_anthropic import ChatAnthropic
 from langchain_community.llms import Ollama
 from langchain_community.chat_models import ChatOllama
 from langchain_core.messages import HumanMessage
+from modules.ollama_client import OllamaClientError
+from modules import ollama_client as oc
 import requests
 
 from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
@@ -207,6 +209,43 @@ class YouTubeSummarizer:
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
+
+    async def _ollama_hub_call(self, messages: list, *, max_retries: int = 3) -> str:
+        """Call the hub's Ollama proxy directly to avoid /api path mismatches.
+
+        Expects a single HumanMessage; posts to TTSHUB_API_BASE/ollama/chat using
+        our lightweight client, and returns the response text.
+        """
+        # Extract prompt text from LangChain-style messages
+        prompt_text = None
+        try:
+            if isinstance(messages, (list, tuple)) and messages:
+                first = messages[0]
+                prompt_text = getattr(first, 'content', None) or (first if isinstance(first, str) else None)
+        except Exception:
+            prompt_text = None
+        if not prompt_text:
+            raise OllamaClientError("invalid messages for ollama hub call")
+
+        loop = asyncio.get_running_loop()
+        last_err: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                def _call():
+                    return oc.chat([{"role": "user", "content": prompt_text}], self.model, stream=False)  # type: ignore
+                resp = await loop.run_in_executor(None, _call)
+                txt = None
+                if isinstance(resp, dict):
+                    msg = resp.get('message') or {}
+                    txt = (msg or {}).get('content') or resp.get('response')
+                if isinstance(txt, str) and txt.strip():
+                    return txt
+                last_err = OllamaClientError("empty response from ollama hub")
+            except Exception as e:
+                last_err = e
+            await asyncio.sleep(1.2 * (attempt + 1))
+
+        raise OllamaClientError(str(last_err) if last_err else "ollama hub call failed")
 
     def _get_reddit_fetcher(self):
         """Lazily construct and memoize the Reddit fetcher."""
@@ -2774,17 +2813,20 @@ Multiple Categories (when content genuinely spans areas):
 
     async def _robust_llm_call(self, messages: list, operation_name: str = "LLM call", max_retries: int = 3) -> Optional[str]:
         """Make LLM API call with timeout and retry logic"""
+        use_hub = self.llm_provider == "ollama" and bool(os.getenv("TTSHUB_API_BASE"))
         for attempt in range(max_retries):
             try:
                 print(f"🔄 {operation_name} attempt {attempt + 1}/{max_retries}")
-                
-                # Use asyncio.wait_for to implement timeout
-                response = await asyncio.wait_for(
-                    self.llm.ainvoke(messages),
-                    timeout=120.0  # 2 minute timeout for LLM calls
-                )
-                
-                return response.content
+                if use_hub:
+                    txt = await asyncio.wait_for(self._ollama_hub_call(messages, max_retries=1), timeout=120.0)
+                    return txt
+                else:
+                    # Use asyncio.wait_for to implement timeout
+                    response = await asyncio.wait_for(
+                        self.llm.ainvoke(messages),
+                        timeout=120.0  # 2 minute timeout for LLM calls
+                    )
+                    return response.content
                 
             except asyncio.TimeoutError:
                 print(f"⚠️ {operation_name} timed out on attempt {attempt + 1}")
@@ -2809,6 +2851,9 @@ Multiple Categories (when content genuinely spans areas):
                     continue
         
         print(f"❌ All {operation_name} attempts failed")
+        if use_hub:
+            # Signal to the caller so it can fall back to cloud summarizer
+            raise OllamaClientError(f"{operation_name} failed via local hub after retries")
         return None
 
     async def generate_tts_audio(
