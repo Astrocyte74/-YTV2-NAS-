@@ -198,6 +198,25 @@ YTV2-NAS/
 1. **Import Stack**: Use the provided `docker-compose.yml`
 2. **Set Environment**: Upload your `.env.nas` file
 3. **Deploy**: Start the stack
+
+## 🔧 Bot Admin Commands
+
+These Telegram commands are available to admin users (allowed IDs) to help operate and troubleshoot the NAS bot:
+
+- `/status` — Overall health snapshot with inline buttons. Shows:
+  - Summarizer and LLM config
+  - Local LLM (hub/direct) provider, base, reachability, installed models
+  - TTS hub favorites/engines, queue status, process uptime, Git SHA
+  - Admin shortcuts: Diagnostics, Logs, Restart
+- `/diag` — One-shot diagnostics inside the container:
+  - Python/platform, yt-dlp/ffmpeg, disk usage, uptime
+  - Local LLM reachability (hub/direct) and model count
+  - Postgres connectivity if `DATABASE_URL` is set
+- `/logs [N]` — Tail the last N lines from `bot.log` (default 80)
+- `/restart` — Gracefully restarts the container (Compose restart policy restarts the bot); you will receive a confirmation message after it comes back online.
+
+Notes
+- Local LLM routing is handled by a unified client that prefers the hub when `TTSHUB_API_BASE` is set and falls back to direct Ollama when `OLLAMA_URL`/`OLLAMA_HOST` is set. Errors are normalized to enable clean cloud fallback.
 4. **Monitor**: Check logs for successful startup
 
 ### Built‑in TTS Queue Worker

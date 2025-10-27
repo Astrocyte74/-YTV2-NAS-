@@ -75,6 +75,7 @@ from modules.ollama_client import (
     OllamaClientError,
     get_models as ollama_get_models,
     pull as ollama_pull,
+    health_summary as ollama_health_summary,
 )
 from modules.services import ollama_service, summary_service, tts_service
 from modules.services import cloud_service
@@ -118,6 +119,7 @@ class YouTubeTelegramBot:
         # In-memory cache for one-off TTS playback keyed by (chat_id, message_id)
         self.tts_cache: Dict[tuple, Dict[str, Any]] = {}
         self.tts_client: Optional[TTSHubClient] = None
+        self.started_at = time.time()
         # Interactive TTS sessions keyed by (chat_id, message_id)
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Interactive summary sessions keyed by (chat_id, message_id)
@@ -476,6 +478,9 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("restart", self.restart_command))
+        self.application.add_handler(CommandHandler("logs", self.logs_command))
+        self.application.add_handler(CommandHandler("diag", self.diag_command))
         self.application.add_handler(CommandHandler("tts", self.tts_command))
         # Ollama chat commands (aliases: /o, /o_stop, /stop)
         self.application.add_handler(CommandHandler("ollama", self.ollama_command))
@@ -494,6 +499,163 @@ class YouTubeTelegramBot:
         
         # Error handler
         self.application.add_error_handler(self.error_handler)
+
+    async def restart_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Restart the container by exiting the process (Docker restarts it)."""
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            msg = getattr(update, 'message', None) or getattr(getattr(update, 'callback_query', None), 'message', None)
+            if msg:
+                await msg.reply_text("❌ You are not authorized to use this bot.")
+            return
+        # Send confirmation message regardless of whether this came from a slash or a button
+        msg = getattr(update, 'message', None) or getattr(getattr(update, 'callback_query', None), 'message', None)
+        if msg:
+            await msg.reply_text("♻️ Restarting the bot container…")
+        elif getattr(update, 'effective_chat', None):
+            try:
+                await context.bot.send_message(update.effective_chat.id, "♻️ Restarting the bot container…")
+            except Exception:
+                pass
+        # Persist notify target so we can confirm after restart
+        try:
+            from pathlib import Path as _P
+            import json as _J
+            _P('data').mkdir(exist_ok=True)
+            chat_id = (getattr(getattr(update, 'effective_chat', None), 'id', None))
+            if chat_id:
+                (_P('data')/ 'restart_notify.json').write_text(_J.dumps({
+                    'chat_id': chat_id,
+                    'ts': int(time.time())
+                }), encoding='utf-8')
+        except Exception:
+            pass
+        await asyncio.sleep(0.5)
+        # Attempt to terminate PID 1 (entrypoint) to ensure full container exit; fall back to self-exit
+        import os, signal, time as _t
+        try:
+            os.kill(1, signal.SIGTERM)
+            _t.sleep(1.0)
+        except Exception:
+            pass
+        os._exit(0)
+
+    async def logs_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show tail of bot.log. Usage: /logs [lines] (default 80)."""
+        user_id = update.effective_user.id
+        target = getattr(update, 'message', None) or getattr(getattr(update, 'callback_query', None), 'message', None)
+        if not self._is_user_allowed(user_id):
+            if target:
+                await target.reply_text("❌ You are not authorized to use this bot.")
+            return
+        try:
+            n = 80
+            if context.args:
+                try:
+                    n = max(10, min(500, int(context.args[0])))
+                except Exception:
+                    pass
+            path = Path('bot.log')
+            if not path.exists():
+                if target:
+                    await target.reply_text("⚠️ bot.log not found.")
+                return
+            lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+            tail = lines[-n:]
+            text = "\n".join(tail)
+            if len(text) > 3500:
+                text = text[-3500:]
+                text = "…\n" + text
+            if target:
+                await target.reply_text(f"```\n{text}\n```", parse_mode=ParseMode.MARKDOWN)
+        except Exception as exc:
+            if target:
+                await target.reply_text(f"❌ logs error: {exc}")
+
+    async def diag_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run quick diagnostics inside the container."""
+        user_id = update.effective_user.id
+        target = getattr(update, 'message', None) or getattr(getattr(update, 'callback_query', None), 'message', None)
+        if not self._is_user_allowed(user_id):
+            if target:
+                await target.reply_text("❌ You are not authorized to use this bot.")
+            return
+        import sys, platform, shutil, subprocess, json
+        # System
+        py = sys.version.split()[0]
+        plat = platform.platform()
+        # Tools
+        def _ver(cmd, arg='--version'):
+            try:
+                r = subprocess.run([cmd, arg], capture_output=True, text=True, timeout=4)
+                if r.returncode == 0:
+                    out = (r.stdout or r.stderr or '').strip().splitlines()[0]
+                    return out[:120]
+                return f"{cmd}: rc={r.returncode}"
+            except FileNotFoundError:
+                return f"{cmd}: not found"
+            except Exception as e:
+                return f"{cmd}: {e}"
+        ytdlp = _ver('yt-dlp')
+        ffmpeg = _ver('ffmpeg')
+        # Disk
+        try:
+            du = shutil.disk_usage('/')
+            gb = 1024**3
+            disk_line = f"{du.used//gb}G used / {du.total//gb}G total (free {du.free//gb}G)"
+        except Exception:
+            disk_line = "unknown"
+        # Hub health
+        try:
+            hs = ollama_health_summary(cache_ttl=5) or {}
+        except Exception as exc:
+            hs = {"provider": None, "base": None, "reachable": False, "models": None, "notes": str(exc)}
+        # Postgres
+        db = os.getenv('DATABASE_URL')
+        db_line = 'unset'
+        if db:
+            try:
+                import psycopg
+                with psycopg.connect(db, connect_timeout=3) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute('SELECT 1')
+                        cur.fetchone()
+                db_line = '✅ ok'
+            except Exception as e:
+                db_line = f"❌ {str(e).splitlines()[0][:200]}"
+        # Uptime
+        up_secs = int(max(0, time.time() - (self.started_at or time.time())))
+        hrs = up_secs // 3600; mins = (up_secs % 3600) // 60; secs = up_secs % 60
+
+        lines = [
+            "🧪 Diagnostics:",
+            f"• Python: {py}",
+            f"• Platform: {plat}",
+            f"• yt-dlp: {ytdlp}",
+            f"• ffmpeg: {ffmpeg}",
+            f"• Disk: {disk_line}",
+            f"• Uptime: {hrs}h {mins}m {secs}s",
+            "",
+            "🧩 Local LLM:",
+            f"• Provider: {hs.get('provider') or 'none'}",
+            f"• Base: {hs.get('base') or 'unset'}",
+            f"• Reachable: {'✅' if hs.get('reachable') else '❌'}",
+            f"• Models: {hs.get('models') if hs.get('models') is not None else 'unknown'}",
+        ]
+        note = (hs.get('notes') or '').strip()
+        if note:
+            lines.append(f"• Notes: {note}")
+        lines.extend([
+            "",
+            "🗄️ Postgres:",
+            f"• DATABASE_URL: {'set' if db else 'unset'}",
+            f"• Connect: {db_line}",
+        ])
+        out = "\n".join(lines)
+        if len(out) > 3500:
+            out = out[:3500] + "\n…"
+        if target:
+            await target.reply_text(out)
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /start command."""
@@ -558,16 +720,180 @@ class YouTubeTelegramBot:
             llm_status = f"✅ {self.summarizer.llm_provider}/{self.summarizer.model}" if self.summarizer else "❌ Not configured"
         except Exception:
             llm_status = "❌ LLM not configured"
-        
-        status_message = (
-            "📊 Bot Status:\n\n"
-            f"🤖 Telegram Bot: ✅ Running\n"
-            f"🔍 Summarizer: {summarizer_status}\n"
-            f"🧠 LLM: {llm_status}\n"
-            f"👥 Authorized Users: {len(self.allowed_user_ids)}"
-        )
-        
-        await update.message.reply_text(status_message)
+
+        # Local LLM (hub/direct) health
+        hub_env = (os.getenv('TTSHUB_API_BASE') or '').strip()
+        direct_env = (os.getenv('OLLAMA_URL') or os.getenv('OLLAMA_HOST') or '').strip()
+        try:
+            hs = ollama_health_summary(cache_ttl=20) or {}
+        except Exception as exc:
+            hs = {"provider": None, "base": None, "reachable": False, "models": None, "notes": str(exc)}
+
+        def _mask(url: str) -> str:
+            if not url:
+                return 'unset'
+            try:
+                return url.split('://',1)[-1]
+            except Exception:
+                return url
+
+        lines = [
+            "📊 Bot Status:",
+            f"🤖 Telegram Bot: ✅ Running",
+            f"🔍 Summarizer: {summarizer_status}",
+            f"🧠 LLM: {llm_status}",
+            f"👥 Authorized Users: {len(self.allowed_user_ids)}",
+            "",
+            "🧩 Local LLM (hub/direct):",
+            f"• TTSHUB_API_BASE: {_mask(hub_env)}",
+            f"• OLLAMA_URL/HOST: {_mask(direct_env)}",
+            f"• Selected: {hs.get('provider') or 'none'} → {_mask(str(hs.get('base') or ''))}",
+            f"• Reachable: {'✅' if hs.get('reachable') else '❌'}",
+            f"• Models: {hs.get('models') if hs.get('models') is not None else 'unknown'}",
+        ]
+        note = (hs.get('notes') or '').strip()
+        if note:
+            lines.append(f"• Notes: {note}")
+
+        # Try to list installed model names (list all)
+        try:
+            tags = ollama_get_models() or {}
+            raw = tags.get('models') or []
+            names: List[str] = []
+            for entry in raw:
+                if isinstance(entry, dict):
+                    name = (entry.get('name') or entry.get('model') or '').strip()
+                    if name:
+                        names.append(name)
+            if names:
+                joined = ", ".join(names)
+                lines.append(f"• Installed Models: {joined}")
+        except Exception:
+            pass
+
+        # Show key defaults/env for quick reference (no secrets)
+        def env_or(key: str, default: str = 'unset') -> str:
+            v = (os.getenv(key) or '').strip()
+            return v if v else default
+
+        lines.extend([
+            "",
+            "🎛️ Defaults (env):",
+            f"• QUICK_LOCAL_MODEL: {env_or('QUICK_LOCAL_MODEL')}",
+            f"• QUICK_CLOUD_MODEL: {env_or('QUICK_CLOUD_MODEL')}",
+            f"• TTS_QUICK_FAVORITE: {env_or('TTS_QUICK_FAVORITE')}",
+            f"• TTS_CLOUD_VOICE: {env_or('TTS_CLOUD_VOICE')}",
+            f"• OLLAMA_DEFAULT_MODEL: {env_or('OLLAMA_DEFAULT_MODEL')}",
+            f"• LLM_PROVIDER: {env_or('LLM_PROVIDER')}",
+            f"• LLM_MODEL: {env_or('LLM_MODEL')}",
+        ])
+
+        # Cloud key sanity
+        try:
+            from llm_config import llm_config as _cfg
+            lines.extend([
+                f"• OPENAI_API_KEY: {'✅' if bool(getattr(_cfg, 'openai_key', None)) else '❌'}",
+                f"• ANTHROPIC_API_KEY: {'✅' if bool(getattr(_cfg, 'anthropic_key', None)) else '❌'}",
+                f"• OPENROUTER_API_KEY: {'✅' if bool(getattr(_cfg, 'openrouter_key', None)) else '❌'}",
+            ])
+        except Exception:
+            pass
+
+        # Auto-process snapshot
+        ap_provider = env_or('AUTO_PROCESS_PROVIDER')
+        ap_summary = env_or('AUTO_PROCESS_SUMMARY')
+        ap_delay = env_or('AUTO_PROCESS_DELAY_SECONDS')
+        lines.extend([
+            "",
+            "⚙️ Auto-Process:",
+            f"• Provider(s): {ap_provider}",
+            f"• Summary type(s): {ap_summary}",
+            f"• Delay (s): {ap_delay}",
+        ])
+
+        # TTS Hub snapshot
+        if hub_env:
+            try:
+                client = self.tts_client or TTSHubClient.from_env()
+            except Exception:
+                client = None
+            if client:
+                fav_labels: List[str] = []
+                try:
+                    favs = await client.fetch_favorites()
+                    fav_labels = [str(f.get('label') or f.get('slug') or '') for f in (favs or []) if (f.get('label') or f.get('slug'))]
+                except Exception:
+                    favs = []
+                engines: List[str] = []
+                try:
+                    cat = await client.fetch_catalog()
+                    voices = (cat or {}).get('voices') or []
+                    engines = sorted({(v.get('engine') or v.get('provider') or '').strip() for v in voices if (v.get('engine') or v.get('provider'))})
+                except Exception:
+                    engines = []
+                lines.extend([
+                    "",
+                    "🎧 TTS Hub:",
+                    f"• Favorites: {len(fav_labels)}",
+                    f"• Favorite labels: {', '.join(fav_labels[:5]) if fav_labels else 'none'}",
+                    f"• Engines: {', '.join([e for e in engines if e]) or 'unknown'}",
+                ])
+
+        # Queue snapshot
+        try:
+            q_enabled = env_or('ENABLE_TTS_QUEUE_WORKER')
+            q_interval = env_or('TTS_QUEUE_INTERVAL')
+            from pathlib import Path as _P
+            qdir = _P('data/tts_queue')
+            qcount = sum(1 for p in qdir.iterdir() if p.is_file()) if qdir.exists() else 0
+            lines.extend([
+                "",
+                "📦 Queue:",
+                f"• Worker enabled: {q_enabled}",
+                f"• Interval (s): {q_interval}",
+                f"• Jobs queued: {qcount}",
+            ])
+        except Exception:
+            pass
+
+        # Version/context: uptime + git rev
+        try:
+            up_secs = int(max(0, time.time() - (self.started_at or time.time())))
+            hrs = up_secs // 3600; mins = (up_secs % 3600) // 60; secs = up_secs % 60
+            from subprocess import run, PIPE
+            rev = run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True)
+            rev_str = (rev.stdout or '').strip() or 'unknown'
+            lines.extend([
+                "",
+                "🧾 Context:",
+                f"• Uptime: {hrs}h {mins}m {secs}s",
+                f"• Git: {rev_str}",
+            ])
+        except Exception:
+            pass
+
+        # Admin command hints
+        lines.extend([
+            "",
+            "🔧 Admin shortcuts:",
+            "• /diag  • /logs 120  • /restart",
+        ])
+
+        # Inline buttons for quick access
+        try:
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("Diagnostics", callback_data="status:diag"),
+                    InlineKeyboardButton("Logs (120)", callback_data="status:logs:120"),
+                ],
+                [
+                    InlineKeyboardButton("Restart", callback_data="status:restart"),
+                ],
+            ])
+        except Exception:
+            kb = None
+
+        await update.message.reply_text("\n".join(lines), reply_markup=kb)
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle incoming messages with YouTube URLs."""
@@ -2277,6 +2603,31 @@ class YouTubeTelegramBot:
             await self._handle_tts_callback(query, callback_data)
         elif callback_data.startswith("ollama_"):
             await self._handle_ollama_callback(query, callback_data)
+        elif callback_data.startswith("status:"):
+            # Admin shortcut buttons invoked from /status
+            parts = callback_data.split(":")
+            action = parts[1] if len(parts) > 1 else ""
+            try:
+                if action == "diag":
+                    class _Ctx: args = []
+                    await self.diag_command(update, _Ctx)
+                elif action == "logs":
+                    n = parts[2] if len(parts) > 2 else "120"
+                    class _Ctx: args = [n]
+                    await self.logs_command(update, _Ctx)
+                elif action == "restart":
+                    class _Ctx: args = []
+                    await self.restart_command(update, _Ctx)
+                else:
+                    await query.answer("Unknown action", show_alert=True)
+                return
+            except Exception as exc:
+                logging.error("status action failed: %s", exc)
+                try:
+                    await query.answer("Action failed", show_alert=True)
+                except Exception:
+                    pass
+                return
         elif callback_data.startswith("summary_model:"):
             suffix = callback_data.split(":", 1)[1]
             if suffix == "back":
@@ -3784,6 +4135,23 @@ class YouTubeTelegramBot:
             await self.application.initialize()
             await self.application.start()
             await self.application.updater.start_polling()
+
+            # Post-startup restart confirmation (if requested before exit)
+            try:
+                from pathlib import Path as _P
+                import json as _J
+                p = _P('data')/ 'restart_notify.json'
+                if p.exists():
+                    obj = _J.loads(p.read_text(encoding='utf-8') or '{}')
+                    chat_id = int(obj.get('chat_id') or 0)
+                    if chat_id:
+                        await self.application.bot.send_message(chat_id=chat_id, text="✅ Bot restarted and is back online.")
+                    try:
+                        p.unlink()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             stop_event = asyncio.Event()
             await stop_event.wait()

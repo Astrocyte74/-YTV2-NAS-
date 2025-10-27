@@ -87,8 +87,20 @@ with requests.post(f"{BASE}/ollama/chat", json=body, stream=True, timeout=None) 
 - Personas for AI↔AI fall back to `OLLAMA_PERSONA` (comma-separated, e.g. `Albert Einstein,Isaac Newton`) if no category is chosen; unset variables use built-in defaults.
 - Single chat responses are labelled `🤖 <model>` so you can tell which model answered.
 - Implementation:
-  - Client: `modules/ollama_client.py` (non-stream + SSE streaming helpers, handles SSE payloads such as `data: b'…'`)
-  - Telegram: `modules/telegram_handler.py` (model picker, streaming updates, AI↔AI automation)
+- Client: `modules/ollama_client.py` (non-stream + SSE streaming helpers, handles SSE payloads such as `data: b'…'`)
+- Telegram: `modules/telegram_handler.py` (model picker, streaming updates, AI↔AI automation)
+
+## NAS Unified Client (hub/direct)
+
+On the NAS, calls to local LLMs are centralized through a small helper so paths and fallbacks are consistent.
+
+- File: `modules/ollama_client.py`
+- Env precedence: `TTSHUB_API_BASE` (hub) → `OLLAMA_URL`/`OLLAMA_HOST` (direct) → else unavailable
+- Paths:
+  - Hub: calls `…/ollama/chat|generate|pull|tags|ps|show|delete`
+  - Direct: calls `…/api/chat|generate|pull|tags|ps|show|delete`
+- Errors: maps timeouts/5xx to `LocalUnavailable`, 404 to `NotFound`, other 4xx to `InvalidRequest`. The summarizer treats these as “local unavailable” and falls back to cloud when appropriate.
+- Health: `health_summary()` and `is_available()` provide quick reachability checks (cached briefly) for `/status` and diagnostics.
 
 ## Reachability & Fallbacks
 - The bot runs a fast preflight before opening the /o picker to avoid long waits when your Mac is offline:

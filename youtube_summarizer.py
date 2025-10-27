@@ -199,22 +199,30 @@ class YouTubeSummarizer:
                 }
             )
         elif self.llm_provider == "ollama":
+            # If a local base is configured, route via our helper and skip ChatOllama
+            local_env = os.getenv("TTSHUB_API_BASE") or os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_HOST")
             try:
                 print(f"🧠 Ollama base: {self.ollama_base_url}")
+                if local_env:
+                    print("🧠 Using unified local client (hub/direct); skipping ChatOllama init")
             except Exception:
                 pass
-            self.llm = ChatOllama(
-                model=self.model,
-                base_url=self.ollama_base_url
-            )
+            if local_env:
+                self.llm = None  # calls will go through modules.ollama_client in _robust_llm_call
+            else:
+                # Fallback: instantiate ChatOllama only when no local env is defined
+                self.llm = ChatOllama(
+                    model=self.model,
+                    base_url=self.ollama_base_url
+                )
         else:
             raise ValueError(f"Unsupported LLM provider: {self.llm_provider}")
 
     async def _ollama_hub_call(self, messages: list, *, max_retries: int = 3) -> str:
-        """Call the hub's Ollama proxy directly to avoid /api path mismatches.
+        """Call local Ollama via our helper (hub or direct) to avoid path mismatches.
 
-        Expects a single HumanMessage; posts to TTSHUB_API_BASE/ollama/chat using
-        our lightweight client, and returns the response text.
+        Expects a single HumanMessage; posts using modules.ollama_client.chat and
+        returns the response text.
         """
         # Extract prompt text from LangChain-style messages
         prompt_text = None
@@ -2813,11 +2821,20 @@ Multiple Categories (when content genuinely spans areas):
 
     async def _robust_llm_call(self, messages: list, operation_name: str = "LLM call", max_retries: int = 3) -> Optional[str]:
         """Make LLM API call with timeout and retry logic"""
-        use_hub = self.llm_provider == "ollama" and bool(os.getenv("TTSHUB_API_BASE"))
+        # Prefer local client (hub proxy or direct Ollama) when provider=ollama and any local base is configured
+        use_hub = False
+        use_local_client = False
+        if self.llm_provider == "ollama":
+            if os.getenv("TTSHUB_API_BASE"):
+                use_hub = True
+                use_local_client = True
+            elif os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_HOST"):
+                use_local_client = True
         for attempt in range(max_retries):
             try:
                 print(f"🔄 {operation_name} attempt {attempt + 1}/{max_retries}")
-                if use_hub:
+                if use_local_client:
+                    # Route through our unified local client (hub or direct)
                     txt = await asyncio.wait_for(self._ollama_hub_call(messages, max_retries=1), timeout=120.0)
                     return txt
                 else:
@@ -2851,7 +2868,7 @@ Multiple Categories (when content genuinely spans areas):
                     continue
         
         print(f"❌ All {operation_name} attempts failed")
-        if use_hub:
+        if use_local_client:
             # Signal to the caller so it can fall back to cloud summarizer
             raise OllamaClientError(f"{operation_name} failed via local hub after retries")
         return None
