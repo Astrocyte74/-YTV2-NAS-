@@ -478,6 +478,8 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("start", self.start_command))
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        # Alias: /s → /status
+        self.application.add_handler(CommandHandler("s", self.status_command))
         self.application.add_handler(CommandHandler("restart", self.restart_command))
         self.application.add_handler(CommandHandler("logs", self.logs_command))
         self.application.add_handler(CommandHandler("diag", self.diag_command))
@@ -691,7 +693,7 @@ class YouTubeTelegramBot:
             "🤖 YouTube Summarizer Bot Commands:\n\n"
             "/start - Start using the bot\n"
             "/help - Show this help message\n"
-            "/status - Check bot and API status\n\n"
+            "/status (/s) - Check bot and API status\n\n"
             "📝 How to use:\n"
             "1. Send a YouTube URL\n"
             "2. Choose summary type\n"

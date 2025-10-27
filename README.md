@@ -203,7 +203,7 @@ YTV2-NAS/
 
 These Telegram commands are available to admin users (allowed IDs) to help operate and troubleshoot the NAS bot:
 
-- `/status` — Overall health snapshot with inline buttons. Shows:
+- `/status` (`/s`) — Overall health snapshot with inline buttons. Shows:
   - Summarizer and LLM config
   - Local LLM (hub/direct) provider, base, reachability, installed models
   - TTS hub favorites/engines, queue status, process uptime, Git SHA
