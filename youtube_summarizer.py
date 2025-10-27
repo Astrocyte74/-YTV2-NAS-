@@ -1369,17 +1369,18 @@ class YouTubeSummarizer:
             "key-insights": f"""
             {base_context}
 
-            Extract the key insights and their practical implications.
+            Organize the content into thematic categories based on the material itself (no external analysis).
 
             Output:
-            - 5–7 “• ” insights. For each, include “— why it matters” with a concrete rationale.
-            - 2–3 action bullets labeled “Actions:” with clear next steps (tool/version/setting when relevant).
-            - End with “Bottom line: …”.
+            - 3–5 short category headings derived from the content.
+            - Under each heading, provide 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
 
             Rules:
             - Respond in the transcript’s language.
-            - No speculation beyond the transcript; use “Unknown” if particulars are missing.
-            - No headings, no code fences/emojis.
+            - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
+            - No speculation beyond the transcript; use “Unknown” only when details are missing.
+            - No code fences or emojis.
+            - Do not add a final “Bottom line”.
             """,
             
             "executive": f"""
@@ -2357,24 +2358,25 @@ Multiple Categories (when content genuinely spans areas):
         return result or "Unable to generate bullet points"
 
     async def _extract_key_insights(self, summary: str) -> str:
-        """Extract key insights and takeaways"""
+        """Organize summary into content-derived categories with concise bullets"""
         prompt = f"""
-        From this summary, extract the key insights and their implications.
+        Organize the following summary into thematic categories based on the content itself (not external analysis).
 
         {summary}
 
         Output:
-        - 5–7 “• ” insights; for each add “— why it matters” with a concrete rationale.
-        - 2–3 action bullets labeled “Actions:” with clear next steps (tool/version/setting if relevant).
-        - End with “Bottom line: …”.
+        - 3–5 short category headings derived from the content.
+        - Under each heading, include 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
 
         Rules:
-        - No speculation; use “Unknown” if the summary lacks the detail.
-        - No headings, no code fences, no emojis.
+        - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
+        - No speculation; use “Unknown” only when details are missing.
+        - No code fences or emojis.
+        - Do not add a final “Bottom line”.
         """
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="key insights extraction")
-        return result or "Unable to generate key insights"
+        return result or "Unable to generate categorized insights"
 
     async def _create_audio_summary_from_transcript(self, transcript: str, metadata: Dict) -> str:
         """Create audio-optimized summary directly from transcript (for direct path)"""
