@@ -1640,6 +1640,15 @@ class YouTubeTelegramBot:
             "model_switch_enabled": model_switch_enabled,
         }
 
+        logging.info(
+            "draw: session init model=%s group=%s switch=%s (hub model=%s family=%s)",
+            session["selected_model"],
+            session["selected_model_group"],
+            session["model_switch_enabled"],
+            active_model_raw,
+            active_family,
+        )
+
         preset_label = self._draw_choice_label(session, "preset", None, default="Auto")
         status_bits = []
         selected_model_label = session.get("selected_model")
