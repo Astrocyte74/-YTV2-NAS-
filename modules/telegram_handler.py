@@ -1597,7 +1597,7 @@ class YouTubeTelegramBot:
         dt_info = {}
         if base:
             try:
-                preset_info = await draw_service.fetch_presets(base)
+                preset_info = await draw_service.fetch_presets(base, force_refresh=True)
                 dt_info = (preset_info.get("drawthings") or {}) if preset_info else {}
             except Exception as exc:
                 logging.warning("draw: preset fetch failed: %s", exc)

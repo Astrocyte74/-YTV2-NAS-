@@ -213,14 +213,14 @@ _PRESET_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _PRESET_CACHE_TTL_SECONDS = 300
 
 
-async def fetch_presets(base_api_url: str, *, ttl: int = _PRESET_CACHE_TTL_SECONDS) -> Dict[str, Any]:
+async def fetch_presets(base_api_url: str, *, ttl: int = _PRESET_CACHE_TTL_SECONDS, force_refresh: bool = False) -> Dict[str, Any]:
     base = (base_api_url or "").strip()
     if not base:
         raise RuntimeError("Hub base URL is not configured.")
 
     now = time.time()
     cached = _PRESET_CACHE.get(base)
-    if cached and now - cached[0] <= ttl:
+    if not force_refresh and cached and now - cached[0] <= ttl:
         return cached[1]
 
     url = f"{base.rstrip('/')}/telegram/presets"
