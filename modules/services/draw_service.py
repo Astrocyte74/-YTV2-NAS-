@@ -21,6 +21,10 @@ _PROMPT_ENHANCER_SYSTEM = (
 )
 
 
+class DrawGenerationError(RuntimeError):
+    """Raised when Draw Things generation via the hub fails."""
+
+
 def _strip_api_suffix(url: str) -> str:
     url = url.rstrip("/")
     if url.endswith("/api"):
@@ -331,9 +335,21 @@ async def generate_image(
     loop = asyncio.get_running_loop()
 
     def _call() -> Dict[str, Any]:
-        resp = requests.post(url, json=payload, timeout=120)
-        resp.raise_for_status()
-        return resp.json() or {}
+        try:
+            resp = requests.post(url, json=payload, timeout=120)
+        except requests.exceptions.RequestException as exc:
+            raise DrawGenerationError(f"Request to hub failed: {exc}") from exc
+
+        if resp.status_code >= 400:
+            snippet = resp.text.strip()
+            snippet = snippet[:400] if snippet else f"HTTP {resp.status_code}"
+            raise DrawGenerationError(
+                f"Hub returned {resp.status_code}: {snippet}"
+            )
+        try:
+            return resp.json() or {}
+        except ValueError as exc:
+            raise DrawGenerationError(f"Hub returned invalid JSON: {exc}") from exc
 
     data = await loop.run_in_executor(None, _call)
     raw_url = data.get("url")
@@ -345,6 +361,7 @@ async def generate_image(
 
 
 __all__ = [
+    "DrawGenerationError",
     "clear_preset_cache",
     "fetch_presets",
     "enhance_prompt_local",

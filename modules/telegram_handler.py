@@ -1682,6 +1682,23 @@ class YouTubeTelegramBot:
                 negative_preset=session.get("selected_negative"),
                 model=model_name,
             )
+        except draw_service.DrawGenerationError as exc:
+            message = str(exc)
+            logging.warning("draw: hub generation error (%s): %s", size_label, message)
+            lowered = message.lower()
+            if any(token in lowered for token in ("sdapi/v1/txt2img", "service unavailable", "connection refused", "read timed out", "request to hub failed")):
+                friendly = (
+                    "⚠️ Draw Things is not responding (likely offline or still loading the model). "
+                    "Open the Draw Things app on the Mac and ensure the target model is ready, then retry."
+                )
+            else:
+                friendly = f"⚠️ Generation failed: {message[:160]}"
+            session["status_message"] = friendly
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
         except Exception as exc:
             logging.error("draw: generation failed (%s): %s", size_label, exc)
             session["status_message"] = f"⚠️ Generation failed: {str(exc)[:120]}"
