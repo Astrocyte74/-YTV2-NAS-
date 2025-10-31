@@ -213,7 +213,7 @@ These Telegram commands are available to admin users (allowed IDs) to help opera
   - Local LLM reachability (hub/direct) and model count
   - Postgres connectivity if `DATABASE_URL` is set
 - `/logs [N]` — Tail the last N lines from `bot.log` (default 80)
-- `/restart` — Gracefully restarts the container (Compose restart policy restarts the bot); you will receive a confirmation message after it comes back online.
+- `/restart` (`/r`) — Gracefully restarts the container (Compose restart policy restarts the bot); you will receive a confirmation message after it comes back online.
 
 Notes
 - Local LLM routing is handled by a unified client that prefers the hub when `TTSHUB_API_BASE` is set and falls back to direct Ollama when `OLLAMA_URL`/`OLLAMA_HOST` is set. Errors are normalized to enable clean cloud fallback.

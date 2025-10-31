@@ -503,6 +503,7 @@ class YouTubeTelegramBot:
         # Alias: /s → /status
         self.application.add_handler(CommandHandler("s", self.status_command))
         self.application.add_handler(CommandHandler("restart", self.restart_command))
+        self.application.add_handler(CommandHandler("r", self.restart_command))
         self.application.add_handler(CommandHandler("logs", self.logs_command))
         self.application.add_handler(CommandHandler("diag", self.diag_command))
         self.application.add_handler(CommandHandler("tts", self.tts_command))
