@@ -1535,8 +1535,8 @@ class YouTubeTelegramBot:
         ])
 
         available_presets = self._draw_presets_for_group(session, group)
-        logging.debug(
-            "draw: keyboard model=%s group=%s available_presets=%s",
+        logging.info(
+            "draw: keyboard model=%s group=%s presets=%s",
             selected_model,
             group,
             [entry.get("key") for entry in available_presets] if isinstance(available_presets, list) else available_presets,
