@@ -10,6 +10,18 @@ from typing import Dict, Optional, Tuple
 from pathlib import Path
 
 
+def get_quick_cloud_env_model() -> str:
+    """Return the first non-empty QUICK_CLOUD_MODEL entry when comma-separated."""
+    raw = os.getenv("QUICK_CLOUD_MODEL") or ""
+    if not raw:
+        return ""
+    for candidate in raw.split(","):
+        model = candidate.strip()
+        if model:
+            return model
+    return ""
+
+
 class LLMConfig:
     """Centralized LLM configuration with mkpy integration"""
     
@@ -122,6 +134,38 @@ class LLMConfig:
             if api_key is not None or provider.strip().lower() == "ollama":
                 return provider, model, api_key
 
+        # If only model is provided, infer provider from slug
+        if model and not provider:
+            cleaned_model = model.strip()
+
+            # Handle explicit provider/model slugs first (e.g., "openai/gpt-5-nano")
+            if "/" in cleaned_model:
+                prefix, remainder = cleaned_model.split("/", 1)
+                prefix = prefix.strip()
+                remainder = remainder.strip()
+
+                # Interpret "openrouter/..." slugs by dropping the redundant prefix
+                slug = remainder if prefix.lower() == "openrouter" and remainder else cleaned_model
+
+                if self.openrouter_key:
+                    return "openrouter", slug, self.openrouter_key
+
+                # Fallback to direct provider usage when we have the corresponding key
+                if prefix.lower() in {"openai", "anthropic"} and remainder:
+                    direct_api_key = self._get_api_key(prefix.lower())
+                    if direct_api_key:
+                        return prefix.lower(), remainder, direct_api_key
+
+            inferred = self._detect_provider_from_model(cleaned_model)
+            if inferred:
+                normalized_model = self._normalize_model_for_provider(cleaned_model, inferred)
+                api_key = self._get_api_key(inferred)
+                if api_key is not None or inferred == "ollama":
+                    return inferred, normalized_model, api_key
+            # Allow OpenRouter-style slugs when key is present even if inference failed
+            if self.openrouter_key and "/" in cleaned_model:
+                return "openrouter", cleaned_model, self.openrouter_key
+        
         # If explicit provider given (no model), choose sensible defaults/env overrides
         if provider and not model:
             p = provider.strip().lower()
@@ -138,7 +182,7 @@ class LLMConfig:
                 return "ollama", local_model, None
             else:
                 # QUICK_CLOUD_MODEL can carry a provider hint; prefer it
-                quick = os.getenv("QUICK_CLOUD_MODEL")
+                quick = get_quick_cloud_env_model()
                 if quick:
                     detected = self._detect_provider_from_model(quick) or p
                     api_key = self._get_api_key(detected)
@@ -211,15 +255,29 @@ class LLMConfig:
     
     def _detect_provider_from_model(self, model: str) -> Optional[str]:
         """Detect provider from model name"""
-        if any(prefix in model.lower() for prefix in ['gpt', 'chatgpt', 'openai']):
-            return "openai"
-        elif any(prefix in model.lower() for prefix in ['claude', 'anthropic']):
-            return "anthropic"
-        elif '/' in model:  # OpenRouter format
+        lowered = model.lower()
+        if "/" in lowered:
+            head = lowered.split("/", 1)[0]
+            if head == "openrouter":
+                return "openrouter"
+            if head == "ollama":
+                return "ollama"
             return "openrouter"
-        elif any(suffix in model.lower() for suffix in [':latest', ':3b', ':7b', ':9b', ':12b']):
+        if any(prefix in lowered for prefix in ['gpt', 'chatgpt', 'openai']):
+            return "openai"
+        elif any(prefix in lowered for prefix in ['claude', 'anthropic']):
+            return "anthropic"
+        elif any(suffix in lowered for suffix in [':latest', ':3b', ':7b', ':9b', ':12b']):
             return "ollama"
         return None
+
+    def _normalize_model_for_provider(self, model: str, provider: str) -> str:
+        """Strip vendor prefixes when direct provider APIs are used."""
+        if provider in {"openai", "anthropic"} and "/" in model:
+            return model.split("/", 1)[1].strip()
+        if provider == "ollama" and model.lower().startswith("ollama/"):
+            return model.split("/", 1)[1].strip()
+        return model.strip()
     
     def get_available_providers(self) -> Dict[str, bool]:
         """Get status of available providers"""

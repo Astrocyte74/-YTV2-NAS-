@@ -707,6 +707,7 @@ async def process_content_summary(
     summarizer=None,
     provider_label: Optional[str] = None,
 ) -> None:
+    export_info: Dict[str, Any] = {"html_path": None, "json_path": None}
     item = handler.current_item or {}
     content_id = item.get("content_id")
     source = item.get("source", "youtube")
@@ -834,21 +835,17 @@ async def process_content_summary(
         llm_label = provider_label or f"{llm_provider}/{llm_model}"
         logging.info("🧠 LLM: %s", llm_label)
         # Pass LLM + timestamp to render layer for header augmentation
+        export_info["llm_provider"] = llm_provider
+        export_info["llm_model"] = llm_model
+        tz_name = os.getenv('SUMMARY_TIMEZONE', 'America/Denver')
         try:
-            export_info["llm_provider"] = llm_provider
-            export_info["llm_model"] = llm_model
-            # Format timestamp in a local timezone for readability
-            tz_name = os.getenv('SUMMARY_TIMEZONE', 'America/Denver')
-            try:
-                if ZoneInfo:
-                    now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
-                else:
-                    now_local = datetime.now()
-                export_info["generated_at"] = now_local.strftime('%Y-%m-%d %H:%M:%S %Z')
-            except Exception:
-                export_info["generated_at"] = datetime.now().isoformat(timespec='seconds')
+            if ZoneInfo:
+                now_local = datetime.now(timezone.utc).astimezone(ZoneInfo(tz_name))
+            else:
+                now_local = datetime.now()
+            export_info["generated_at"] = now_local.strftime('%Y-%m-%d %H:%M:%S %Z')
         except Exception:
-            pass
+            export_info["generated_at"] = datetime.now().isoformat(timespec='seconds')
 
         try:
             if source == "reddit":
@@ -901,7 +898,7 @@ async def process_content_summary(
                 logging.info("❌ Processing error: %s", error_message)
             return
 
-        export_info = {"html_path": None, "json_path": None}
+        export_info.update({"html_path": None, "json_path": None})
         try:
             report_dict = create_report_from_youtube_summarizer(result)
             # Apply CJCLDS categorization when applicable (General Conference talks)

@@ -121,7 +121,7 @@ On the NAS, calls to local LLMs are centralized through a small helper so paths 
   - `OLLAMA_PERSONA` (optional comma-separated fallback personas for AI↔AI, first entry used for A, second for B)
   - `OLLAMA_PERSONA_<CATEGORY>` (optional comma-separated persona lists grouped by category; the `<CATEGORY>` suffix becomes the label in the Telegram picker, e.g. `OLLAMA_PERSONA_ARTISTS`)
   - `QUICK_PICK_MODE` (optional): `auto` (default), `env` (prefer env vars), or `last` (prefer last-used)
-  - `QUICK_CLOUD_MODEL` (optional): provider/model slug for the API quick-pick
+  - `QUICK_CLOUD_MODEL` (optional): provider/model slug for the API quick-pick; supports comma-separated values and uses the first entry
   - `QUICK_LOCAL_MODEL` (optional): local model name for the Ollama quick-pick
 - Hub on Mac (optional):
   - `OLLAMA_URL` if Ollama is not on `http://127.0.0.1:11434`

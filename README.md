@@ -279,7 +279,7 @@ Let the bot automatically start a summary after you paste a URL and wait a few s
 - `TELEGRAM_SHOW_RESOLVED_PREVIEW` – set to `1`/`true` to post the resolved URL (e.g., expanding `flip.it/…`) so Telegram can show a rich preview before processing.
 
 Notes:
-- Provider model selection for auto‑runs uses `QUICK_LOCAL_MODEL` (for `ollama`) or `QUICK_CLOUD_MODEL` (for `cloud`) when set. Otherwise, it uses the bot’s defaults.
+- Provider model selection for auto‑runs uses `QUICK_LOCAL_MODEL` (for `ollama`) or `QUICK_CLOUD_MODEL` (for `cloud`, comma-separated list allowed; first entry is used) when set. Otherwise, it uses the bot’s defaults.
 - For Ollama summaries, the bot prefers your TTS hub proxy if `TTSHUB_API_BASE` is set; no `OLLAMA_HOST` is needed for this path.
 
 

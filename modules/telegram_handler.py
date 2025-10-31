@@ -37,7 +37,7 @@ from modules.event_stream import emit_report_event
 from modules.summary_variants import merge_summary_variants, normalize_variant_id
 
 from youtube_summarizer import YouTubeSummarizer
-from llm_config import llm_config
+from llm_config import llm_config, get_quick_cloud_env_model
 from modules.tts_hub import (
     TTSHubClient,
     LocalTTSUnavailable,
@@ -1105,7 +1105,7 @@ class YouTubeTelegramBot:
 
     def _quick_pick_candidates(self, provider_options: Dict[str, Dict[str, Any]], user_id: int) -> Dict[str, Optional[str]]:
         mode = (os.getenv("QUICK_PICK_MODE") or "auto").strip().lower()
-        env_cloud = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+        env_cloud = get_quick_cloud_env_model()
         env_local = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
 
         uid = str(user_id)
@@ -1209,7 +1209,7 @@ class YouTubeTelegramBot:
     ) -> InlineKeyboardMarkup:
         rows: List[List[InlineKeyboardButton]] = []
         # Determine availability of combos from env
-        cloud_model = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+        cloud_model = get_quick_cloud_env_model()
         local_model = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
         cloud_voice = (os.getenv("TTS_CLOUD_VOICE") or "fable").strip()
         fav_env = (os.getenv("TTS_QUICK_FAVORITE") or "").strip()
@@ -2713,7 +2713,7 @@ class YouTubeTelegramBot:
                 if combo_kind == "cloud":
                     # Resolve cloud model via llm_config
                     from llm_config import llm_config as _lc
-                    cloud_model_slug = (os.getenv("QUICK_CLOUD_MODEL") or "").strip()
+                    cloud_model_slug = get_quick_cloud_env_model()
                     if not cloud_model_slug:
                         await query.answer("No QUICK_CLOUD_MODEL set", show_alert=True)
                         await self._handle_summary_provider_callback(query, "cloud")
@@ -3708,7 +3708,7 @@ class YouTubeTelegramBot:
                 # Resolve summarizer for target provider/model
                 model_slug = None
                 if provider_key == 'cloud':
-                    model_slug = (os.getenv('QUICK_CLOUD_MODEL') or '').strip() or None
+                    model_slug = get_quick_cloud_env_model() or None
                 else:
                     model_slug = (os.getenv('QUICK_LOCAL_MODEL') or '').strip() or None
                 summarizer = self._get_summary_summarizer(provider_key, model_slug)

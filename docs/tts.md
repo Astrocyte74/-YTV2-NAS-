@@ -67,7 +67,7 @@
 - OpenAI key: `OPENAI_API_KEY` (required for `openai` provider)
 - Audio combos and quick picks (Telegram UI):
   - `QUICK_LOCAL_MODEL` – default local LLM model (e.g., `gemma3:12b`)
-  - `QUICK_CLOUD_MODEL` – default cloud LLM model (e.g., `google/gemini-2.5-flash-lite`)
+  - `QUICK_CLOUD_MODEL` – default cloud LLM model (e.g., `google/gemini-2.5-flash-lite`); accepts a comma-separated list and uses the first available entry
   - `TTS_QUICK_FAVORITE` – comma‑separated local favorites to show as one‑tap quicks (e.g., `kokoro|favorite--bm-daniel,xtts|favorite--mkb-2`)
   - `TTS_CLOUD_VOICE` – default OpenAI voice for cloud combo/quick paths (e.g., `fable`)
 
