@@ -99,6 +99,32 @@ def _clean_label(value: Optional[str]) -> str:
     return " ".join(words) if words else value
 
 
+def _family_from_name(name: Optional[str]) -> str:
+    if not isinstance(name, str) or not name:
+        return "general"
+    lowered = name.lower()
+    if "flux" in lowered:
+        return "flux"
+    if any(token in lowered for token in ("hidream", "i1", "sdxl")):
+        return "hidream"
+    return "general"
+
+
+def _friendly_model_name(raw: Optional[str], overrides: List[Dict[str, str]]) -> Optional[str]:
+    if not isinstance(raw, str) or not raw:
+        return None
+    lowered = raw.lower()
+    for opt in overrides:
+        name = opt.get("name")
+        if not name:
+            continue
+        if name.lower() == lowered or lowered in name.lower() or name.lower() in lowered:
+            return name
+    # fallback: replace separators for readability
+    display = raw.replace("_", " ").replace("-", " ").strip()
+    return display or raw
+
+
 def _load_draw_models() -> List[Dict[str, str]]:
     raw = (os.getenv("DRAW_MODELS") or "").strip()
     models: List[Dict[str, str]] = []
@@ -186,7 +212,7 @@ class YouTubeTelegramBot:
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
         # Auto-process scheduler for idle URLs (keyed by (chat_id, message_id))
         self._auto_tasks: Dict[tuple, asyncio.Task] = {}
-        
+
         # Persisted user preferences (e.g., last-used cloud/local models for quick picks)
         self.user_prefs_path = Path("./data/user_prefs.json")
         self.user_prefs: Dict[str, Any] = {}
@@ -207,14 +233,20 @@ class YouTubeTelegramBot:
             re.IGNORECASE,
         )
         self.web_url_pattern = re.compile(r'(https?://[^\s<>]+)', re.IGNORECASE)
-        
+
         # Telegram message length limit
         self.MAX_MESSAGE_LENGTH = 4096
-        
+
         # Cache for URLs
         self.url_cache = {}
         self.CACHE_TTL = 3600  # 1 hour TTL for cached URLs
-        
+
+        self.draw_model_switch_enabled = (
+            (os.getenv("DRAW_MODEL_SWITCH_ENABLED") or "").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
+        self.draw_models_overrides = _load_draw_models()  # cache for later use
+
         # Initialize summarizer
         try:
             llm_config.load_environment()
@@ -1332,52 +1364,65 @@ class YouTubeTelegramBot:
                 "hidream": "HiDream presets",
                 "general": "General presets",
             }
-            order = ((session.get("preset_info") or {}).get("orders") or {}).get("presets") or []
-            ordered_keys: List[str] = []
-            for key in order:
-                if key in mapping:
-                    ordered_keys.append(key)
-            for key in mapping.keys():
-                if key not in ordered_keys:
-                    ordered_keys.append(key)
+            preset_info = session.get("preset_info") or {}
+            order = (preset_info.get("orders") or {}).get("presets") or []
+
+            def iter_entries(group_filter: Optional[str]):
+                seen: set = set()
+                if order:
+                    for key in order:
+                        entry = mapping.get(key)
+                        if not isinstance(entry, dict):
+                            continue
+                        if group_filter and entry.get("group") != group_filter:
+                            continue
+                        seen.add(key)
+                        yield entry
+                for entry in (preset_info.get("presets") or []):
+                    key = entry.get("key")
+                    if not isinstance(entry, dict):
+                        continue
+                    if key in seen:
+                        continue
+                    if group_filter and entry.get("group") != group_filter:
+                        continue
+                    seen.add(key)
+                    yield entry
 
             has_any = False
             if group:
+                entries = list(iter_entries(group))
                 header = group_names.get(group, f"{group.title()} presets")
                 rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
-                for key in ordered_keys:
-                    entry = mapping.get(key)
-                    if not isinstance(entry, dict):
-                        continue
-                    entry_group = entry.get("group") or "general"
-                    if entry_group != group:
-                        continue
-                    label = entry.get("label") or _clean_label(key)
-                    if key == selected:
+                for entry in entries:
+                    label = entry.get("label") or _clean_label(entry.get("key"))
+                    if entry.get("key") == selected:
                         label = f"✅ {label}"
-                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{key}")])
+                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{entry.get('key')}")])
                     has_any = True
             else:
-                seen_groups: List[str] = []
-                for key in ordered_keys:
-                    entry = mapping.get(key)
-                    if not isinstance(entry, dict):
-                        continue
+                last_group = None
+                for entry in iter_entries(None):
                     entry_group = entry.get("group") or "general"
-                    if entry_group not in seen_groups:
-                        seen_groups.append(entry_group)
+                    if entry_group != last_group:
                         header = group_names.get(entry_group, f"{entry_group.title()} presets")
                         rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
-                    label = entry.get("label") or _clean_label(key)
-                    if key == selected:
+                        last_group = entry_group
+                    label = entry.get("label") or _clean_label(entry.get("key"))
+                    if entry.get("key") == selected:
                         label = f"✅ {label}"
-                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{key}")])
+                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{entry.get('key')}")])
                     has_any = True
 
             if not has_any:
                 rows.append([InlineKeyboardButton("No presets available", callback_data="draw:nop")])
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
         elif target == "model":
+            if not session.get("model_switch_enabled", False):
+                label = session.get("selected_model") or "Draw Things"
+                rows.append([InlineKeyboardButton(f"🗂️ Active • {label}", callback_data="draw:nop")])
+                rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
+                return InlineKeyboardMarkup(rows)
             options = session.get("model_options") or []
             selected_name = session.get("selected_model")
             if not options:
@@ -1452,9 +1497,11 @@ class YouTubeTelegramBot:
         rows: List[List[InlineKeyboardButton]] = []
         model_options = session.get("model_options") or []
         selected_model = session.get("selected_model")
-        if model_options:
+        if session.get("model_switch_enabled", False) and model_options:
             model_label = selected_model or "Current"
             rows.append([InlineKeyboardButton(f"🗂️ Model • {model_label}", callback_data="draw:model")])
+        elif selected_model:
+            rows.append([InlineKeyboardButton(f"🗂️ Model • {selected_model} (set in Draw Things)", callback_data="draw:nop")])
 
         group = session.get("selected_model_group")
         mapping = self._draw_mapping(session, "preset")
@@ -1531,15 +1578,31 @@ class YouTubeTelegramBot:
             base = (os.getenv("TTSHUB_API_BASE") or "").strip()
 
         preset_info = None
+        dt_info = {}
         if base:
             try:
                 preset_info = await draw_service.fetch_presets(base)
+                dt_info = (preset_info.get("drawthings") or {}) if preset_info else {}
             except Exception as exc:
                 logging.warning("draw: preset fetch failed: %s", exc)
                 preset_info = None
+                dt_info = {}
 
-        model_options = _load_draw_models()
+        model_options = self.draw_models_overrides
         default_model = model_options[0] if model_options else {"name": None, "group": None}
+
+        hub_supports_switch = dt_info.get("supportsModelSwitch")
+        model_switch_enabled = self.draw_model_switch_enabled and bool(hub_supports_switch)
+        if hub_supports_switch is False:
+            model_switch_enabled = False
+
+        active_model_raw = dt_info.get("activeModel")
+        active_model_name = _friendly_model_name(active_model_raw, model_options)
+        active_family = dt_info.get("activeFamily") or _family_from_name(active_model_raw)
+        if not active_model_name and default_model.get("name"):
+            active_model_name = default_model.get("name")
+        if not active_family:
+            active_family = default_model.get("group") or "general"
 
         session = {
             "original_prompt": prompt,
@@ -1556,14 +1619,19 @@ class YouTubeTelegramBot:
             "selected_negative": None,
             "tts_base": base,
             "model_options": model_options,
-            "selected_model": default_model.get("name"),
-            "selected_model_group": (default_model.get("group") or "general"),
+            "selected_model": active_model_name,
+            "selected_model_group": active_family or (default_model.get("group") or "general"),
+            "model_switch_enabled": model_switch_enabled,
         }
 
         preset_label = self._draw_choice_label(session, "preset", None, default="Auto")
         status_bits = []
-        if session.get("selected_model"):
-            status_bits.append(f"🗂️ Model {session['selected_model']}")
+        selected_model_label = session.get("selected_model")
+        if selected_model_label:
+            if session.get("model_switch_enabled", False):
+                status_bits.append(f"🗂️ Model {selected_model_label}")
+            else:
+                status_bits.append(f"🗂️ Model {selected_model_label} (set in Draw Things)")
         status_bits.append(f"🎛️ {preset_label}")
         session["status_message"] = " • ".join(status_bits)
 
@@ -1669,7 +1737,8 @@ class YouTubeTelegramBot:
             height,
             len(prompt_text),
         )
-        model_name = session.get("selected_model")
+        model_switch_enabled = session.get("model_switch_enabled", False)
+        model_name = session.get("selected_model") if model_switch_enabled else None
         try:
             result = await draw_service.generate_image(
                 base,
@@ -1686,7 +1755,7 @@ class YouTubeTelegramBot:
             message = str(exc)
             logging.warning("draw: hub generation error (%s): %s", size_label, message)
             lowered = message.lower()
-            if any(token in lowered for token in ("sdapi/v1/txt2img", "service unavailable", "connection refused", "read timed out", "request to hub failed")):
+            if any(token in lowered for token in ("sdapi/v1", "service unavailable", "connection refused", "read timed out", "request to hub failed", "client error")):
                 friendly = (
                     "⚠️ Draw Things is not responding (likely offline or still loading the model). "
                     "Open the Draw Things app on the Mac and ensure the target model is ready, then retry."
@@ -1796,10 +1865,11 @@ class YouTubeTelegramBot:
         session["buttons_disabled"] = False
         session["status_button_label"] = None
         logging.info(
-            "draw: image generated %s url=%s model=%s preset=%s applied=%s",
+            "draw: image generated %s url=%s model=%s (switch=%s) preset=%s applied=%s",
             size_label,
             image_url,
             model_name or "<default>",
+            "on" if model_switch_enabled else "off",
             selected_preset or "auto",
             effective_preset or "<auto-inferred>",
         )
@@ -1878,6 +1948,12 @@ class YouTubeTelegramBot:
             return
 
         if action == "model":
+            if not session.get("model_switch_enabled", False):
+                try:
+                    await query.answer("Switch models directly in Draw Things.", show_alert=True)
+                except Exception:
+                    pass
+                return
             options = session.get("model_options") or []
             if not options:
                 try:
@@ -1984,6 +2060,8 @@ class YouTubeTelegramBot:
             session["selected_negative"] = None
             label_bits = [f"🗂️ Model {session['selected_model'] or 'Current'}"]
             label_bits.append(f"🎛️ {self._draw_choice_label(session, 'preset', None, default='Auto')}")
+            if not session.get("model_switch_enabled", False) and session["selected_model"]:
+                label_bits.append("(switch manually in Draw Things)")
             session["status_message"] = " • ".join(label_bits)
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
