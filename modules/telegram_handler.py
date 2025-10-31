@@ -1604,6 +1604,14 @@ class YouTubeTelegramBot:
                 logging.warning("draw: preset fetch failed: %s", exc)
                 preset_info = None
                 dt_info = {}
+            if not dt_info or not (dt_info.get("activeModel") or dt_info.get("activeFamily")):
+                try:
+                    await asyncio.sleep(0.5)
+                    preset_info = await draw_service.fetch_presets(base, force_refresh=True)
+                    dt_info = (preset_info.get("drawthings") or {}) if preset_info else {}
+                    logging.info("draw: retry fetched drawthings info %s", dt_info)
+                except Exception as exc:
+                    logging.warning("draw: preset retry failed: %s", exc)
 
         model_options = self.draw_models_overrides
         default_model = model_options[0] if model_options else {"name": None, "group": None}
