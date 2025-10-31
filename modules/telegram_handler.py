@@ -114,11 +114,21 @@ def _friendly_model_name(raw: Optional[str], overrides: List[Dict[str, str]]) ->
     if not isinstance(raw, str) or not raw:
         return None
     lowered = raw.lower()
+    lowered_clean = lowered.replace("_", " ").replace("-", " ")
     for opt in overrides:
         name = opt.get("name")
         if not name:
             continue
-        if name.lower() == lowered or lowered in name.lower() or name.lower() in lowered:
+        name_lower = name.lower()
+        name_clean = name_lower.replace("_", " ").replace("-", " ")
+        if (
+            name_lower == lowered
+            or name_clean == lowered_clean
+            or name_lower in lowered
+            or lowered in name_lower
+            or name_clean in lowered_clean
+            or lowered_clean in name_clean
+        ):
             return name
     # fallback: replace separators for readability
     display = raw.replace("_", " ").replace("-", " ").strip()
