@@ -126,6 +126,7 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
         entry = dict(value or {})
         entry["key"] = key
         entry["label"] = _humanize_label(key)
+        entry["group"] = "flux" if key.lower().startswith("flux") else "general"
         default_size = entry.get("defaultSize") or {}
         entry["default_width"] = default_size.get("width")
         entry["default_height"] = default_size.get("height")

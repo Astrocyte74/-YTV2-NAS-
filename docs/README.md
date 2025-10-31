@@ -13,6 +13,7 @@
   - `curl -sS "$TTSHUB_API_BASE/meta" | jq`  
   - `curl -sS "$TTSHUB_API_BASE/drawthings/models" | jq`  
   - `curl -sS -X POST "$TTSHUB_API_BASE/telegram/draw" -H 'content-type: application/json' -d '{"prompt":"Sunlit watercolor fox","steps":20,"width":512,"height":512}' | jq`
+- Model catalogue: set `DRAW_MODELS` to control the Telegram picker (comma-separated `name:group`, flux/general). Defaults are `Flux.1 [schnell]:flux,HiDream I1 fast:general`. Flux-tagged models surface Flux presets; everything else uses the general preset family.
 - Preset catalogue: `GET $TTSHUB_API_BASE/telegram/presets` returns presets, style presets, negative presets, and defaults (`flux_balanced` by default). The bot caches this so the UI can stay in sync with hub changes.
 - Telegram command: `/draw <prompt>` (`/d`) opens a menu to enhance the prompt via Local (Ollama) or Cloud LLMs, choose a preset/style/negative combination, and generate images using the preset’s size or manual Small/Medium/Large overrides. While a task runs, the inline keyboard collapses to a disabled “Working…” state, status text appears under the prompt, and the bot uploads the generated image bytes directly to Telegram (so LAN-only URLs are fine). All steps log under the `draw:` prefix in `bot.log`.
 - Note: some Draw Things builds return 404 for `sd-models`/`samplers`; the hub now translates that to `200 []`. Use the convenience endpoint to validate generation rather than the raw list calls.
