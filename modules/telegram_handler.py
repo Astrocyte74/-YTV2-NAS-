@@ -1593,6 +1593,8 @@ class YouTubeTelegramBot:
         else:
             base = (os.getenv("TTSHUB_API_BASE") or "").strip()
 
+        logging.info("draw: resolving presets base=%s", base or "<empty>")
+
         preset_info = None
         dt_info = {}
         if base:
