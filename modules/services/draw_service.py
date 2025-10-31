@@ -125,35 +125,68 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in presets_dict.items():
         entry = dict(value or {})
         entry["key"] = key
-        entry["label"] = _humanize_label(key)
-        entry["group"] = "flux" if key.lower().startswith("flux") else "general"
+        label = entry.get("label")
+        if not isinstance(label, str) or not label.strip():
+            label = _humanize_label(key)
+        entry["label"] = label
+        family = entry.get("family") or ("flux" if key.lower().startswith("flux") else "general")
+        entry["group"] = str(family).strip().lower() or "general"
         default_size = entry.get("defaultSize") or {}
         entry["default_width"] = default_size.get("width")
         entry["default_height"] = default_size.get("height")
-        presets_list.append(entry)
         preset_map[key] = entry
 
     style_list: List[Dict[str, Any]] = []
     style_map: Dict[str, Dict[str, Any]] = {}
-    for key, prompt in styles_dict.items():
+    for key, value in styles_dict.items():
+        if isinstance(value, dict):
+            label = value.get("label") or _humanize_label(key)
+            prompt = value.get("tags") or value.get("prompt") or value.get("value")
+        else:
+            label = _humanize_label(key)
+            prompt = value
         entry = {
             "key": key,
-            "label": _humanize_label(key),
+            "label": label,
             "prompt": prompt,
         }
-        style_list.append(entry)
         style_map[key] = entry
 
     negative_list: List[Dict[str, Any]] = []
     negative_map: Dict[str, Dict[str, Any]] = {}
-    for key, prompt in negative_dict.items():
+    for key, value in negative_dict.items():
+        if isinstance(value, dict):
+            label = value.get("label") or _humanize_label(key)
+            prompt = value.get("tags") or value.get("prompt") or value.get("value")
+        else:
+            label = _humanize_label(key)
+            prompt = value
         entry = {
             "key": key,
-            "label": _humanize_label(key),
+            "label": label,
             "prompt": prompt,
         }
-        negative_list.append(entry)
         negative_map[key] = entry
+
+    orders = raw.get("order") or {}
+
+    def _ordered_list(mapping: Dict[str, Dict[str, Any]], order_keys: Optional[List[str]]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
+        seen: set = set()
+        if order_keys:
+            for key in order_keys:
+                entry = mapping.get(key)
+                if entry:
+                    result.append(entry)
+                    seen.add(key)
+        for key, entry in mapping.items():
+            if key not in seen:
+                result.append(entry)
+        return result
+
+    presets_list = _ordered_list(preset_map, orders.get("presets"))
+    style_list = _ordered_list(style_map, orders.get("stylePresets"))
+    negative_list = _ordered_list(negative_map, orders.get("negativePresets"))
 
     defaults = raw.get("defaults") or {}
 
@@ -162,6 +195,7 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
         "style_presets": style_list,
         "negative_presets": negative_list,
         "defaults": defaults,
+        "orders": orders,
         "maps": {
             "preset": preset_map,
             "style": style_map,
