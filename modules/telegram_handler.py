@@ -1322,12 +1322,16 @@ class YouTubeTelegramBot:
             mapping = self._draw_mapping(session, "preset")
             group = session.get("selected_model_group")
             selected = session.get("selected_preset")
-            auto_selected = selected is None
-            auto_label = "🤖 Auto (model-based)"
-            if auto_selected:
-                auto_label = f"✅ {auto_label}"
-            rows.append([InlineKeyboardButton(auto_label, callback_data="draw:preset_auto")])
+            auto_label_text = "🤖 Auto (model-based)"
+            if selected is None:
+                auto_label_text = f"✅ {auto_label_text}"
+            rows.append([InlineKeyboardButton(auto_label_text, callback_data="draw:preset_auto")])
 
+            group_names = {
+                "flux": "Flux presets",
+                "hidream": "HiDream presets",
+                "general": "General presets",
+            }
             order = ((session.get("preset_info") or {}).get("orders") or {}).get("presets") or []
             ordered_keys: List[str] = []
             for key in order:
@@ -1338,18 +1342,38 @@ class YouTubeTelegramBot:
                     ordered_keys.append(key)
 
             has_any = False
-            for key in ordered_keys:
-                entry = mapping.get(key)
-                if not isinstance(entry, dict):
-                    continue
-                entry_group = entry.get("group") or "general"
-                if group and entry_group != group:
-                    continue
-                label = entry.get("label") or _clean_label(key)
-                if key == selected:
-                    label = f"✅ {label}"
-                rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{key}")])
-                has_any = True
+            if group:
+                header = group_names.get(group, f"{group.title()} presets")
+                rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
+                for key in ordered_keys:
+                    entry = mapping.get(key)
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_group = entry.get("group") or "general"
+                    if entry_group != group:
+                        continue
+                    label = entry.get("label") or _clean_label(key)
+                    if key == selected:
+                        label = f"✅ {label}"
+                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{key}")])
+                    has_any = True
+            else:
+                seen_groups: List[str] = []
+                for key in ordered_keys:
+                    entry = mapping.get(key)
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_group = entry.get("group") or "general"
+                    if entry_group not in seen_groups:
+                        seen_groups.append(entry_group)
+                        header = group_names.get(entry_group, f"{entry_group.title()} presets")
+                        rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
+                    label = entry.get("label") or _clean_label(key)
+                    if key == selected:
+                        label = f"✅ {label}"
+                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{key}")])
+                    has_any = True
+
             if not has_any:
                 rows.append([InlineKeyboardButton("No presets available", callback_data="draw:nop")])
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
@@ -1708,6 +1732,9 @@ class YouTubeTelegramBot:
 
         caption_header = " • ".join(caption_bits)
         caption_lines = [caption_header, prompt_text]
+        if selected_preset is None and effective_preset:
+            applied_label = self._draw_choice_label(session, "preset", effective_preset, default=_clean_label(effective_preset))
+            caption_lines.append(f"Applied preset: {applied_label}")
         caption = "\n".join(line for line in caption_lines if line)[:1024]
 
         try:
