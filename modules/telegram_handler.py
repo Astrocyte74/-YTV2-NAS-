@@ -85,6 +85,20 @@ import hashlib
 from pydub import AudioSegment
 
 
+def _clean_label(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    parts = [seg.strip() for seg in value.replace("-", "_").split("_") if seg.strip()]
+    words: List[str] = []
+    for seg in parts:
+        lower = seg.lower()
+        if lower == "nsfw":
+            words.append("NSFW")
+        else:
+            words.append(seg.capitalize())
+    return " ".join(words) if words else value
+
+
 class YouTubeTelegramBot:
     """Telegram bot for YouTube video summarization."""
     VARIANT_LABELS = {
@@ -1192,6 +1206,15 @@ class YouTubeTelegramBot:
                 meta.append(f"seed {seed}")
             meta_str = f" ({', '.join(meta)})" if meta else ""
             lines.append(f"Last image: {label}{meta_str}".strip())
+        preset_info = session.get("preset_info")
+        if preset_info:
+            preset_key = session.get("selected_preset") or self._draw_default_preset_key(session)
+            preset_label = self._draw_choice_label(session, "preset", preset_key, default="Default")
+            lines.append(f"*Preset:* {self._escape_markdown(preset_label)}")
+            style_label = self._draw_choice_label(session, "style", session.get("selected_style"))
+            negative_label = self._draw_choice_label(session, "negative", session.get("selected_negative"))
+            lines.append(f"*Style:* {self._escape_markdown(style_label)}")
+            lines.append(f"*Negative:* {self._escape_markdown(negative_label)}")
         status_line = session.get("status_message")
         if status_line:
             lines.append("")
@@ -1203,7 +1226,77 @@ class YouTubeTelegramBot:
             lines.append("Select an action:")
         return "\n".join(lines)
 
+    def _draw_mapping(self, session: Dict[str, Any], kind: str) -> Dict[str, Any]:
+        info = session.get("preset_info") or {}
+        return ((info.get("maps") or {}).get(kind) or {}) if isinstance(info, dict) else {}
+
+    def _draw_choice_label(self, session: Dict[str, Any], kind: str, key: Optional[str], default: str = "None") -> str:
+        if not key:
+            return default
+        mapping = self._draw_mapping(session, kind)
+        entry = mapping.get(key)
+        if isinstance(entry, dict):
+            label = entry.get("label")
+            if isinstance(label, str) and label.strip():
+                return label
+        return _clean_label(key) if key else default
+
+    def _draw_default_preset_key(self, session: Dict[str, Any]) -> Optional[str]:
+        info = session.get("preset_info") or {}
+        defaults = info.get("defaults") or {}
+        preset_key = defaults.get("preset")
+        if preset_key:
+            return preset_key
+        presets = info.get("presets") or []
+        if presets:
+            first = presets[0]
+            if isinstance(first, dict):
+                return first.get("key")
+        mapping = self._draw_mapping(session, "preset")
+        if mapping:
+            return next(iter(mapping.keys()))
+        return None
+
+    def _build_draw_picker_keyboard(self, session: Dict[str, Any], target: str) -> InlineKeyboardMarkup:
+        rows: List[List[InlineKeyboardButton]] = []
+        if target == "preset":
+            mapping = self._draw_mapping(session, "preset")
+            selected = session.get("selected_preset") or self._draw_default_preset_key(session)
+            for key, entry in mapping.items():
+                label = entry.get("label") or _clean_label(key)
+                if key == selected:
+                    label = f"✅ {label}"
+                rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{key}")])
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
+        elif target == "style":
+            mapping = self._draw_mapping(session, "style")
+            selected = session.get("selected_style")
+            for key, entry in mapping.items():
+                label = entry.get("label") or _clean_label(key)
+                if key == selected:
+                    label = f"✅ {label}"
+                rows.append([InlineKeyboardButton(label, callback_data=f"draw:style_select:{key}")])
+            rows.append([InlineKeyboardButton("🚫 None", callback_data="draw:style_clear")])
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
+        elif target == "negative":
+            mapping = self._draw_mapping(session, "negative")
+            selected = session.get("selected_negative")
+            for key, entry in mapping.items():
+                label = entry.get("label") or _clean_label(key)
+                if key == selected:
+                    label = f"✅ {label}"
+                rows.append([InlineKeyboardButton(label, callback_data=f"draw:negative_select:{key}")])
+            rows.append([InlineKeyboardButton("🚫 None", callback_data="draw:negative_clear")])
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
+        else:
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
+        return InlineKeyboardMarkup(rows)
+
     def _build_draw_keyboard(self, session: Dict[str, Any]) -> InlineKeyboardMarkup:
+        picker = session.get("picker")
+        if picker:
+            return self._build_draw_picker_keyboard(session, picker)
+
         if session.get("buttons_disabled"):
             label = session.get("status_button_label") or "⏳ Working…"
             rows = [
@@ -1212,20 +1305,39 @@ class YouTubeTelegramBot:
             ]
             return InlineKeyboardMarkup(rows)
 
-        rows = [
-            [
-                InlineKeyboardButton("✨ Enhance (Local)", callback_data="draw:enhance_local"),
-                InlineKeyboardButton("🌐 Enhance (Cloud)", callback_data="draw:enhance_cloud"),
-            ],
-            [
-                InlineKeyboardButton("🖼️ Small 512²", callback_data="draw:generate_small"),
-                InlineKeyboardButton("🖼️ Medium 768²", callback_data="draw:generate_medium"),
-            ],
-            [
-                InlineKeyboardButton("🖼️ Large 1024²", callback_data="draw:generate_large"),
-                InlineKeyboardButton("❌ Close", callback_data="draw:cancel"),
-            ],
-        ]
+        preset_label = self._draw_choice_label(
+            session,
+            "preset",
+            session.get("selected_preset") or self._draw_default_preset_key(session),
+            default="Default",
+        )
+        style_label = self._draw_choice_label(session, "style", session.get("selected_style"))
+        negative_label = self._draw_choice_label(session, "negative", session.get("selected_negative"))
+
+        rows: List[List[InlineKeyboardButton]] = []
+        rows.append([
+            InlineKeyboardButton("✨ Enhance (Local)", callback_data="draw:enhance_local"),
+            InlineKeyboardButton("🌐 Enhance (Cloud)", callback_data="draw:enhance_cloud"),
+        ])
+
+        if session.get("preset_info"):
+            rows.append([
+                InlineKeyboardButton(f"🎛️ Preset • {preset_label}", callback_data="draw:preset"),
+                InlineKeyboardButton(f"🎨 Style • {style_label}", callback_data="draw:style"),
+            ])
+            rows.append([
+                InlineKeyboardButton(f"🚫 Negative • {negative_label}", callback_data="draw:negative"),
+                InlineKeyboardButton("🖼️ Preset Size", callback_data="draw:generate_preset"),
+            ])
+
+        rows.append([
+            InlineKeyboardButton("🖼️ Small 512²", callback_data="draw:generate_small"),
+            InlineKeyboardButton("🖼️ Medium 768²", callback_data="draw:generate_medium"),
+        ])
+        rows.append([
+            InlineKeyboardButton("🖼️ Large 1024²", callback_data="draw:generate_large"),
+            InlineKeyboardButton("❌ Close", callback_data="draw:cancel"),
+        ])
         return InlineKeyboardMarkup(rows)
 
     async def draw_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1251,6 +1363,23 @@ class YouTubeTelegramBot:
             return
 
         logging.info("draw: command from %s prompt=%r", user_id, prompt[:160])
+
+        client = self._resolve_tts_client()
+        base = None
+        if client and client.base_api_url:
+            self.tts_client = client
+            base = client.base_api_url
+        else:
+            base = (os.getenv("TTSHUB_API_BASE") or "").strip()
+
+        preset_info = None
+        if base:
+            try:
+                preset_info = await draw_service.fetch_presets(base)
+            except Exception as exc:
+                logging.warning("draw: preset fetch failed: %s", exc)
+                preset_info = None
+
         session = {
             "original_prompt": prompt,
             "active_prompt": prompt,
@@ -1259,7 +1388,20 @@ class YouTubeTelegramBot:
             "status_message": None,
             "buttons_disabled": False,
             "status_button_label": None,
+            "picker": None,
+            "preset_info": preset_info,
+            "selected_preset": None,
+            "selected_style": None,
+            "selected_negative": None,
+            "tts_base": base,
         }
+
+        default_preset = self._draw_default_preset_key(session)
+        if default_preset:
+            session["selected_preset"] = default_preset
+            preset_label = self._draw_choice_label(session, "preset", default_preset, default="Default")
+            session["status_message"] = f"🎛️ Using preset {preset_label}."
+
         text = self._format_draw_prompt(session)
         keyboard = self._build_draw_keyboard(session)
         prompt_message = await message.reply_text(
@@ -1279,6 +1421,186 @@ class YouTubeTelegramBot:
             )
         except Exception as exc:
             logging.debug("draw: failed to refresh prompt: %s", exc)
+
+    async def _draw_execute_generation(
+        self,
+        query,
+        session: Dict[str, Any],
+        *,
+        size_label: str,
+        width: Optional[int],
+        height: Optional[int],
+    ) -> None:
+        prompt_text = session.get("active_prompt") or session.get("original_prompt") or ""
+        if not prompt_text:
+            try:
+                await query.answer("Prompt is empty.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        session["status_message"] = f"🖼️ Generating {size_label}…"
+        session["status_button_label"] = "🖼️ Generating…"
+        session["buttons_disabled"] = True
+        session["picker"] = None
+        self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+        await self._refresh_draw_prompt(query, session)
+
+        base = session.get("tts_base")
+        if not base:
+            client = self._resolve_tts_client()
+            if client and client.base_api_url:
+                self.tts_client = client
+                base = client.base_api_url
+            else:
+                base = (os.getenv("TTSHUB_API_BASE") or "").strip()
+            session["tts_base"] = base
+        if not base:
+            session["status_message"] = "⚠️ TTS hub URL not configured."
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            try:
+                await query.answer("Set TTSHUB_API_BASE to use Draw Things.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        if not reach_hub_ok(base):
+            session["status_message"] = "⚠️ Hub unreachable. Check the Mac."
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            try:
+                await query.answer("Draw hub unreachable. Is the Mac online?", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        preset_key = session.get("selected_preset") or self._draw_default_preset_key(session)
+        preset_entry = self._draw_mapping(session, "preset").get(preset_key)
+        steps = None
+        if isinstance(preset_entry, dict):
+            if width is None:
+                width = preset_entry.get("default_width")
+            if height is None:
+                height = preset_entry.get("default_height")
+            preset_steps = preset_entry.get("steps")
+            if isinstance(preset_steps, (int, float)):
+                steps = int(preset_steps)
+
+        if width is None or height is None:
+            width = width or 640
+            height = height or 640
+
+        logging.info(
+            "draw: generating image preset=%s size=%sx%s prompt_len=%d",
+            preset_key,
+            width,
+            height,
+            len(prompt_text),
+        )
+        try:
+            result = await draw_service.generate_image(
+                base,
+                prompt_text,
+                width=int(width),
+                height=int(height),
+                steps=steps,
+                preset=preset_key,
+                style_preset=session.get("selected_style"),
+                negative_preset=session.get("selected_negative"),
+            )
+        except Exception as exc:
+            logging.error("draw: generation failed (%s): %s", size_label, exc)
+            session["status_message"] = f"⚠️ Generation failed: {str(exc)[:120]}"
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            try:
+                await query.answer(f"Generation failed: {str(exc)[:120]}", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        image_url = result.get("absolute_url")
+        if not image_url:
+            session["status_message"] = "⚠️ Hub response missing image URL."
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            try:
+                await query.answer("Draw Things did not return an image URL.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        caption_bits = [size_label, f"{int(width)}×{int(height)}"]
+        steps_val = result.get("steps") if steps is None else steps
+        if isinstance(steps_val, int) and steps_val > 0:
+            caption_bits.append(f"{steps_val} steps")
+        seed = result.get("seed")
+        if seed is not None:
+            caption_bits.append(f"seed {seed}")
+        if preset_key:
+            preset_label = self._draw_choice_label(session, "preset", preset_key, default="Default")
+            caption_bits.append(f"Preset: {preset_label}")
+        style_key = session.get("selected_style")
+        if style_key:
+            caption_bits.append(f"Style: {self._draw_choice_label(session, 'style', style_key)}")
+        negative_key = session.get("selected_negative")
+        if negative_key:
+            caption_bits.append(f"Negative: {self._draw_choice_label(session, 'negative', negative_key)}")
+
+        caption_header = " • ".join(caption_bits)
+        caption_lines = [caption_header, prompt_text]
+        caption = "\n".join(line for line in caption_lines if line)[:1024]
+
+        try:
+            photo_payload = None
+            if requests is not None:
+                try:
+                    response = requests.get(image_url, timeout=30)
+                    response.raise_for_status()
+                    photo_payload = io.BytesIO(response.content)
+                    parsed = urllib.parse.urlparse(image_url)
+                    photo_payload.name = Path(parsed.path).name or "draw.png"
+                except Exception as download_exc:
+                    logging.warning("draw: failed to download image for upload: %s", download_exc)
+                    photo_payload = None
+            if photo_payload is not None:
+                await query.message.reply_photo(photo=photo_payload, caption=caption)
+            else:
+                await query.message.reply_photo(photo=image_url, caption=caption)
+        except Exception as exc:
+            logging.error("draw: failed to send image: %s", exc)
+            session["status_message"] = f"⚠️ Image ready but sending failed: {str(exc)[:120]}"
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            try:
+                await query.answer("Image generated but sending failed.", show_alert=True)
+            except Exception:
+                pass
+            return
+
+        session["last_generation"] = {
+            "label": size_label,
+            "steps": steps_val,
+            "seed": seed,
+            "url": image_url,
+        }
+        session["status_message"] = f"✅ Generated {size_label}. Pick another option."
+        session["buttons_disabled"] = False
+        session["status_button_label"] = None
+        logging.info("draw: image generated %s url=%s", size_label, image_url)
+        self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+        await self._refresh_draw_prompt(query, session)
 
     async def _handle_draw_callback(self, query, callback_data: str) -> None:
         chat_id = query.message.chat.id
@@ -1351,6 +1673,119 @@ class YouTubeTelegramBot:
             await self._refresh_draw_prompt(query, session)
             return
 
+        if action == "preset":
+            if not (session.get("preset_info") and session["preset_info"].get("presets")):
+                try:
+                    await query.answer("Presets unavailable.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["picker"] = "preset"
+            session["status_message"] = "🎛️ Choose a preset."
+            session["status_button_label"] = None
+            session["buttons_disabled"] = False
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "style":
+            if not (session.get("preset_info") and session["preset_info"].get("style_presets")):
+                try:
+                    await query.answer("No style presets available.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["picker"] = "style"
+            session["status_message"] = "🎨 Choose a style preset."
+            session["status_button_label"] = None
+            session["buttons_disabled"] = False
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "negative":
+            if not (session.get("preset_info") and session["preset_info"].get("negative_presets")):
+                try:
+                    await query.answer("No negative presets available.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["picker"] = "negative"
+            session["status_message"] = "🚫 Choose a negative preset."
+            session["status_button_label"] = None
+            session["buttons_disabled"] = False
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "picker_back":
+            session["picker"] = None
+            session["status_message"] = None
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "style_clear":
+            session["selected_style"] = None
+            session["picker"] = None
+            session["status_message"] = "🎨 Style cleared."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            logging.info("draw: style preset cleared")
+            return
+
+        if action == "negative_clear":
+            session["selected_negative"] = None
+            session["picker"] = None
+            session["status_message"] = "🚫 Negative preset cleared."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            logging.info("draw: negative preset cleared")
+            return
+
+        if action.startswith("preset_select:"):
+            key = action.split(":", 1)[1]
+            session["selected_preset"] = key
+            session["picker"] = None
+            label = self._draw_choice_label(session, "preset", key, default=_clean_label(key))
+            session["status_message"] = f"🎛️ Preset set to {label}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            logging.info("draw: preset selected %s", key)
+            return
+
+        if action.startswith("style_select:"):
+            key = action.split(":", 1)[1]
+            session["selected_style"] = key
+            session["picker"] = None
+            label = self._draw_choice_label(session, "style", key, default=_clean_label(key))
+            session["status_message"] = f"🎨 Style preset set to {label}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            logging.info("draw: style preset selected %s", key)
+            return
+
+        if action.startswith("negative_select:"):
+            key = action.split(":", 1)[1]
+            session["selected_negative"] = key
+            session["picker"] = None
+            label = self._draw_choice_label(session, "negative", key, default=_clean_label(key))
+            session["status_message"] = f"🚫 Negative preset set to {label}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            logging.info("draw: negative preset selected %s", key)
+            return
+
+        if action == "generate_preset":
+            mapping = self._draw_mapping(session, "preset")
+            preset_key = session.get("selected_preset") or self._draw_default_preset_key(session)
+            entry = mapping.get(preset_key, {})
+            width = entry.get("default_width")
+            height = entry.get("default_height")
+            label = entry.get("label") or (_clean_label(preset_key) if preset_key else "Preset Size")
+            await self._draw_execute_generation(query, session, size_label=label, width=width, height=height)
+            return
+
         if action.startswith("generate_"):
             size_key = action.split("_", 1)[1]
             preset = self.DRAW_SIZE_PRESETS.get(size_key)
@@ -1360,136 +1795,14 @@ class YouTubeTelegramBot:
                 except Exception:
                     pass
                 return
-            prompt_text = session.get("active_prompt") or session.get("original_prompt") or ""
-            if not prompt_text:
-                try:
-                    await query.answer("Prompt is empty.", show_alert=True)
-                except Exception:
-                    pass
-                return
-            session["status_message"] = f"🖼️ Generating {preset.get('label', size_key.title())}…"
-            session["status_button_label"] = "🖼️ Generating…"
-            session["buttons_disabled"] = True
-            self._store_draw_session(chat_id, message_id, session)
-            await self._refresh_draw_prompt(query, session)
-            client = self._resolve_tts_client()
-            base = (
-                client.base_api_url
-                if client and client.base_api_url
-                else (os.getenv("TTSHUB_API_BASE") or "").strip()
+            label = preset.get("label") or _clean_label(size_key)
+            await self._draw_execute_generation(
+                query,
+                session,
+                size_label=label,
+                width=int(preset.get("width", 0)) if preset.get("width") else None,
+                height=int(preset.get("height", 0)) if preset.get("height") else None,
             )
-            if not base:
-                session["status_message"] = "⚠️ TTS hub URL not configured."
-                session["buttons_disabled"] = False
-                session["status_button_label"] = None
-                self._store_draw_session(chat_id, message_id, session)
-                await self._refresh_draw_prompt(query, session)
-                try:
-                    await query.answer("Set TTSHUB_API_BASE to use Draw Things.", show_alert=True)
-                except Exception:
-                    pass
-                return
-            if not reach_hub_ok(base):
-                session["status_message"] = "⚠️ Hub unreachable. Check the Mac."
-                session["buttons_disabled"] = False
-                session["status_button_label"] = None
-                self._store_draw_session(chat_id, message_id, session)
-                await self._refresh_draw_prompt(query, session)
-                try:
-                    await query.answer("Draw hub unreachable. Is the Mac online?", show_alert=True)
-                except Exception:
-                    pass
-                return
-            logging.info(
-                "draw: generating image size=%s (%sx%s) prompt_len=%d",
-                size_key,
-                preset.get("width"),
-                preset.get("height"),
-                len(prompt_text),
-            )
-            try:
-                result = await draw_service.generate_image(
-                    base,
-                    prompt_text,
-                    width=int(preset["width"]),
-                    height=int(preset["height"]),
-                    steps=20,
-                )
-            except Exception as exc:
-                logging.error("draw: generation failed for %s: %s", size_key, exc)
-                session["status_message"] = f"⚠️ Generation failed: {str(exc)[:120]}"
-                session["buttons_disabled"] = False
-                session["status_button_label"] = None
-                self._store_draw_session(chat_id, message_id, session)
-                await self._refresh_draw_prompt(query, session)
-                try:
-                    await query.answer(f"Generation failed: {str(exc)[:120]}", show_alert=True)
-                except Exception:
-                    pass
-                return
-            image_url = result.get("absolute_url")
-            if not image_url:
-                session["status_message"] = "⚠️ Hub response missing image URL."
-                session["buttons_disabled"] = False
-                session["status_button_label"] = None
-                self._store_draw_session(chat_id, message_id, session)
-                await self._refresh_draw_prompt(query, session)
-                try:
-                    await query.answer("Draw Things did not return an image URL.", show_alert=True)
-                except Exception:
-                    pass
-                return
-            label = preset.get("label") or size_key.title()
-            caption_bits = [label, f"{preset['width']}×{preset['height']}"]
-            steps = result.get("steps")
-            if isinstance(steps, int) and steps > 0:
-                caption_bits.append(f"{steps} steps")
-            seed = result.get("seed")
-            if seed is not None:
-                caption_bits.append(f"seed {seed}")
-            caption_header = " • ".join(caption_bits)
-            caption_lines = [caption_header, prompt_text]
-            caption = "\n".join(line for line in caption_lines if line)[:1024]
-            try:
-                photo_payload = None
-                if requests is not None:
-                    try:
-                        response = requests.get(image_url, timeout=30)
-                        response.raise_for_status()
-                        photo_payload = io.BytesIO(response.content)
-                        parsed = urllib.parse.urlparse(image_url)
-                        photo_payload.name = Path(parsed.path).name or "draw.png"
-                    except Exception as download_exc:
-                        logging.warning("draw: failed to download image for upload: %s", download_exc)
-                        photo_payload = None
-                if photo_payload is not None:
-                    await query.message.reply_photo(photo=photo_payload, caption=caption)
-                else:
-                    await query.message.reply_photo(photo=image_url, caption=caption)
-            except Exception as exc:
-                logging.error("draw: failed to send image: %s", exc)
-                session["status_message"] = f"⚠️ Image ready but sending failed: {str(exc)[:120]}"
-                session["buttons_disabled"] = False
-                session["status_button_label"] = None
-                self._store_draw_session(chat_id, message_id, session)
-                await self._refresh_draw_prompt(query, session)
-                try:
-                    await query.answer("Image generated but sending failed.", show_alert=True)
-                except Exception:
-                    pass
-                return
-            session["last_generation"] = {
-                "label": label,
-                "steps": steps,
-                "seed": seed,
-                "url": image_url,
-            }
-            session["status_message"] = f"✅ Generated {label}. Pick another option."
-            session["buttons_disabled"] = False
-            session["status_button_label"] = None
-            logging.info("draw: image generated %s url=%s", label, image_url)
-            self._store_draw_session(chat_id, message_id, session)
-            await self._refresh_draw_prompt(query, session)
             return
 
         try:

@@ -225,6 +225,7 @@ Notes
   - Generate Small (512²), Medium (768²), or Large (1024²) images through the hub convenience endpoint (`POST /telegram/draw`).
   - Receive the rendered image back in Telegram with metadata (steps, seed when available).
 - Requires `TTSHUB_API_BASE` pointing at the Mac hub (WireGuard IP + port `7860`). The bot never calls Draw Things directly; it always uses the hub proxy.
+- Preset data (`/telegram/presets`) is fetched from the hub so you can pick Flux / SDXL presets, style presets, and negative presets in-line; “Preset Size” uses the dimensions bundled with the current preset.
 - While an image or enhancement is in flight the inline keyboard collapses to a disabled “Working…” state so users know to wait; status text beneath the prompt confirms success or failure.
 - Container logs record each step (`draw: command…`, `draw: enhancing…`, `draw: generating…`, etc.) which is useful for troubleshooting.
 

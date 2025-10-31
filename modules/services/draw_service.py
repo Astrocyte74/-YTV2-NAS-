@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import urllib.parse
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -94,6 +95,113 @@ def _resolve_cloud_model() -> Optional[Tuple[str, str]]:
     return None
 
 
+def _humanize_label(key: str) -> str:
+    if not key:
+        return ""
+    if key.startswith("flux_"):
+        tail = key.split("_", 1)[1] if "_" in key else key
+        pretty_tail = _humanize_label(tail)
+        return f"Flux · {pretty_tail}"
+    segments = [seg.strip() for seg in key.replace("-", "_").split("_") if seg.strip()]
+    words: List[str] = []
+    for seg in segments:
+        lower = seg.lower()
+        if lower == "nsfw":
+            words.append("NSFW")
+        elif seg.isupper():
+            words.append(seg)
+        else:
+            words.append(seg.capitalize())
+    return " ".join(words) if words else key
+
+
+def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
+    presets_dict = raw.get("presets") or {}
+    styles_dict = raw.get("stylePresets") or {}
+    negative_dict = raw.get("negativePresets") or {}
+
+    presets_list: List[Dict[str, Any]] = []
+    preset_map: Dict[str, Dict[str, Any]] = {}
+    for key, value in presets_dict.items():
+        entry = dict(value or {})
+        entry["key"] = key
+        entry["label"] = _humanize_label(key)
+        default_size = entry.get("defaultSize") or {}
+        entry["default_width"] = default_size.get("width")
+        entry["default_height"] = default_size.get("height")
+        presets_list.append(entry)
+        preset_map[key] = entry
+
+    style_list: List[Dict[str, Any]] = []
+    style_map: Dict[str, Dict[str, Any]] = {}
+    for key, prompt in styles_dict.items():
+        entry = {
+            "key": key,
+            "label": _humanize_label(key),
+            "prompt": prompt,
+        }
+        style_list.append(entry)
+        style_map[key] = entry
+
+    negative_list: List[Dict[str, Any]] = []
+    negative_map: Dict[str, Dict[str, Any]] = {}
+    for key, prompt in negative_dict.items():
+        entry = {
+            "key": key,
+            "label": _humanize_label(key),
+            "prompt": prompt,
+        }
+        negative_list.append(entry)
+        negative_map[key] = entry
+
+    defaults = raw.get("defaults") or {}
+
+    return {
+        "presets": presets_list,
+        "style_presets": style_list,
+        "negative_presets": negative_list,
+        "defaults": defaults,
+        "maps": {
+            "preset": preset_map,
+            "style": style_map,
+            "negative": negative_map,
+        },
+        "raw": raw,
+    }
+
+
+_PRESET_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_PRESET_CACHE_TTL_SECONDS = 300
+
+
+async def fetch_presets(base_api_url: str, *, ttl: int = _PRESET_CACHE_TTL_SECONDS) -> Dict[str, Any]:
+    base = (base_api_url or "").strip()
+    if not base:
+        raise RuntimeError("Hub base URL is not configured.")
+
+    now = time.time()
+    cached = _PRESET_CACHE.get(base)
+    if cached and now - cached[0] <= ttl:
+        return cached[1]
+
+    url = f"{base.rstrip('/')}/telegram/presets"
+    loop = asyncio.get_running_loop()
+
+    def _call() -> Dict[str, Any]:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        raw = resp.json() or {}
+        return _normalize_presets(raw)
+
+    data = await loop.run_in_executor(None, _call)
+    _PRESET_CACHE[base] = (now, data)
+    return data
+
+
+def clear_preset_cache() -> None:
+    _PRESET_CACHE.clear()
+
+
 async def enhance_prompt_local(concept: str, *, model: Optional[str] = None) -> str:
     model_slug = model or _resolve_local_model()
     if not model_slug:
@@ -142,13 +250,17 @@ async def generate_image(
     base_api_url: str,
     prompt: str,
     *,
-    width: int,
-    height: int,
-    steps: int = 20,
+    width: Optional[int] = None,
+    height: Optional[int] = None,
+    steps: Optional[int] = None,
     seed: Optional[int] = None,
     negative: Optional[str] = None,
     sampler: Optional[str] = None,
     cfg_scale: Optional[float] = None,
+    preset: Optional[str] = None,
+    style_preset: Optional[str] = None,
+    negative_preset: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Dict[str, Any]:
     base = (base_api_url or "").strip()
     if not base:
@@ -156,10 +268,13 @@ async def generate_image(
 
     payload: Dict[str, Any] = {
         "prompt": prompt,
-        "width": width,
-        "height": height,
-        "steps": steps,
     }
+    if width is not None:
+        payload["width"] = width
+    if height is not None:
+        payload["height"] = height
+    if steps is not None:
+        payload["steps"] = steps
     if seed is not None:
         payload["seed"] = seed
     if negative:
@@ -168,6 +283,14 @@ async def generate_image(
         payload["sampler"] = sampler
     if cfg_scale is not None:
         payload["cfgScale"] = cfg_scale
+    if preset:
+        payload["preset"] = preset
+    if style_preset:
+        payload["stylePreset"] = style_preset
+    if negative_preset:
+        payload["negativePreset"] = negative_preset
+    if model:
+        payload["model"] = model
 
     url = f"{base.rstrip('/')}/telegram/draw"
     loop = asyncio.get_running_loop()
@@ -187,6 +310,8 @@ async def generate_image(
 
 
 __all__ = [
+    "clear_preset_cache",
+    "fetch_presets",
     "enhance_prompt_local",
     "enhance_prompt_cloud",
     "generate_image",
