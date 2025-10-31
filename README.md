@@ -217,6 +217,17 @@ These Telegram commands are available to admin users (allowed IDs) to help opera
 
 Notes
 - Local LLM routing is handled by a unified client that prefers the hub when `TTSHUB_API_BASE` is set and falls back to direct Ollama when `OLLAMA_URL`/`OLLAMA_HOST` is set. Errors are normalized to enable clean cloud fallback.
+
+## 🎨 Draw Things Prompting
+
+- `/draw <prompt>` (`/d`) — open the Draw Things helper. The bot lets you:
+  - Enhance the prompt with your local model (via Ollama) or cloud shortlist.
+  - Generate Small (512²), Medium (768²), or Large (1024²) images through the hub convenience endpoint (`POST /telegram/draw`).
+  - Receive the rendered image back in Telegram with metadata (steps, seed when available).
+- Requires `TTSHUB_API_BASE` pointing at the Mac hub (WireGuard IP + port `7860`). The bot never calls Draw Things directly; it always uses the hub proxy.
+- While an image or enhancement is in flight the inline keyboard collapses to a disabled “Working…” state so users know to wait; status text beneath the prompt confirms success or failure.
+- Container logs record each step (`draw: command…`, `draw: enhancing…`, `draw: generating…`, etc.) which is useful for troubleshooting.
+
 4. **Monitor**: Check logs for successful startup
 
 ### Built‑in TTS Queue Worker

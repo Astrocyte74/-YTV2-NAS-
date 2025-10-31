@@ -6,6 +6,16 @@
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
 - Audio variants are generated on the NAS, flagged in Postgres (`content.has_audio=true`), and then pulled by the dashboard from the synced exports share so Listen chips stream immediately.
 
+## Draw Things Integration
+- Hub base: set `TTSHUB_API_BASE=http://192.168.7.134:7860/api` (WireGuard IP + hub port). All calls go through the hub proxy; do not hit Draw Things on `127.0.0.1:7861` from the NAS.
+- Convenience endpoint: `POST $TTSHUB_API_BASE/telegram/draw` accepts `{prompt,width,height,steps,seed?,negative?,sampler?,cfgScale?}` and returns a JSON payload with a relative `url` under `/image/drawthings/`.
+- Quick probes:  
+  - `curl -sS "$TTSHUB_API_BASE/meta" | jq`  
+  - `curl -sS "$TTSHUB_API_BASE/drawthings/models" | jq`  
+  - `curl -sS -X POST "$TTSHUB_API_BASE/telegram/draw" -H 'content-type: application/json' -d '{"prompt":"Sunlit watercolor fox","steps":20,"width":512,"height":512}' | jq`
+- Telegram command: `/draw <prompt>` (`/d`) opens a menu to enhance the prompt via Local (Ollama) or Cloud LLMs and to generate Small (512²), Medium (768²), or Large (1024²) renders. The inline keyboard collapses to a disabled “Working…” state while tasks run, status text appears under the prompt, and the bot uploads the generated image bytes directly to Telegram (so LAN-only URLs are fine). All steps log under the `draw:` prefix in `bot.log`.
+- Note: some Draw Things builds return 404 for `sd-models`/`samplers`; the hub now translates that to `200 []`. Use the convenience endpoint to validate generation rather than the raw list calls.
+
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
 - Fetcher handles canonical URLs, `redd.it/<id>`, and the short `/r/<sub>/s/<token>` share links.

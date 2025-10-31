@@ -77,8 +77,9 @@ from modules.ollama_client import (
     pull as ollama_pull,
     health_summary as ollama_health_summary,
 )
-from modules.services import ollama_service, summary_service, tts_service
 from modules.services import cloud_service
+from modules.services import draw_service
+from modules.services import ollama_service, summary_service, tts_service
 from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
 import hashlib
 from pydub import AudioSegment
@@ -93,6 +94,11 @@ class YouTubeTelegramBot:
         'audio': "🎙️ Audio Summary",
         'audio-fr': "🎙️ Audio français 🇫🇷",
         'audio-es': "🎙️ Audio español 🇪🇸",
+    }
+    DRAW_SIZE_PRESETS = {
+        "small": {"width": 512, "height": 512, "label": "Small • 512²"},
+        "medium": {"width": 768, "height": 768, "label": "Medium • 768²"},
+        "large": {"width": 1024, "height": 1024, "label": "Large • 1024²"},
     }
 
     def __init__(self, token: str, allowed_user_ids: List[int]):
@@ -124,6 +130,8 @@ class YouTubeTelegramBot:
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Interactive summary sessions keyed by (chat_id, message_id)
         self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Interactive Draw Things sessions keyed by (chat_id, message_id)
+        self.draw_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Cache of instantiated summarizers keyed by provider/model
         self.summarizer_cache: Dict[str, YouTubeSummarizer] = {}
         # Ollama chat sessions keyed by chat_id
@@ -484,6 +492,8 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("logs", self.logs_command))
         self.application.add_handler(CommandHandler("diag", self.diag_command))
         self.application.add_handler(CommandHandler("tts", self.tts_command))
+        self.application.add_handler(CommandHandler("draw", self.draw_command))
+        self.application.add_handler(CommandHandler("d", self.draw_command))
         # Ollama chat commands (aliases: /o, /o_stop, /stop)
         self.application.add_handler(CommandHandler("ollama", self.ollama_command))
         self.application.add_handler(CommandHandler("o", self.ollama_command))
@@ -1140,6 +1150,352 @@ class YouTubeTelegramBot:
                 pick_local = env_local or last_local or first_slug("ollama")
 
         return {"cloud": pick_cloud, "ollama": pick_local}
+
+    # ------------------------- Draw Things helpers -------------------------
+    def _draw_session_key(self, chat_id: int, message_id: int) -> tuple:
+        return (chat_id, message_id)
+
+    def _store_draw_session(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
+        self.draw_sessions[self._draw_session_key(chat_id, message_id)] = payload
+
+    def _get_draw_session(self, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        return self.draw_sessions.get(self._draw_session_key(chat_id, message_id))
+
+    def _remove_draw_session(self, chat_id: int, message_id: int) -> None:
+        self.draw_sessions.pop(self._draw_session_key(chat_id, message_id), None)
+
+    def _format_draw_prompt(self, session: Dict[str, Any]) -> str:
+        original = (session.get("original_prompt") or "").strip()
+        active = (session.get("active_prompt") or original).strip()
+        source = session.get("active_source")
+        negative = session.get("negative_prompt")
+        last = session.get("last_generation")
+
+        lines: List[str] = ["🎨 *Draw Things Prompt*"]
+        lines.append("")
+        lines.append(f"*Base:* {self._escape_markdown(original)}" if original else "*Base:* _(empty)_")
+        if active and active != original:
+            source_label = "Local" if source == "local" else "Cloud" if source == "cloud" else "Manual"
+            lines.append(f"*Enhanced ({source_label}):* {self._escape_markdown(active)}")
+        else:
+            lines.append(f"*Current:* {self._escape_markdown(active)}" if active else "*Current:* _(empty)_")
+        if negative:
+            lines.append(f"*Negative:* {self._escape_markdown(str(negative))}")
+        if isinstance(last, dict):
+            label = last.get("label") or ""
+            steps = last.get("steps")
+            seed = last.get("seed")
+            meta: List[str] = []
+            if isinstance(steps, int) and steps > 0:
+                meta.append(f"{steps} steps")
+            if seed is not None:
+                meta.append(f"seed {seed}")
+            meta_str = f" ({', '.join(meta)})" if meta else ""
+            lines.append(f"Last image: {label}{meta_str}".strip())
+        status_line = session.get("status_message")
+        if status_line:
+            lines.append("")
+            lines.append(status_line)
+        lines.append("")
+        if session.get("buttons_disabled"):
+            lines.append("Working…")
+        else:
+            lines.append("Select an action:")
+        return "\n".join(lines)
+
+    def _build_draw_keyboard(self, session: Dict[str, Any]) -> InlineKeyboardMarkup:
+        if session.get("buttons_disabled"):
+            label = session.get("status_button_label") or "⏳ Working…"
+            rows = [
+                [InlineKeyboardButton(label, callback_data="draw:nop")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="draw:cancel")],
+            ]
+            return InlineKeyboardMarkup(rows)
+
+        rows = [
+            [
+                InlineKeyboardButton("✨ Enhance (Local)", callback_data="draw:enhance_local"),
+                InlineKeyboardButton("🌐 Enhance (Cloud)", callback_data="draw:enhance_cloud"),
+            ],
+            [
+                InlineKeyboardButton("🖼️ Small 512²", callback_data="draw:generate_small"),
+                InlineKeyboardButton("🖼️ Medium 768²", callback_data="draw:generate_medium"),
+            ],
+            [
+                InlineKeyboardButton("🖼️ Large 1024²", callback_data="draw:generate_large"),
+                InlineKeyboardButton("❌ Close", callback_data="draw:cancel"),
+            ],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    async def draw_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            message = update.effective_message
+            if message:
+                await message.reply_text("❌ You are not authorized to use this bot.")
+            return
+
+        message = update.effective_message
+        if not message:
+            return
+
+        raw_text = message.text or ""
+        parts = raw_text.split(" ", 1)
+        prompt = parts[1].strip() if len(parts) > 1 else ""
+        if not prompt:
+            await message.reply_text(
+                "🎨 Usage: /draw <prompt>\nTry `/draw cozy living room with sunlight`.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        logging.info("draw: command from %s prompt=%r", user_id, prompt[:160])
+        session = {
+            "original_prompt": prompt,
+            "active_prompt": prompt,
+            "active_source": "base",
+            "negative_prompt": None,
+            "status_message": None,
+            "buttons_disabled": False,
+            "status_button_label": None,
+        }
+        text = self._format_draw_prompt(session)
+        keyboard = self._build_draw_keyboard(session)
+        prompt_message = await message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard,
+        )
+        self._store_draw_session(prompt_message.chat_id, prompt_message.message_id, session)
+
+    async def _refresh_draw_prompt(self, query, session: Dict[str, Any]) -> None:
+        text = self._format_draw_prompt(session)
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._build_draw_keyboard(session),
+            )
+        except Exception as exc:
+            logging.debug("draw: failed to refresh prompt: %s", exc)
+
+    async def _handle_draw_callback(self, query, callback_data: str) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_draw_session(chat_id, message_id)
+        if not session:
+            await query.edit_message_text("⚠️ Draw session expired. Send /draw again.")
+            return
+
+        action = callback_data.split(":", 1)[1] if ":" in callback_data else callback_data
+
+        if action == "cancel":
+            self._remove_draw_session(chat_id, message_id)
+            try:
+                await query.edit_message_text("❌ Closed Draw Things session.")
+            except Exception:
+                pass
+            logging.info("draw: session cancelled by user")
+            return
+        if action == "nop":
+            try:
+                await query.answer("Working…")
+            except Exception:
+                pass
+            return
+
+        if action in ("enhance_local", "enhance_cloud"):
+            concept = session.get("active_prompt") or session.get("original_prompt") or ""
+            if not concept:
+                try:
+                    await query.answer("Prompt is empty.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["status_message"] = "✨ Enhancing prompt via Local model…" if action == "enhance_local" else "🌐 Enhancing prompt via Cloud model…"
+            session["status_button_label"] = "✨ Enhancing…" if action == "enhance_local" else "🌐 Enhancing…"
+            session["buttons_disabled"] = True
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            logging.info("draw: enhancing prompt via %s (len=%d)", "local" if action == "enhance_local" else "cloud", len(concept))
+            try:
+                if action == "enhance_local":
+                    enhanced = await draw_service.enhance_prompt_local(concept)
+                    session["active_source"] = "local"
+                else:
+                    enhanced = await draw_service.enhance_prompt_cloud(concept)
+                    session["active_source"] = "cloud"
+            except Exception as exc:
+                logging.warning("draw: prompt enhancement failed (%s): %s", action, exc)
+                session["status_message"] = f"⚠️ Enhancement failed: {str(exc)[:120]}"
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(chat_id, message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer(f"Enhancement failed: {str(exc)[:120]}", show_alert=True)
+                except Exception:
+                    pass
+                return
+            enhanced = (enhanced or concept).strip()
+            session["active_prompt"] = enhanced if enhanced else concept
+            if session["active_prompt"].strip() == (session.get("original_prompt") or "").strip():
+                session["active_source"] = "base"
+                session["status_message"] = "✅ Prompt reset to original."
+            else:
+                session["status_message"] = "✅ Prompt enhanced."
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action.startswith("generate_"):
+            size_key = action.split("_", 1)[1]
+            preset = self.DRAW_SIZE_PRESETS.get(size_key)
+            if not preset:
+                try:
+                    await query.answer("Unknown size.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            prompt_text = session.get("active_prompt") or session.get("original_prompt") or ""
+            if not prompt_text:
+                try:
+                    await query.answer("Prompt is empty.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["status_message"] = f"🖼️ Generating {preset.get('label', size_key.title())}…"
+            session["status_button_label"] = "🖼️ Generating…"
+            session["buttons_disabled"] = True
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            client = self._resolve_tts_client()
+            base = (
+                client.base_api_url
+                if client and client.base_api_url
+                else (os.getenv("TTSHUB_API_BASE") or "").strip()
+            )
+            if not base:
+                session["status_message"] = "⚠️ TTS hub URL not configured."
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(chat_id, message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer("Set TTSHUB_API_BASE to use Draw Things.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            if not reach_hub_ok(base):
+                session["status_message"] = "⚠️ Hub unreachable. Check the Mac."
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(chat_id, message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer("Draw hub unreachable. Is the Mac online?", show_alert=True)
+                except Exception:
+                    pass
+                return
+            logging.info(
+                "draw: generating image size=%s (%sx%s) prompt_len=%d",
+                size_key,
+                preset.get("width"),
+                preset.get("height"),
+                len(prompt_text),
+            )
+            try:
+                result = await draw_service.generate_image(
+                    base,
+                    prompt_text,
+                    width=int(preset["width"]),
+                    height=int(preset["height"]),
+                    steps=20,
+                )
+            except Exception as exc:
+                logging.error("draw: generation failed for %s: %s", size_key, exc)
+                session["status_message"] = f"⚠️ Generation failed: {str(exc)[:120]}"
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(chat_id, message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer(f"Generation failed: {str(exc)[:120]}", show_alert=True)
+                except Exception:
+                    pass
+                return
+            image_url = result.get("absolute_url")
+            if not image_url:
+                session["status_message"] = "⚠️ Hub response missing image URL."
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(chat_id, message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer("Draw Things did not return an image URL.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            label = preset.get("label") or size_key.title()
+            caption_bits = [label, f"{preset['width']}×{preset['height']}"]
+            steps = result.get("steps")
+            if isinstance(steps, int) and steps > 0:
+                caption_bits.append(f"{steps} steps")
+            seed = result.get("seed")
+            if seed is not None:
+                caption_bits.append(f"seed {seed}")
+            caption_header = " • ".join(caption_bits)
+            caption_lines = [caption_header, prompt_text]
+            caption = "\n".join(line for line in caption_lines if line)[:1024]
+            try:
+                photo_payload = None
+                if requests is not None:
+                    try:
+                        response = requests.get(image_url, timeout=30)
+                        response.raise_for_status()
+                        photo_payload = io.BytesIO(response.content)
+                        parsed = urllib.parse.urlparse(image_url)
+                        photo_payload.name = Path(parsed.path).name or "draw.png"
+                    except Exception as download_exc:
+                        logging.warning("draw: failed to download image for upload: %s", download_exc)
+                        photo_payload = None
+                if photo_payload is not None:
+                    await query.message.reply_photo(photo=photo_payload, caption=caption)
+                else:
+                    await query.message.reply_photo(photo=image_url, caption=caption)
+            except Exception as exc:
+                logging.error("draw: failed to send image: %s", exc)
+                session["status_message"] = f"⚠️ Image ready but sending failed: {str(exc)[:120]}"
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(chat_id, message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer("Image generated but sending failed.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["last_generation"] = {
+                "label": label,
+                "steps": steps,
+                "seed": seed,
+                "url": image_url,
+            }
+            session["status_message"] = f"✅ Generated {label}. Pick another option."
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            logging.info("draw: image generated %s url=%s", label, image_url)
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        try:
+            await query.answer("Unknown draw action.", show_alert=True)
+        except Exception:
+            pass
 
     # ------------------------- TTS quick pick memory -------------------------
     def _remember_last_tts_voice(self, user_id: int, alias_slug: Optional[str]) -> None:
@@ -2603,6 +2959,8 @@ class YouTubeTelegramBot:
 
         elif callback_data.startswith("tts_"):
             await self._handle_tts_callback(query, callback_data)
+        elif callback_data.startswith("draw:"):
+            await self._handle_draw_callback(query, callback_data)
         elif callback_data.startswith("ollama_"):
             await self._handle_ollama_callback(query, callback_data)
         elif callback_data.startswith("status:"):
