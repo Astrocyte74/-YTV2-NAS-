@@ -1326,10 +1326,13 @@ class YouTubeTelegramBot:
             negative_label = self._draw_choice_label(session, "negative", session.get("selected_negative"))
             lines.append(f"*Style:* {self._escape_markdown(style_label)}")
             lines.append(f"*Negative:* {self._escape_markdown(negative_label)}")
+        banner = session.get("status_banner")
+        if banner:
+            lines.append("")
+            lines.append(self._escape_markdown(str(banner)))
         status_line = session.get("status_message")
         if status_line:
-            lines.append("")
-            lines.append(status_line)
+            lines.append(self._escape_markdown(str(status_line)))
         lines.append("")
         if session.get("buttons_disabled"):
             lines.append("Working…")
@@ -1392,6 +1395,23 @@ class YouTubeTelegramBot:
             result.append(entry)
         return result
 
+    def _update_draw_status_banner(self, session: Dict[str, Any]) -> None:
+        model_label = session.get("selected_model") or "Draw Things"
+        banner_bits: List[str] = [f"🗂️ Model: {model_label}"]
+        dt_status = session.get("drawthings") or {}
+        active_model_display = dt_status.get("activeModel")
+        if active_model_display and active_model_display != model_label:
+            banner_bits.append(f"🖥️ Engine: {active_model_display}")
+        family_label = _draw_family_label(session.get("selected_model_group"))
+        banner_bits.append(f"🎛️ Family: {family_label}")
+        preset_label = self._draw_choice_label(session, "preset", session.get("selected_preset"), default="Auto")
+        banner_bits.append(f"🎚️ Default preset: {preset_label}")
+        style_label = self._draw_choice_label(session, "style", session.get("selected_style"))
+        banner_bits.append(f"🎨 Style: {style_label}")
+        switching = "Switchable" if session.get("model_switch_enabled", False) else "Fixed"
+        banner_bits.append(f"🔁 {switching}")
+        session["status_banner"] = " • ".join(banner_bits)
+
     def _build_draw_picker_keyboard(self, session: Dict[str, Any], target: str) -> InlineKeyboardMarkup:
         rows: List[List[InlineKeyboardButton]] = []
         if target == "preset":
@@ -1410,6 +1430,7 @@ class YouTubeTelegramBot:
             }
             preset_info = session.get("preset_info") or {}
             order = (preset_info.get("orders") or {}).get("presets") or []
+            show_all = session.get("preset_picker_show_all", False)
 
             def iter_entries(group_filter: Optional[str]):
                 seen: set = set()
@@ -1443,9 +1464,10 @@ class YouTubeTelegramBot:
             families_in_order: List[str] = []
             if group and group in grouped:
                 families_in_order.append(group)
-            for fam in grouped.keys():
-                if fam not in families_in_order:
-                    families_in_order.append(fam)
+            if show_all or not group or group not in grouped:
+                for fam in grouped.keys():
+                    if fam not in families_in_order:
+                        families_in_order.append(fam)
 
             has_any = False
             for fam in families_in_order:
@@ -1463,6 +1485,13 @@ class YouTubeTelegramBot:
 
             if not has_any:
                 rows.append([InlineKeyboardButton("No presets available", callback_data="draw:nop")])
+            else:
+                families_total = len(grouped)
+                if families_total > 1:
+                    if show_all:
+                        rows.append([InlineKeyboardButton("Hide other presets", callback_data="draw:preset_less")])
+                    else:
+                        rows.append([InlineKeyboardButton("More presets…", callback_data="draw:preset_more")])
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
         elif target == "model":
             if not session.get("model_switch_enabled", False):
@@ -1702,29 +1731,9 @@ class YouTubeTelegramBot:
             active_family,
         )
 
-        preset_label = self._draw_choice_label(session, "preset", None, default="Auto")
-        escape = self._escape_markdown
-        status_bits: List[str] = []
-        selected_model_label = session.get("selected_model")
-        if selected_model_label:
-            if session.get("model_switch_enabled", False):
-                status_bits.append(f"🗂️ Model {escape(selected_model_label)}")
-            else:
-                status_bits.append(f"🗂️ Model {escape(selected_model_label)} (set in Draw Things)")
-        dt_status = session.get("drawthings") or {}
-        active_model_display = dt_status.get("activeModel")
-        if active_model_display and active_model_display != selected_model_label:
-            status_bits.append(f"🖥️ Active: {escape(str(active_model_display))}")
-        family_label = escape(_draw_family_label(session.get("selected_model_group")))
-        status_bits.append(f"🎛️ {family_label} presets")
-        if session.get("model_switch_enabled", False):
-            status_bits.append("🔁 Switchable")
-        else:
-            status_bits.append("🔁 Fixed")
-        status_bits.append(f"🎚️ Default: {escape(preset_label)}")
-        style_status = escape(self._draw_choice_label(session, "style", session.get("selected_style")))
-        status_bits.append(f"🎨 Style: {style_status}")
-        session["status_message"] = " • ".join(status_bits)
+        session["preset_picker_show_all"] = False
+        self._update_draw_status_banner(session)
+        session["status_message"] = None
 
         text = self._format_draw_prompt(session)
         keyboard = self._build_draw_keyboard(session)
@@ -2088,9 +2097,22 @@ class YouTubeTelegramBot:
                     pass
                 return
             session["picker"] = "preset"
+            session.setdefault("preset_picker_show_all", False)
             session["status_message"] = "🎛️ Choose a preset."
             session["status_button_label"] = None
             session["buttons_disabled"] = False
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "preset_more":
+            session["preset_picker_show_all"] = True
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "preset_less":
+            session["preset_picker_show_all"] = False
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
             return
@@ -2135,6 +2157,7 @@ class YouTubeTelegramBot:
         if action == "style_clear":
             session["selected_style"] = None
             session["picker"] = None
+            self._update_draw_status_banner(session)
             session["status_message"] = "🎨 Style cleared."
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
@@ -2171,11 +2194,10 @@ class YouTubeTelegramBot:
             orders = ((session.get("preset_info") or {}).get("orders") or {}) if isinstance(session.get("preset_info"), dict) else {}
             session["selected_style"] = _default_style_key(style_map, orders, session.get("selected_model_group"))
             session["selected_negative"] = None
-            label_bits = [f"🗂️ Model {session['selected_model'] or 'Current'}"]
-            label_bits.append(f"🎛️ {self._draw_choice_label(session, 'preset', None, default='Auto')}")
-            if not session.get("model_switch_enabled", False) and session["selected_model"]:
-                label_bits.append("(switch manually in Draw Things)")
-            session["status_message"] = " • ".join(label_bits)
+            session["preset_picker_show_all"] = False
+            self._update_draw_status_banner(session)
+            model_label = session.get("selected_model") or "current"
+            session["status_message"] = f"🗂️ Model changed to {model_label}."
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
             logging.info("draw: model selected %s group=%s", session["selected_model"], session["selected_model_group"])
@@ -2184,8 +2206,10 @@ class YouTubeTelegramBot:
         if action == "preset_auto":
             session["selected_preset"] = None
             session["picker"] = None
+            session["preset_picker_show_all"] = False
             label = self._draw_choice_label(session, "preset", None, default="Auto")
-            session["status_message"] = f"🎛️ {label}"
+            self._update_draw_status_banner(session)
+            session["status_message"] = f"🎛️ Preset set to {label}."
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
             logging.info("draw: preset set to auto")
@@ -2196,6 +2220,7 @@ class YouTubeTelegramBot:
             session["selected_preset"] = key
             session["picker"] = None
             label = self._draw_choice_label(session, "preset", key, default=_clean_label(key))
+            self._update_draw_status_banner(session)
             session["status_message"] = f"🎛️ Preset set to {label}."
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
@@ -2207,6 +2232,7 @@ class YouTubeTelegramBot:
             session["selected_style"] = key
             session["picker"] = None
             label = self._draw_choice_label(session, "style", key, default=_clean_label(key))
+            self._update_draw_status_banner(session)
             session["status_message"] = f"🎨 Style preset set to {label}."
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
