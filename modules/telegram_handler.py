@@ -192,6 +192,21 @@ def _friendly_model_name(raw: Optional[str], overrides: List[Dict[str, str]]) ->
     return display or raw
 
 
+def _friendly_engine_label(raw: Optional[str], overrides: List[Dict[str, str]]) -> Optional[str]:
+    if not isinstance(raw, str) or not raw:
+        return None
+    friendly = _friendly_model_name(raw, overrides)
+    if friendly:
+        return friendly
+    label = raw
+    for suffix in (".ckpt", ".safetensors"):
+        if label.lower().endswith(suffix):
+            label = label[: -len(suffix)]
+            break
+    label = label.replace("_", " ").replace("-", " ").strip()
+    return label or raw
+
+
 def _load_draw_models() -> List[Dict[str, str]]:
     raw = (os.getenv("DRAW_MODELS") or "").strip()
     models: List[Dict[str, str]] = []
@@ -1419,20 +1434,29 @@ class YouTubeTelegramBot:
         return result
 
     def _update_draw_status_banner(self, session: Dict[str, Any]) -> None:
-        model_label = session.get("selected_model") or "Draw Things"
+        overrides = session.get("model_options") or []
+        model_raw = session.get("selected_model")
+        model_label = _friendly_engine_label(model_raw, overrides) if model_raw else "Draw Things"
         banner_bits: List[str] = [f"🗂️ Model: {model_label}"]
+
         dt_status = session.get("drawthings") or {}
-        active_model_display = dt_status.get("activeModel")
-        if active_model_display and active_model_display != model_label:
-            banner_bits.append(f"🖥️ Engine: {active_model_display}")
+        active_model_raw = dt_status.get("activeModel")
+        engine_label = _friendly_engine_label(active_model_raw, overrides)
+        if engine_label and engine_label.lower() != model_label.lower():
+            banner_bits.append(f"🖥️ Engine: {engine_label}")
+
         family_label = _draw_family_label(session.get("selected_model_group"))
         banner_bits.append(f"🎛️ Family: {family_label}")
+
         preset_label = self._draw_choice_label(session, "preset", session.get("selected_preset"), default="Auto")
         banner_bits.append(f"🎚️ Default preset: {preset_label}")
+
         style_label = self._draw_choice_label(session, "style", session.get("selected_style"))
         banner_bits.append(f"🎨 Style: {style_label}")
+
         switching = "Switchable" if session.get("model_switch_enabled", False) else "Fixed"
         banner_bits.append(f"🔁 {switching}")
+
         session["status_banner"] = " • ".join(banner_bits)
 
     def _build_draw_picker_keyboard(self, session: Dict[str, Any], target: str) -> InlineKeyboardMarkup:
