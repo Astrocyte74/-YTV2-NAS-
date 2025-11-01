@@ -237,10 +237,14 @@ async def fetch_presets(base_api_url: str, *, ttl: int = _PRESET_CACHE_TTL_SECON
     if not base:
         raise RuntimeError("Hub base URL is not configured.")
 
-    now = time.time()
+    now = time.monotonic()
     cached = _PRESET_CACHE.get(base)
-    if not force_refresh and cached and now - cached[0] <= ttl:
-        return cached[1]
+    if cached:
+        cached_ts, cached_data = cached
+        if cached_ts >= 1_000_000_000:
+            _PRESET_CACHE.pop(base, None)
+        elif not force_refresh and now - cached_ts <= ttl:
+            return cached_data
 
     url = f"{base.rstrip('/')}/telegram/presets"
     loop = asyncio.get_running_loop()
@@ -266,10 +270,14 @@ async def fetch_drawthings_health(
     if not base:
         raise RuntimeError("Hub base URL is not configured.")
 
-    now = time.time()
+    now = time.monotonic()
     cached = _HEALTH_CACHE.get(base)
-    if not force_refresh and cached and now - cached[0] <= ttl:
-        return cached[1]
+    if cached:
+        cached_ts, cached_data = cached
+        if cached_ts >= 1_000_000_000:
+            _HEALTH_CACHE.pop(base, None)
+        elif not force_refresh and now - cached_ts <= ttl:
+            return cached_data
 
     url = f"{base.rstrip('/')}/drawthings/health"
     loop = asyncio.get_running_loop()

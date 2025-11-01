@@ -144,6 +144,21 @@ def _default_style_key(
     return next(iter(style_map.keys()), None)
 
 
+def _draw_health_warning(health: Dict[str, Any]) -> Optional[str]:
+    if not health:
+        return None
+    if not health.get("reachable", True):
+        return "📴 Draw Things appears offline."
+    probe = health.get("probe") or {}
+    if not probe.get("ok", True):
+        return "⚠️ Draw Things is not ready yet; open the app and ensure the model is loaded."
+    elapsed = probe.get("elapsedMs")
+    if isinstance(elapsed, (int, float)) and elapsed > 5000:
+        seconds = elapsed / 1000.0
+        return f"🐢 Draw Things is responding slowly (~{seconds:.1f}s)."
+    return None
+
+
 _PRESET_HINTS = {
     "flux_ultra": "⚡ 3-step turbo",
     "flux_fast": "⚡ 4-step quick",
@@ -1402,8 +1417,12 @@ class YouTubeTelegramBot:
         info = session.get("preset_info") or {}
         defaults = info.get("defaults") or {}
         preset_key = defaults.get("preset")
-        if preset_key and (not group or (self._draw_mapping(session, "preset").get(preset_key, {}).get("group") == group)):
+        mapping = self._draw_mapping(session, "preset")
+        if preset_key and (not group or (mapping.get(preset_key, {}).get("group") == group)):
             return preset_key
+        preferred = self._health_preferred_preset(session, mapping, group=group)
+        if preferred:
+            return preferred
         presets = info.get("presets") or []
         if presets:
             first = presets[0]
@@ -1414,7 +1433,6 @@ class YouTubeTelegramBot:
             for entry in presets:
                 if isinstance(entry, dict) and entry.get("group") == group:
                     return entry.get("key")
-        mapping = self._draw_mapping(session, "preset")
         if mapping:
             return next(iter(mapping.keys()))
         return None
@@ -1432,6 +1450,61 @@ class YouTubeTelegramBot:
                 continue
             result.append(entry)
         return result
+
+    def _health_preferred_preset(
+        self,
+        session: Dict[str, Any],
+        mapping: Dict[str, Dict[str, Any]],
+        *,
+        group: Optional[str] = None,
+    ) -> Optional[str]:
+        group_name = (group or session.get("selected_model_group") or "general").strip().lower()
+        preferences: Dict[str, Tuple[str, ...]] = {
+            "flux": ("flux_balanced", "flux_fast", "flux_ultra"),
+            "hidream": ("hidream_fast", "hidream_balanced", "hidream_photoreal"),
+        }
+        for candidate in preferences.get(group_name, ()):
+            if mapping.get(candidate):
+                return candidate
+        return None
+
+    def _draw_fallback_generation(self, session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        mapping = self._draw_mapping(session, "preset")
+        group = (session.get("selected_model_group") or "general").strip().lower()
+        if group == "flux":
+            preset = "flux_ultra" if mapping.get("flux_ultra") else ("flux_fast" if mapping.get("flux_fast") else None)
+            return {
+                "preset": preset,
+                "steps": 4,
+                "sampler": "Euler a",
+                "cfg_scale": 7.5,
+                "width": 512,
+                "height": 512,
+                "label": "Flux fallback 512²",
+                "message": "⚠️ Generation failed; retrying with Flux fallback (4-step, 512²).",
+            }
+        if group == "hidream":
+            preset = "hidream_fast" if mapping.get("hidream_fast") else None
+            return {
+                "preset": preset,
+                "steps": 24,
+                "sampler": "Euler a",
+                "cfg_scale": 7.5,
+                "width": 512,
+                "height": 512,
+                "label": "HiDream fallback 512²",
+                "message": "⚠️ Generation failed; retrying with HiDream fallback (24-step, 512²).",
+            }
+        return {
+            "preset": session.get("selected_preset"),
+            "steps": None,
+            "sampler": None,
+            "cfg_scale": None,
+            "width": 512,
+            "height": 512,
+            "label": "Fallback 512²",
+            "message": "⚠️ Generation failed; retrying with simplified settings.",
+        }
 
     def _update_draw_status_banner(self, session: Dict[str, Any]) -> None:
         overrides = session.get("model_options") or []
@@ -1462,6 +1535,16 @@ class YouTubeTelegramBot:
         size_info = self.DRAW_SIZE_PRESETS.get(size_key, {})
         size_label = size_info.get("label") or size_key.title()
         banner_bits.append(f"🖼️ Size: {size_label}")
+
+        seed_mode = session.get("seed_mode") or "auto"
+        seed_value = session.get("seed_value")
+        if seed_mode == "reuse":
+            if isinstance(seed_value, int):
+                banner_bits.append(f"🎲 Seed: Reuse ({seed_value})")
+            else:
+                banner_bits.append("🎲 Seed: Reuse (not captured)")
+        else:
+            banner_bits.append("🎲 Seed: Auto")
 
         health = session.get("drawthings_health") or {}
         probe = health.get("probe") or {}
@@ -1643,6 +1726,8 @@ class YouTubeTelegramBot:
             session["enhance_mode"] = "local"
         if session.get("selected_size") not in self.DRAW_SIZE_PRESETS:
             session["selected_size"] = "small"
+        if session.get("seed_mode") not in ("auto", "reuse"):
+            session["seed_mode"] = "auto"
 
         rows: List[List[InlineKeyboardButton]] = []
         model_options = session.get("model_options") or []
@@ -1685,6 +1770,24 @@ class YouTubeTelegramBot:
         )
 
         size_key = session.get("selected_size") or "small"
+        seed_mode = session.get("seed_mode") or "auto"
+        seed_value = session.get("seed_value")
+
+        seed_auto_label = "🎲 Seed • Auto"
+        if seed_mode == "auto":
+            seed_auto_label = f"✅ {seed_auto_label}"
+        seed_reuse_label = "♻️ Seed • Reuse"
+        if isinstance(seed_value, int):
+            seed_reuse_label = f"{seed_reuse_label} ({seed_value})"
+        else:
+            seed_reuse_label = f"{seed_reuse_label} (after generate)"
+        if seed_mode == "reuse":
+            seed_reuse_label = f"✅ {seed_reuse_label}"
+        rows.append([
+            InlineKeyboardButton(seed_auto_label, callback_data="draw:seed_auto"),
+            InlineKeyboardButton(seed_reuse_label, callback_data="draw:seed_reuse"),
+        ])
+
         size_row: List[InlineKeyboardButton] = []
         for key in ("small", "medium", "large"):
             size_info = self.DRAW_SIZE_PRESETS.get(key) or {}
@@ -1798,6 +1901,8 @@ class YouTubeTelegramBot:
             "enhance_mode": "local",
             "selected_size": "small",
             "drawthings_health": {},
+            "seed_mode": "auto",
+            "seed_value": None,
         }
 
         logging.info(
@@ -1814,20 +1919,11 @@ class YouTubeTelegramBot:
             try:
                 health_info = await draw_service.fetch_drawthings_health(base, force_refresh=True)
                 session["drawthings_health"] = health_info or {}
-                if health_info:
-                    if not health_info.get("reachable", True):
-                        health_warning = "⚠️ Draw Things health check failed (unreachable)."
-                    else:
-                        probe = health_info.get("probe") or {}
-                        elapsed = probe.get("elapsedMs")
-                        if not probe.get("ok", True):
-                            health_warning = "⚠️ Draw Things probe failed; open the app and ensure the model is loaded."
-                        elif isinstance(elapsed, (int, float)) and elapsed > 5000:
-                            seconds = elapsed / 1000.0
-                            health_warning = f"⚠️ Draw Things probe is slow ({seconds:.1f}s). It may be running on CPU."
             except Exception as exc:
                 logging.warning("draw: health fetch failed: %s", exc)
-                session["drawthings_health"] = {}
+                # retain any cached info so we can at least show stale data
+                session.setdefault("drawthings_health", {})
+            health_warning = _draw_health_warning(session.get("drawthings_health") or {})
         else:
             session["drawthings_health"] = {}
 
@@ -1947,51 +2043,129 @@ class YouTubeTelegramBot:
         )
         model_switch_enabled = session.get("model_switch_enabled", False)
         model_name = session.get("selected_model") if model_switch_enabled else None
-        gen_kwargs: Dict[str, Any] = {}
-        if width is not None:
-            gen_kwargs["width"] = int(width)
-        if height is not None:
-            gen_kwargs["height"] = int(height)
-        try:
-            result = await draw_service.generate_image(
-                base,
-                prompt_text,
-                **gen_kwargs,
-                steps=steps,
-                preset=effective_preset,
-                style_preset=session.get("selected_style"),
-                negative_preset=session.get("selected_negative"),
-                model=model_name,
-            )
-        except draw_service.DrawGenerationError as exc:
-            message = str(exc)
-            logging.warning("draw: hub generation error (%s): %s", size_label, message)
-            lowered = message.lower()
-            if any(token in lowered for token in ("sdapi/v1", "service unavailable", "connection refused", "read timed out", "request to hub failed", "client error")):
+        current_width = int(width) if width is not None else None
+        current_height = int(height) if height is not None else None
+        current_steps = steps
+        current_sampler: Optional[str] = None
+        current_cfg_scale: Optional[float] = None
+        current_preset = effective_preset
+        current_size_label = size_label
+        fallback_used = False
+        result: Optional[Dict[str, Any]] = None
+        attempt = 0
+        seed_mode = session.get("seed_mode") or "auto"
+        seed_value = session.get("seed_value")
+        current_seed: Optional[int] = None
+        if seed_mode == "reuse" and isinstance(seed_value, int):
+            current_seed = int(seed_value)
+        elif seed_mode == "reuse":
+            logging.info("draw: seed reuse requested but no seed available; falling back to auto.")
+            session["seed_mode"] = "auto"
+            self._update_draw_status_banner(session)
+
+        while attempt < 2:
+            attempt += 1
+            try:
+                result = await draw_service.generate_image(
+                    base,
+                    prompt_text,
+                    width=current_width,
+                    height=current_height,
+                    steps=current_steps,
+                    preset=current_preset,
+                    style_preset=session.get("selected_style"),
+                    negative_preset=session.get("selected_negative"),
+                    model=model_name,
+                    sampler=current_sampler,
+                    cfg_scale=current_cfg_scale,
+                    seed=current_seed,
+                )
+                break
+            except draw_service.DrawGenerationError as exc:
+                message = str(exc)
+                lowered = message.lower()
+                logging.warning("draw: hub generation error (attempt %d, %s): %s", attempt, current_size_label, message)
+                offline_tokens = (
+                    "sdapi/v1",
+                    "service unavailable",
+                    "connection refused",
+                    "read timed out",
+                    "request to hub failed",
+                    "client error",
+                )
+                is_offline = any(token in lowered for token in offline_tokens)
+                fallback_plan = None
+                if not is_offline and not fallback_used:
+                    fallback_plan = self._draw_fallback_generation(session)
+                if fallback_plan:
+                    fallback_used = True
+                    new_width = fallback_plan.get("width")
+                    new_height = fallback_plan.get("height")
+                    if new_width is not None:
+                        current_width = int(new_width)
+                        caption_width = current_width
+                    if new_height is not None:
+                        current_height = int(new_height)
+                        caption_height = current_height
+                    new_steps = fallback_plan.get("steps")
+                    if new_steps is not None:
+                        current_steps = int(new_steps)
+                    new_sampler = fallback_plan.get("sampler")
+                    if new_sampler:
+                        current_sampler = new_sampler
+                    new_cfg = fallback_plan.get("cfg_scale")
+                    if new_cfg is not None:
+                        current_cfg_scale = float(new_cfg)
+                    new_preset = fallback_plan.get("preset")
+                    if new_preset:
+                        current_preset = new_preset
+                    current_size_label = fallback_plan.get("label") or current_size_label
+                    fallback_message = fallback_plan.get("message") or "⚠️ Generation failed; retrying with fallback settings."
+                    session["status_message"] = fallback_message
+                    session["status_button_label"] = "🖼️ Retrying…"
+                    session["buttons_disabled"] = True
+                    self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+                    await self._refresh_draw_prompt(query, session)
+                    continue
+
                 friendly = (
                     "⚠️ Draw Things is not responding (likely offline or still loading the model). "
                     "Open the Draw Things app on the Mac and ensure the target model is ready, then retry."
+                    if is_offline
+                    else f"⚠️ Generation failed: {message[:160]}"
                 )
-            else:
-                friendly = f"⚠️ Generation failed: {message[:160]}"
-            session["status_message"] = friendly
+                session["status_message"] = friendly
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                return
+            except Exception as exc:
+                logging.error("draw: generation failed (%s): %s", current_size_label, exc)
+                session["status_message"] = f"⚠️ Generation failed: {str(exc)[:120]}"
+                session["buttons_disabled"] = False
+                session["status_button_label"] = None
+                self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+                await self._refresh_draw_prompt(query, session)
+                try:
+                    await query.answer(f"Generation failed: {str(exc)[:120]}", show_alert=True)
+                except Exception:
+                    pass
+                return
+
+        if result is None:
+            session["status_message"] = "⚠️ Generation failed: no result returned."
             session["buttons_disabled"] = False
             session["status_button_label"] = None
             self._store_draw_session(query.message.chat.id, query.message.message_id, session)
             await self._refresh_draw_prompt(query, session)
             return
-        except Exception as exc:
-            logging.error("draw: generation failed (%s): %s", size_label, exc)
-            session["status_message"] = f"⚠️ Generation failed: {str(exc)[:120]}"
-            session["buttons_disabled"] = False
-            session["status_button_label"] = None
-            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
-            await self._refresh_draw_prompt(query, session)
-            try:
-                await query.answer(f"Generation failed: {str(exc)[:120]}", show_alert=True)
-            except Exception:
-                pass
-            return
+
+        effective_preset = current_preset
+        size_label = current_size_label
+        width = current_width if current_width is not None else width
+        height = current_height if current_height is not None else height
+        steps = current_steps
 
         image_url = result.get("absolute_url")
         if not image_url:
@@ -2012,9 +2186,25 @@ class YouTubeTelegramBot:
         steps_val = result.get("steps") if steps is None else steps
         if isinstance(steps_val, int) and steps_val > 0:
             caption_bits.append(f"{steps_val} steps")
-        seed = result.get("seed")
-        if seed is not None:
+        raw_seed = result.get("seed")
+        seed: Optional[int] = None
+        parsed_seed: Optional[int] = None
+        if isinstance(raw_seed, (int, float)):
+            parsed_seed = int(raw_seed)
+        elif isinstance(raw_seed, str):
+            try:
+                parsed_seed = int(raw_seed.strip())
+            except ValueError:
+                parsed_seed = None
+        if parsed_seed is not None:
+            seed = parsed_seed
             caption_bits.append(f"seed {seed}")
+        elif raw_seed is not None:
+            caption_bits.append(f"seed {raw_seed}")
+        else:
+            seed = current_seed
+            if seed is not None:
+                caption_bits.append(f"seed {seed}")
         if selected_preset is None:
             preset_label = self._draw_choice_label(session, "preset", None, default="Auto")
             caption_bits.append(f"Preset: {preset_label}")
@@ -2066,26 +2256,38 @@ class YouTubeTelegramBot:
                 pass
             return
 
+        if seed is not None:
+            session["seed_value"] = seed
+        elif isinstance(current_seed, int):
+            session["seed_value"] = current_seed
+
         session["last_generation"] = {
             "label": size_label,
             "steps": steps_val,
-            "seed": seed,
+            "seed": seed if seed is not None else raw_seed,
             "url": image_url,
             "preset": selected_preset or "auto",
             "applied_preset": effective_preset,
             "model": model_name,
+            "fallback_used": fallback_used,
         }
-        session["status_message"] = f"✅ Generated {size_label}. Pick another option."
+        session["enhance_mode"] = "none"
+        if fallback_used:
+            session["status_message"] = f"✅ Generated {size_label} (fallback). Enhance reset to Off."
+        else:
+            session["status_message"] = f"✅ Generated {size_label}. Enhance reset to Off."
         session["buttons_disabled"] = False
         session["status_button_label"] = None
+        self._update_draw_status_banner(session)
         logging.info(
-            "draw: image generated %s url=%s model=%s (switch=%s) preset=%s applied=%s",
+            "draw: image generated %s url=%s model=%s (switch=%s) preset=%s applied=%s fallback=%s",
             size_label,
             image_url,
             model_name or "<default>",
             "on" if model_switch_enabled else "off",
             selected_preset or "auto",
             effective_preset or "<auto-inferred>",
+            "yes" if fallback_used else "no",
         )
         self._store_draw_session(query.message.chat.id, query.message.message_id, session)
         await self._refresh_draw_prompt(query, session)
@@ -2143,6 +2345,31 @@ class YouTubeTelegramBot:
             session["selected_size"] = size_key
             self._update_draw_status_banner(session)
             session["status_message"] = f"🖼️ Size set to {size_info.get('label', size_key.title())}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "seed_auto":
+            session["seed_mode"] = "auto"
+            session["status_message"] = "🎲 Seed set to auto (random each run)."
+            self._update_draw_status_banner(session)
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "seed_reuse":
+            seed_value = session.get("seed_value")
+            created = False
+            if not isinstance(seed_value, int):
+                seed_value = random.randint(0, 2**31 - 1)
+                session["seed_value"] = seed_value
+                created = True
+            session["seed_mode"] = "reuse"
+            if created:
+                session["status_message"] = f"♻️ Seed reuse enabled. Using new seed {seed_value}."
+            else:
+                session["status_message"] = f"♻️ Reusing seed {seed_value} on next generate."
+            self._update_draw_status_banner(session)
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
             return
@@ -2400,22 +2627,6 @@ class YouTubeTelegramBot:
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
             logging.info("draw: negative preset selected %s", key)
-            return
-
-        if action.startswith("generate_"):
-            size_key = action.split("_", 1)[1]
-            preset = self.DRAW_SIZE_PRESETS.get(size_key)
-            if not preset:
-                try:
-                    await query.answer("Unknown size.", show_alert=True)
-                except Exception:
-                    pass
-                return
-            session["selected_size"] = size_key
-            self._update_draw_status_banner(session)
-            session["status_message"] = f"🖼️ Size set to {preset.get('label', size_key.title())}."
-            self._store_draw_session(chat_id, message_id, session)
-            await self._refresh_draw_prompt(query, session)
             return
 
         try:
