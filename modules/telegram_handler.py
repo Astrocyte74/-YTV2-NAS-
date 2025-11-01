@@ -110,6 +110,15 @@ def _family_from_name(name: Optional[str]) -> str:
     return "general"
 
 
+def _draw_family_label(family: Optional[str]) -> str:
+    mapping = {
+        "flux": "Flux",
+        "hidream": "HiDream SDXL",
+        "general": "General",
+    }
+    return mapping.get((family or "").strip().lower(), "General")
+
+
 def _friendly_model_name(raw: Optional[str], overrides: List[Dict[str, str]]) -> Optional[str]:
     if not isinstance(raw, str) or not raw:
         return None
@@ -1649,6 +1658,7 @@ class YouTubeTelegramBot:
             "selected_model": active_model_name,
             "selected_model_group": active_family or (default_model.get("group") or "general"),
             "model_switch_enabled": model_switch_enabled,
+            "drawthings": dt_info,
         }
 
         logging.info(
@@ -1661,14 +1671,24 @@ class YouTubeTelegramBot:
         )
 
         preset_label = self._draw_choice_label(session, "preset", None, default="Auto")
-        status_bits = []
+        status_bits: List[str] = []
         selected_model_label = session.get("selected_model")
         if selected_model_label:
             if session.get("model_switch_enabled", False):
                 status_bits.append(f"🗂️ Model {selected_model_label}")
             else:
                 status_bits.append(f"🗂️ Model {selected_model_label} (set in Draw Things)")
-        status_bits.append(f"🎛️ {preset_label}")
+        dt_status = session.get("drawthings") or {}
+        active_model_display = dt_status.get("activeModel")
+        if active_model_display and active_model_display != selected_model_label:
+            status_bits.append(f"🖥️ Active: {active_model_display}")
+        family_label = _draw_family_label(session.get("selected_model_group"))
+        status_bits.append(f"🎛️ {family_label} presets")
+        if session.get("model_switch_enabled", False):
+            status_bits.append("🔁 Switchable")
+        else:
+            status_bits.append("🔁 Fixed")
+        status_bits.append(f"🎚️ Default: {preset_label}")
         session["status_message"] = " • ".join(status_bits)
 
         text = self._format_draw_prompt(session)
@@ -1752,37 +1772,50 @@ class YouTubeTelegramBot:
         group = session.get("selected_model_group")
         effective_preset = selected_preset or self._draw_default_preset_key(session, group=group)
         preset_entry = self._draw_mapping(session, "preset").get(effective_preset)
+        if not effective_preset or not preset_entry:
+            session["status_message"] = "⚠️ No preset found for this model family."
+            session["buttons_disabled"] = False
+            session["status_button_label"] = None
+            self._store_draw_session(query.message.chat.id, query.message.message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            try:
+                await query.answer("Preset unavailable for this family.", show_alert=True)
+            except Exception:
+                pass
+            return
         steps = None
+        caption_width = width
+        caption_height = height
         if isinstance(preset_entry, dict):
-            if width is None:
-                width = preset_entry.get("default_width")
-            if height is None:
-                height = preset_entry.get("default_height")
+            if caption_width is None:
+                caption_width = preset_entry.get("default_width")
+            if caption_height is None:
+                caption_height = preset_entry.get("default_height")
             preset_steps = preset_entry.get("steps")
             if isinstance(preset_steps, (int, float)):
                 steps = int(preset_steps)
 
-        if width is None or height is None:
-            width = width or 640
-            height = height or 640
-
         logging.info(
-            "draw: generating image preset=%s size=%sx%s prompt_len=%d",
-            selected_preset or "auto",
+            "draw: generating image preset=%s width=%s height=%s prompt_len=%d",
+            effective_preset,
             width,
             height,
             len(prompt_text),
         )
         model_switch_enabled = session.get("model_switch_enabled", False)
         model_name = session.get("selected_model") if model_switch_enabled else None
+        gen_kwargs: Dict[str, Any] = {}
+        if width is not None:
+            gen_kwargs["width"] = int(width)
+        if height is not None:
+            gen_kwargs["height"] = int(height)
         try:
             result = await draw_service.generate_image(
                 base,
                 prompt_text,
-                width=int(width),
-                height=int(height),
+                **gen_kwargs,
                 steps=steps,
-                preset=selected_preset or "auto",
+                preset=effective_preset,
                 style_preset=session.get("selected_style"),
                 negative_preset=session.get("selected_negative"),
                 model=model_name,
@@ -1830,7 +1863,9 @@ class YouTubeTelegramBot:
                 pass
             return
 
-        caption_bits = [size_label, f"{int(width)}×{int(height)}"]
+        caption_bits = [size_label]
+        if caption_width is not None and caption_height is not None:
+            caption_bits.append(f"{int(caption_width)}×{int(caption_height)}")
         steps_val = result.get("steps") if steps is None else steps
         if isinstance(steps_val, int) and steps_val > 0:
             caption_bits.append(f"{steps_val} steps")
