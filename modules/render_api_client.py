@@ -28,25 +28,30 @@ class RenderAPIClient:
             auth_token: Bearer token for authentication
         """
         self.base_url = base_url or os.getenv('RENDER_API_URL') or os.getenv('RENDER_DASHBOARD_URL', '')
-        fallback_token = os.getenv('SYNC_SECRET') or os.getenv('INGEST_TOKEN', '')
-        self.auth_token = auth_token or fallback_token
+        self.ingest_token = (os.getenv('INGEST_TOKEN') or '').strip()
+        self.sync_secret = (os.getenv('SYNC_SECRET') or '').strip()
+        if auth_token:
+            # Allow explicit override while still capturing ingest token for uploads
+            self.sync_secret = auth_token
         self.session = requests.Session()
 
         if not self.base_url:
             raise ValueError("Set RENDER_API_URL or RENDER_DASHBOARD_URL for Render uploads")
-        if not self.auth_token:
-            raise ValueError("SYNC_SECRET or INGEST_TOKEN environment variable is required")
+        if not (self.sync_secret or self.ingest_token):
+            raise ValueError("INGEST_TOKEN or SYNC_SECRET environment variable is required")
             
         # Remove trailing slash
         self.base_url = self.base_url.rstrip('/')
         
         # Set default headers
         self.session.headers.update({
-            'Authorization': f'Bearer {self.auth_token}',
             'Content-Type': 'application/json',
             'User-Agent': 'YTV2-NAS-Client/1.0'
         })
-        
+        bearer_token = self.sync_secret or self.ingest_token
+        if bearer_token:
+            self.session.headers['Authorization'] = f'Bearer {bearer_token}'
+
         logger.info(f"Initialized Render API client for {self.base_url}")
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
@@ -195,11 +200,19 @@ class RenderAPIClient:
                 
                 # Use requests directly to ensure proper multipart headers
                 import requests
+                headers = {}
+                if self.ingest_token:
+                    headers['X-INGEST-TOKEN'] = self.ingest_token
+                if self.sync_secret:
+                    headers['Authorization'] = f'Bearer {self.sync_secret}'
+                elif not headers.get('Authorization') and self.ingest_token:
+                    headers['Authorization'] = f'Bearer {self.ingest_token}'
+
                 response = requests.post(
                     f"{self.base_url}/api/upload-audio",
                     files=files,
                     data=data,
-                    headers={'Authorization': f'Bearer {self.auth_token}'},
+                    headers=headers or None,
                     timeout=30
                 )
             
@@ -249,11 +262,19 @@ class RenderAPIClient:
                 data = {"content_id": content_id}
                 import requests as _requests
 
+                headers = {}
+                if self.ingest_token:
+                    headers['X-INGEST-TOKEN'] = self.ingest_token
+                if self.sync_secret:
+                    headers['Authorization'] = f'Bearer {self.sync_secret}'
+                elif not headers.get('Authorization') and self.ingest_token:
+                    headers['Authorization'] = f'Bearer {self.ingest_token}'
+
                 response = _requests.post(
                     f"{self.base_url}/api/upload-image",
                     files=files,
                     data=data,
-                    headers={"Authorization": f"Bearer {self.auth_token}"},
+                    headers=headers or None,
                     timeout=30,
                 )
 
