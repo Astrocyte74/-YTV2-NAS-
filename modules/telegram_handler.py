@@ -119,6 +119,31 @@ def _draw_family_label(family: Optional[str]) -> str:
     return mapping.get((family or "").strip().lower(), "General")
 
 
+def _default_style_key(
+    style_map: Dict[str, Dict[str, Any]],
+    orders: Optional[Dict[str, Any]],
+    family: Optional[str],
+) -> Optional[str]:
+    if not style_map:
+        return None
+    preferred: List[str] = []
+    fam = (family or "").strip().lower()
+    if fam in ("flux", "hidream"):
+        preferred = ["photoreal", "cinematic"]
+    else:
+        preferred = ["photoreal"]
+    preferred.extend(["photorealistic", "photo"])
+    for key in preferred:
+        if key in style_map:
+            return key
+    order_keys = (orders or {}).get("stylePresets") or []
+    for key in order_keys:
+        if key in style_map:
+            return key
+    # fallback to first available key
+    return next(iter(style_map.keys()), None)
+
+
 def _friendly_model_name(raw: Optional[str], overrides: List[Dict[str, str]]) -> Optional[str]:
     if not isinstance(raw, str) or not raw:
         return None
@@ -1408,25 +1433,28 @@ class YouTubeTelegramBot:
                     seen.add(key)
                     yield entry
 
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for entry in iter_entries(None):
+                if not isinstance(entry, dict):
+                    continue
+                entry_group = entry.get("group") or "general"
+                grouped.setdefault(entry_group, []).append(entry)
+
+            families_in_order: List[str] = []
+            if group and group in grouped:
+                families_in_order.append(group)
+            for fam in grouped.keys():
+                if fam not in families_in_order:
+                    families_in_order.append(fam)
+
             has_any = False
-            if group:
-                entries = list(iter_entries(group))
-                header = group_names.get(group, f"{group.title()} presets")
+            for fam in families_in_order:
+                entries = grouped.get(fam) or []
+                header = group_names.get(fam, f"{fam.title()} presets")
+                if fam == group:
+                    header = f"{header} • Active"
                 rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
                 for entry in entries:
-                    label = entry.get("label") or _clean_label(entry.get("key"))
-                    if entry.get("key") == selected:
-                        label = f"✅ {label}"
-                    rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{entry.get('key')}")])
-                    has_any = True
-            else:
-                last_group = None
-                for entry in iter_entries(None):
-                    entry_group = entry.get("group") or "general"
-                    if entry_group != last_group:
-                        header = group_names.get(entry_group, f"{entry_group.title()} presets")
-                        rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
-                        last_group = entry_group
                     label = entry.get("label") or _clean_label(entry.get("key"))
                     if entry.get("key") == selected:
                         label = f"✅ {label}"
@@ -1554,18 +1582,15 @@ class YouTubeTelegramBot:
             rows.append([
                 InlineKeyboardButton(f"🎛️ Preset • {preset_label}", callback_data="draw:preset"),
                 InlineKeyboardButton(f"🎨 Style • {style_label}", callback_data="draw:style"),
-            ])
-            rows.append([
                 InlineKeyboardButton(f"🚫 Negative • {negative_label}", callback_data="draw:negative"),
-                InlineKeyboardButton("🖼️ Preset Size", callback_data="draw:generate_preset"),
             ])
 
         rows.append([
             InlineKeyboardButton("🖼️ Small 512²", callback_data="draw:generate_small"),
             InlineKeyboardButton("🖼️ Medium 768²", callback_data="draw:generate_medium"),
+            InlineKeyboardButton("🖼️ Large 1024²", callback_data="draw:generate_large"),
         ])
         rows.append([
-            InlineKeyboardButton("🖼️ Large 1024²", callback_data="draw:generate_large"),
             InlineKeyboardButton("❌ Close", callback_data="draw:cancel"),
         ])
         return InlineKeyboardMarkup(rows)
@@ -1642,6 +1667,11 @@ class YouTubeTelegramBot:
         if not active_family:
             active_family = default_model.get("group") or "general"
 
+        preset_maps = (preset_info.get("maps") or {}) if isinstance(preset_info, dict) else {}
+        style_map = preset_maps.get("style") or {}
+        orders = (preset_info.get("orders") or {}) if isinstance(preset_info, dict) else {}
+        default_style = _default_style_key(style_map, orders, active_family)
+
         session = {
             "original_prompt": prompt,
             "active_prompt": prompt,
@@ -1653,7 +1683,7 @@ class YouTubeTelegramBot:
             "picker": None,
             "preset_info": preset_info,
             "selected_preset": None,
-            "selected_style": None,
+            "selected_style": default_style,
             "selected_negative": None,
             "tts_base": base,
             "model_options": model_options,
@@ -1691,6 +1721,8 @@ class YouTubeTelegramBot:
         else:
             status_bits.append("🔁 Fixed")
         status_bits.append(f"🎚️ Default: {preset_label}")
+        style_status = self._draw_choice_label(session, "style", session.get("selected_style"))
+        status_bits.append(f"🎨 Style: {style_status}")
         session["status_message"] = " • ".join(status_bits)
 
         text = self._format_draw_prompt(session)
@@ -1990,11 +2022,15 @@ class YouTubeTelegramBot:
             logging.info("draw: enhancing prompt via %s (len=%d)", "local" if action == "enhance_local" else "cloud", len(concept))
             try:
                 family = session.get("selected_model_group")
+                style_key = session.get("selected_style")
+                style_hint = None
+                if style_key:
+                    style_hint = self._draw_choice_label(session, "style", style_key)
                 if action == "enhance_local":
-                    enhanced = await draw_service.enhance_prompt_local(concept, family=family)
+                    enhanced = await draw_service.enhance_prompt_local(concept, family=family, style_hint=style_hint)
                     session["active_source"] = "local"
                 else:
-                    enhanced = await draw_service.enhance_prompt_cloud(concept, family=family)
+                    enhanced = await draw_service.enhance_prompt_cloud(concept, family=family, style_hint=style_hint)
                     session["active_source"] = "cloud"
             except Exception as exc:
                 logging.warning("draw: prompt enhancement failed (%s): %s", action, exc)
@@ -2066,7 +2102,7 @@ class YouTubeTelegramBot:
                     pass
                 return
             session["picker"] = "style"
-            session["status_message"] = "🎨 Choose a style preset."
+            session["status_message"] = "🎨 Choose a style preset. Style presets layer on top of your prompt."
             session["status_button_label"] = None
             session["buttons_disabled"] = False
             self._store_draw_session(chat_id, message_id, session)
@@ -2130,7 +2166,9 @@ class YouTubeTelegramBot:
             session["selected_model_group"] = choice.get("group") or "general"
             session["picker"] = None
             session["selected_preset"] = None
-            session["selected_style"] = None
+            style_map = self._draw_mapping(session, "style")
+            orders = ((session.get("preset_info") or {}).get("orders") or {}) if isinstance(session.get("preset_info"), dict) else {}
+            session["selected_style"] = _default_style_key(style_map, orders, session.get("selected_model_group"))
             session["selected_negative"] = None
             label_bits = [f"🗂️ Model {session['selected_model'] or 'Current'}"]
             label_bits.append(f"🎛️ {self._draw_choice_label(session, 'preset', None, default='Auto')}")
@@ -2183,16 +2221,6 @@ class YouTubeTelegramBot:
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
             logging.info("draw: negative preset selected %s", key)
-            return
-
-        if action == "generate_preset":
-            mapping = self._draw_mapping(session, "preset")
-            preset_key = session.get("selected_preset") or self._draw_default_preset_key(session)
-            entry = mapping.get(preset_key, {})
-            width = entry.get("default_width")
-            height = entry.get("default_height")
-            label = entry.get("label") or (_clean_label(preset_key) if preset_key else "Preset Size")
-            await self._draw_execute_generation(query, session, size_label=label, width=width, height=height)
             return
 
         if action.startswith("generate_"):

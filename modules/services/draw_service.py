@@ -262,16 +262,17 @@ async def enhance_prompt_local(
     *,
     model: Optional[str] = None,
     family: Optional[str] = None,
+    style_hint: Optional[str] = None,
 ) -> str:
     model_slug = model or _resolve_local_model()
     if not model_slug:
         raise RuntimeError("No local model configured for prompt enhancement.")
 
     system_prompt = _prompt_enhancer_system_for_family(family)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": concept},
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+    if style_hint:
+        messages.append({"role": "user", "content": f"Style preference: {style_hint}"})
+    messages.append({"role": "user", "content": concept})
 
     loop = asyncio.get_running_loop()
 
@@ -289,6 +290,7 @@ async def enhance_prompt_cloud(
     concept: str,
     *,
     family: Optional[str] = None,
+    style_hint: Optional[str] = None,
 ) -> str:
     resolved = _resolve_cloud_model()
     if not resolved:
@@ -296,10 +298,10 @@ async def enhance_prompt_cloud(
     provider, model = resolved
 
     system_prompt = _prompt_enhancer_system_for_family(family)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": concept},
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
+    if style_hint:
+        messages.append({"role": "user", "content": f"Style preference: {style_hint}"})
+    messages.append({"role": "user", "content": concept})
 
     loop = asyncio.get_running_loop()
 
