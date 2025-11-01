@@ -1952,11 +1952,12 @@ class YouTubeTelegramBot:
             await self._refresh_draw_prompt(query, session)
             logging.info("draw: enhancing prompt via %s (len=%d)", "local" if action == "enhance_local" else "cloud", len(concept))
             try:
+                family = session.get("selected_model_group")
                 if action == "enhance_local":
-                    enhanced = await draw_service.enhance_prompt_local(concept)
+                    enhanced = await draw_service.enhance_prompt_local(concept, family=family)
                     session["active_source"] = "local"
                 else:
-                    enhanced = await draw_service.enhance_prompt_cloud(concept)
+                    enhanced = await draw_service.enhance_prompt_cloud(concept, family=family)
                     session["active_source"] = "cloud"
             except Exception as exc:
                 logging.warning("draw: prompt enhancement failed (%s): %s", action, exc)

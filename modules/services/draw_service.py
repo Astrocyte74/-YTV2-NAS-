@@ -13,12 +13,26 @@ from llm_config import llm_config, get_quick_cloud_env_model
 from modules import ollama_client
 from modules.services import cloud_service
 
-_PROMPT_ENHANCER_SYSTEM = (
-    "You are an expert prompt engineer for latent diffusion models. "
-    "Rewrite the user's concept as a vivid, concise Draw Things prompt. "
-    "Include style, lighting, composition, and important details. "
-    "Return a single line with no commentary or markdown."
+_PROMPT_ENHANCER_SYSTEM_GENERAL = (
+    "You are an expert prompt engineer for Stable Diffusion–style models. "
+    "Rewrite the concept as a concise, comma-separated prompt optimised for Draw Things. "
+    "Include subject, context, style or medium, lighting, composition, and key adjectives in short descriptive fragments. "
+    "Avoid full sentences, commentary, markdown, or negative prompts; return a single line of fragments separated by commas."
 )
+
+_PROMPT_ENHANCER_SYSTEM_FLUX = (
+    "You are an expert prompt engineer optimising prompts for Flux.1 [schnell]. "
+    "Rewrite the concept as one natural-language sentence under 60 words that clearly describes the entire scene. "
+    "Explicitly cover foreground, midground, and background (or depth cues); specify mood, lighting, colour palette, and camera perspective. "
+    "Mention important materials or special visual effects (for example rain, reflections, glass, or motion blur) when implied. "
+    "Return plain text without quotation marks or any markdown."
+)
+
+
+def _prompt_enhancer_system_for_family(family: Optional[str]) -> str:
+    if isinstance(family, str) and family.strip().lower() == "flux":
+        return _PROMPT_ENHANCER_SYSTEM_FLUX
+    return _PROMPT_ENHANCER_SYSTEM_GENERAL
 
 
 class DrawGenerationError(RuntimeError):
@@ -243,13 +257,19 @@ def clear_preset_cache() -> None:
     _PRESET_CACHE.clear()
 
 
-async def enhance_prompt_local(concept: str, *, model: Optional[str] = None) -> str:
+async def enhance_prompt_local(
+    concept: str,
+    *,
+    model: Optional[str] = None,
+    family: Optional[str] = None,
+) -> str:
     model_slug = model or _resolve_local_model()
     if not model_slug:
         raise RuntimeError("No local model configured for prompt enhancement.")
 
+    system_prompt = _prompt_enhancer_system_for_family(family)
     messages = [
-        {"role": "system", "content": _PROMPT_ENHANCER_SYSTEM},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": concept},
     ]
 
@@ -265,14 +285,19 @@ async def enhance_prompt_local(concept: str, *, model: Optional[str] = None) -> 
     return await loop.run_in_executor(None, _call)
 
 
-async def enhance_prompt_cloud(concept: str) -> str:
+async def enhance_prompt_cloud(
+    concept: str,
+    *,
+    family: Optional[str] = None,
+) -> str:
     resolved = _resolve_cloud_model()
     if not resolved:
         raise RuntimeError("No cloud model configured for prompt enhancement.")
     provider, model = resolved
 
+    system_prompt = _prompt_enhancer_system_for_family(family)
     messages = [
-        {"role": "system", "content": _PROMPT_ENHANCER_SYSTEM},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": concept},
     ]
 
