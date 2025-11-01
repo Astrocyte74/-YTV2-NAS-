@@ -123,6 +123,7 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
     presets_dict = raw.get("presets") or {}
     styles_dict = raw.get("stylePresets") or {}
     negative_dict = raw.get("negativePresets") or {}
+    drawthings_info = raw.get("drawthings") if isinstance(raw, dict) else None
 
     presets_list: List[Dict[str, Any]] = []
     preset_map: Dict[str, Dict[str, Any]] = {}
@@ -205,6 +206,7 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
             "style": style_map,
             "negative": negative_map,
         },
+        "drawthings": drawthings_info if isinstance(drawthings_info, dict) else None,
         "raw": raw,
     }
 
