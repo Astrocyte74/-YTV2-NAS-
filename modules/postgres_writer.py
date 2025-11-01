@@ -59,6 +59,7 @@ class DBColumns:
     has_topics_json: bool
     has_subcategories_json: bool
     has_analysis_json: bool
+    has_summary_image_url: bool
 
 
 class PostgresWriter:
@@ -115,6 +116,7 @@ class PostgresWriter:
             has_topics_json=("topics_json" in cols) if cols else True,
             has_subcategories_json=("subcategories_json" in cols) if cols else True,
             has_analysis_json=("analysis_json" in cols) if cols else True,
+            has_summary_image_url=("summary_image_url" in cols) if cols else True,
         )
         return self._columns_cache
 
@@ -123,8 +125,9 @@ class PostgresWriter:
         """Flatten universal schema into columns + summary variants list.
 
         Returns keys: video_id, id (optional), title, channel_name, canonical_url,
-        thumbnail_url, duration_seconds, indexed_at (datetime), has_audio, language,
-        analysis_json, subcategories_json, topics_json, summary_variants (list).
+        thumbnail_url, summary_image_url, duration_seconds, indexed_at (datetime),
+        has_audio, language, analysis_json, subcategories_json, topics_json,
+        summary_variants (list).
         """
         source_metadata = content_data.get("source_metadata", {}) or {}
         youtube_meta = source_metadata.get("youtube", {}) or {}
@@ -172,6 +175,12 @@ class PostgresWriter:
             content_data.get("thumbnail_url")
             or youtube_meta.get("thumbnail_url")
             or web_meta.get("top_image")
+        )
+        summary_image_meta = content_data.get("summary_image") or {}
+        summary_image_url = (
+            content_data.get("summary_image_url")
+            or summary_image_meta.get("public_url")
+            or summary_image_meta.get("relative_path")
         )
         duration_seconds = (
             content_data.get("duration_seconds")
@@ -266,6 +275,7 @@ class PostgresWriter:
             "channel_name": channel_name,
             "canonical_url": canonical_url,
             "thumbnail_url": thumbnail_url,
+            "summary_image_url": summary_image_url,
             "duration_seconds": int(duration_seconds) if duration_seconds else None,
             "indexed_at": indexed_at,
             "has_audio": has_audio,
@@ -296,6 +306,8 @@ class PostgresWriter:
             "indexed_at",
             "has_audio",
         ]
+        if cols.has_summary_image_url:
+            insert_cols.insert(insert_cols.index("thumbnail_url") + 1, "summary_image_url")
         if cols.has_id:
             insert_cols.insert(0, "id")
         if cols.has_language:
@@ -328,6 +340,8 @@ class PostgresWriter:
             "indexed_at = EXCLUDED.indexed_at",
             "has_audio = EXCLUDED.has_audio",
         ]
+        if cols.has_summary_image_url:
+            set_updates.insert(3, "summary_image_url = EXCLUDED.summary_image_url")
         if cols.has_language:
             set_updates.append("language = EXCLUDED.language")
         if cols.has_analysis_json:

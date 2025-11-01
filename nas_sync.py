@@ -59,26 +59,41 @@ def sync_content_via_api():
         exports_dir = Path("exports")
         if exports_dir.exists():
             mp3_files = sorted(exports_dir.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
-            
+
             if mp3_files:
                 logger.info(f"🎵 Syncing {len(mp3_files)} recent MP3 files...")
-                
+
                 for mp3_file in mp3_files:
                     try:
-                        # Extract content ID from filename (assuming format: video_id_timestamp.mp3)
                         stem = mp3_file.stem
-                        # Try to find matching content by stem/video_id
-                        content_id = stem  # Will be resolved by API
-                        
-                        result = client.upload_audio_file(mp3_file, content_id)
+                        content_id = stem
+
+                        client.upload_audio_file(mp3_file, content_id)
                         logger.info(f"✅ Synced MP3: {mp3_file.name}")
-                        
+
                     except Exception as e:
                         logger.warning(f"⚠️  Error syncing {mp3_file.name}: {e}")
             else:
                 logger.info("📂 No MP3 files found in exports directory")
+
+            images_dir = exports_dir / "images"
+            if images_dir.exists():
+                image_files = sorted(images_dir.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)[:4]
+                if image_files:
+                    logger.info(f"🖼️ Syncing {len(image_files)} summary images...")
+                    for image_file in image_files:
+                        try:
+                            image_stem = image_file.stem
+                            client.upload_image_file(image_file, image_stem)
+                            logger.info(f"✅ Synced image: {image_file.name}")
+                        except Exception as e:
+                            logger.warning(f"⚠️  Error syncing {image_file.name}: {e}")
+                else:
+                    logger.info("📂 No summary images found in exports/images directory")
+            else:
+                logger.debug("📂 exports/images directory not found - skipping image sync")
         else:
-            logger.warning("📂 Exports directory not found - skipping MP3 sync")
+            logger.warning("📂 Exports directory not found - skipping media sync")
             
         return True
         

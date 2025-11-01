@@ -50,6 +50,8 @@ from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
 # Import LLM configuration manager
 from llm_config import llm_config
 
+from modules.services import summary_image_service
+
 try:
     from modules.sources import (
         RedditFetcher,
@@ -374,6 +376,19 @@ class YouTubeSummarizer:
                 "model": getattr(self.llm, "model_name", getattr(self.llm, "model", self.model)),
             },
         }
+
+        if summary_image_service.SUMMARY_IMAGE_ENABLED:
+            try:
+                image_meta = await summary_image_service.maybe_generate_summary_image(result)
+                if image_meta:
+                    result["summary_image"] = image_meta
+                    result["summary_image_url"] = (
+                        image_meta.get("public_url")
+                        or image_meta.get("relative_path")
+                        or image_meta.get("path")
+                    )
+            except Exception as exc:
+                logging.debug("summary image generation skipped: %s", exc)
 
         return result
 

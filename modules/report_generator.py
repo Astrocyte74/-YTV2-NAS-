@@ -471,6 +471,17 @@ class JSONReportGenerator:
                 print(f"🎵 Uploading audio file...")
                 audio_result = self.api_client.upload_audio_file(audio_path, content_id)
                 print(f"✅ Audio uploaded successfully")
+
+            image_meta = content_data.get("summary_image") or {}
+            image_path_value = image_meta.get("path") or image_meta.get("relative_path")
+            if image_path_value:
+                image_path = Path(image_path_value)
+                if not image_path.is_absolute():
+                    image_path = Path.cwd() / image_path
+                if image_path.exists():
+                    print("🖼️ Uploading summary image...")
+                    self.api_client.upload_image_file(image_path, content_id)
+                    print("✅ Summary image uploaded successfully")
             
             return True
             
@@ -661,7 +672,10 @@ class JSONReportGenerator:
             "topics": summary_data.get("topics", []),
             "sentiment": summary_data.get("sentiment", {}),
             "quality_score": summary_data.get("quality_score", 0),
-            "word_count": len(str(summary_data.get("summary", "")).split()) if summary_data.get("summary") else 0
+            "word_count": len(str(summary_data.get("summary", "")).split()) if summary_data.get("summary") else 0,
+            "image": summary_data.get("summary_image"),
+            "image_url": summary_data.get("summary_image_url")
+            or (summary_data.get("summary_image") or {}).get("public_url"),
         }
     
     def _calculate_stats(self, video_data: Dict[str, Any], summary_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -716,7 +730,9 @@ class JSONReportGenerator:
             "summary_language": summary_language,
             "original_language": original_language,
             "summary_type": summary_type,
-            "has_audio": False            # Will be updated after TTS generation
+            "has_audio": False,           # Will be updated after TTS generation
+            "summary_image_url": summary_data.get("summary_image_url")
+            or (summary_data.get("summary_image") or {}).get("public_url"),
         }
     
     def _generate_filename(self, report: Dict[str, Any]) -> str:

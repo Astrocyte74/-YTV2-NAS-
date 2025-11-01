@@ -480,6 +480,32 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
         sent_msg = await handler._send_long_message(query, header_text, summary, reply_markup)
 
+        image_meta = result.get("summary_image") or {}
+        image_path_value = (
+            image_meta.get("path")
+            or image_meta.get("relative_path")
+        )
+        image_path: Optional[Path] = None
+        if image_path_value:
+            candidate = Path(image_path_value)
+            if not candidate.is_absolute():
+                candidate = Path.cwd() / candidate
+            if candidate.exists():
+                image_path = candidate
+
+        if image_path:
+            try:
+                title_text = result.get("metadata", {}).get("title") or "Summary illustration"
+                caption = f"🎨 *Summary Illustration*\n{handler._escape_markdown(title_text)}"
+                with image_path.open("rb") as photo_file:
+                    await query.message.reply_photo(
+                        photo=photo_file,
+                        caption=caption,
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            except Exception as exc:
+                logging.debug("Failed to send summary image to Telegram: %s", exc)
+
         if summary_type.startswith("audio"):
             await handler._prepare_tts_generation(query, result, summary, summary_type)
 

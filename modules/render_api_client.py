@@ -28,13 +28,14 @@ class RenderAPIClient:
             auth_token: Bearer token for authentication
         """
         self.base_url = base_url or os.getenv('RENDER_API_URL') or os.getenv('RENDER_DASHBOARD_URL', '')
-        self.auth_token = auth_token or os.getenv('SYNC_SECRET', '')
+        fallback_token = os.getenv('SYNC_SECRET') or os.getenv('INGEST_TOKEN', '')
+        self.auth_token = auth_token or fallback_token
         self.session = requests.Session()
 
         if not self.base_url:
             raise ValueError("Set RENDER_API_URL or RENDER_DASHBOARD_URL for Render uploads")
         if not self.auth_token:
-            raise ValueError("SYNC_SECRET environment variable is required")
+            raise ValueError("SYNC_SECRET or INGEST_TOKEN environment variable is required")
             
         # Remove trailing slash
         self.base_url = self.base_url.rstrip('/')
@@ -219,6 +220,58 @@ class RenderAPIClient:
                 
         except requests.RequestException as e:
             logger.error(f"Audio upload failed: {e}")
+            raise
+
+    def upload_image_file(self, image_path: Path, content_id: str) -> Dict[str, Any]:
+        """Upload summary image file for content.
+
+        Args:
+            image_path: Path to PNG image
+            content_id: Associated content ID
+
+        Returns:
+            API response data
+        """
+        if not image_path.exists():
+            raise FileNotFoundError(f"Image file not found: {image_path}")
+
+        import mimetypes
+
+        mime_type, _ = mimetypes.guess_type(image_path.name)
+        if not mime_type:
+            mime_type = "image/png"
+
+        try:
+            with open(image_path, "rb") as image_file:
+                files = {
+                    "image": (image_path.name, image_file, mime_type),
+                }
+                data = {"content_id": content_id}
+                import requests as _requests
+
+                response = _requests.post(
+                    f"{self.base_url}/api/upload-image",
+                    files=files,
+                    data=data,
+                    headers={"Authorization": f"Bearer {self.auth_token}"},
+                    timeout=30,
+                )
+
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Uploaded summary image for content: {content_id}")
+                return result
+            else:
+                error_msg = f"Failed to upload image: {response.status_code}"
+                try:
+                    error_detail = response.json()
+                    error_msg += f" - {error_detail.get('error', 'Unknown error')}"
+                except Exception:
+                    error_msg += f" - {response.text[:200]}"
+                logger.error(error_msg)
+                response.raise_for_status()
+        except requests.RequestException as e:
+            logger.error(f"Image upload failed: {e}")
             raise
     
     def sync_single_content(self, content_id: str, db_path: Path) -> Dict[str, Any]:
