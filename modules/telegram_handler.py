@@ -1635,6 +1635,8 @@ class YouTubeTelegramBot:
         active_model_raw = dt_info.get("activeModel")
         active_model_name = _friendly_model_name(active_model_raw, model_options)
         active_family = dt_info.get("activeFamily") or _family_from_name(active_model_raw)
+        if not active_family and active_model_raw and "flux" in active_model_raw.lower():
+            active_family = "flux"
         if not active_model_name and default_model.get("name"):
             active_model_name = default_model.get("name")
         if not active_family:
