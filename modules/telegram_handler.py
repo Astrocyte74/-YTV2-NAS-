@@ -1703,25 +1703,26 @@ class YouTubeTelegramBot:
         )
 
         preset_label = self._draw_choice_label(session, "preset", None, default="Auto")
+        escape = self._escape_markdown
         status_bits: List[str] = []
         selected_model_label = session.get("selected_model")
         if selected_model_label:
             if session.get("model_switch_enabled", False):
-                status_bits.append(f"🗂️ Model {selected_model_label}")
+                status_bits.append(f"🗂️ Model {escape(selected_model_label)}")
             else:
-                status_bits.append(f"🗂️ Model {selected_model_label} (set in Draw Things)")
+                status_bits.append(f"🗂️ Model {escape(selected_model_label)} (set in Draw Things)")
         dt_status = session.get("drawthings") or {}
         active_model_display = dt_status.get("activeModel")
         if active_model_display and active_model_display != selected_model_label:
-            status_bits.append(f"🖥️ Active: {active_model_display}")
-        family_label = _draw_family_label(session.get("selected_model_group"))
+            status_bits.append(f"🖥️ Active: {escape(str(active_model_display))}")
+        family_label = escape(_draw_family_label(session.get("selected_model_group")))
         status_bits.append(f"🎛️ {family_label} presets")
         if session.get("model_switch_enabled", False):
             status_bits.append("🔁 Switchable")
         else:
             status_bits.append("🔁 Fixed")
-        status_bits.append(f"🎚️ Default: {preset_label}")
-        style_status = self._draw_choice_label(session, "style", session.get("selected_style"))
+        status_bits.append(f"🎚️ Default: {escape(preset_label)}")
+        style_status = escape(self._draw_choice_label(session, "style", session.get("selected_style")))
         status_bits.append(f"🎨 Style: {style_status}")
         session["status_message"] = " • ".join(status_bits)
 
