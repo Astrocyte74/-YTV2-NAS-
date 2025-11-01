@@ -144,6 +144,29 @@ def _default_style_key(
     return next(iter(style_map.keys()), None)
 
 
+_PRESET_HINTS = {
+    "flux_ultra": "⚡ 3-step turbo",
+    "flux_fast": "⚡ 4-step quick",
+    "flux_balanced": "🎯 6-step crisp",
+    "flux_photoreal": "🖼️ 8-step detail",
+    "hidream_fast": "⚡ 24-step sharp",
+    "hidream_balanced": "🎯 28-step detail",
+    "hidream_photoreal": "🖼️ 32-step glossy",
+}
+
+
+def _preset_with_hint(entry: Dict[str, Any]) -> str:
+    key = entry.get("key") or ""
+    base = entry.get("label") or _clean_label(key)
+    hint = _PRESET_HINTS.get(key)
+    if hint:
+        return f"{base} — {hint}"
+    steps = entry.get("steps")
+    if isinstance(steps, (int, float)) and steps > 0:
+        return f"{base} — {int(steps)} steps"
+    return base
+
+
 def _friendly_model_name(raw: Optional[str], overrides: List[Dict[str, str]]) -> Optional[str]:
     if not isinstance(raw, str) or not raw:
         return None
@@ -1477,7 +1500,7 @@ class YouTubeTelegramBot:
                     header = f"{header} • Active"
                 rows.append([InlineKeyboardButton(header, callback_data="draw:nop")])
                 for entry in entries:
-                    label = entry.get("label") or _clean_label(entry.get("key"))
+                    label = _preset_with_hint(entry)
                     if entry.get("key") == selected:
                         label = f"✅ {label}"
                     rows.append([InlineKeyboardButton(label, callback_data=f"draw:preset_select:{entry.get('key')}")])
