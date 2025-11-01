@@ -1454,6 +1454,15 @@ class YouTubeTelegramBot:
         style_label = self._draw_choice_label(session, "style", session.get("selected_style"))
         banner_bits.append(f"🎨 Style: {style_label}")
 
+        mode_labels = {"local": "Local", "cloud": "Cloud", "none": "Off"}
+        enhance_mode = session.get("enhance_mode") or "local"
+        banner_bits.append(f"🖌️ Enhance: {mode_labels.get(enhance_mode, enhance_mode.title())}")
+
+        size_key = session.get("selected_size") or "small"
+        size_info = self.DRAW_SIZE_PRESETS.get(size_key, {})
+        size_label = size_info.get("label") or size_key.title()
+        banner_bits.append(f"🖼️ Size: {size_label}")
+
         switching = "Switchable" if session.get("model_switch_enabled", False) else "Fixed"
         banner_bits.append(f"🔁 {switching}")
 
@@ -1617,6 +1626,11 @@ class YouTubeTelegramBot:
             ]
             return InlineKeyboardMarkup(rows)
 
+        if session.get("enhance_mode") not in ("local", "cloud", "none"):
+            session["enhance_mode"] = "local"
+        if session.get("selected_size") not in self.DRAW_SIZE_PRESETS:
+            session["selected_size"] = "small"
+
         rows: List[List[InlineKeyboardButton]] = []
         model_options = session.get("model_options") or []
         selected_model = session.get("selected_model")
@@ -1626,25 +1640,27 @@ class YouTubeTelegramBot:
         elif selected_model:
             rows.append([InlineKeyboardButton(f"🗂️ Model • {selected_model} (set in Draw Things)", callback_data="draw:nop")])
 
+        enhance_mode = session.get("enhance_mode") or "local"
+        rows.append([
+            InlineKeyboardButton(("✅ " if enhance_mode == "local" else "") + "✨ Local", callback_data="draw:mode_local"),
+            InlineKeyboardButton(("✅ " if enhance_mode == "cloud" else "") + "🌐 Cloud", callback_data="draw:mode_cloud"),
+            InlineKeyboardButton(("✅ " if enhance_mode == "none" else "") + "🚫 No Enhance", callback_data="draw:mode_none"),
+        ])
+
         group = session.get("selected_model_group")
         mapping = self._draw_mapping(session, "preset")
         current_preset = session.get("selected_preset")
         if current_preset and group and mapping.get(current_preset, {}).get("group") != group:
             session["selected_preset"] = None
-            current_preset = None
 
-        preset_label = self._draw_choice_label(
-            session,
-            "preset",
-            session.get("selected_preset"),
-            default="Auto",
-        )
+        preset_label = self._draw_choice_label(session, "preset", session.get("selected_preset"), default="Auto")
         style_label = self._draw_choice_label(session, "style", session.get("selected_style"))
         negative_label = self._draw_choice_label(session, "negative", session.get("selected_negative"))
 
         rows.append([
-            InlineKeyboardButton("✨ Enhance (Local)", callback_data="draw:enhance_local"),
-            InlineKeyboardButton("🌐 Enhance (Cloud)", callback_data="draw:enhance_cloud"),
+            InlineKeyboardButton(f"🎛️ Preset • {preset_label}", callback_data="draw:preset"),
+            InlineKeyboardButton(f"🎨 Style • {style_label}", callback_data="draw:style"),
+            InlineKeyboardButton(f"🚫 Negative • {negative_label}", callback_data="draw:negative"),
         ])
 
         available_presets = self._draw_presets_for_group(session, group)
@@ -1654,21 +1670,19 @@ class YouTubeTelegramBot:
             group,
             [entry.get("key") for entry in available_presets] if isinstance(available_presets, list) else available_presets,
         )
-        if session.get("preset_info") and available_presets:
-            rows.append([
-                InlineKeyboardButton(f"🎛️ Preset • {preset_label}", callback_data="draw:preset"),
-                InlineKeyboardButton(f"🎨 Style • {style_label}", callback_data="draw:style"),
-                InlineKeyboardButton(f"🚫 Negative • {negative_label}", callback_data="draw:negative"),
-            ])
 
-        rows.append([
-            InlineKeyboardButton("🖼️ Small 512²", callback_data="draw:generate_small"),
-            InlineKeyboardButton("🖼️ Medium 768²", callback_data="draw:generate_medium"),
-            InlineKeyboardButton("🖼️ Large 1024²", callback_data="draw:generate_large"),
-        ])
-        rows.append([
-            InlineKeyboardButton("❌ Close", callback_data="draw:cancel"),
-        ])
+        size_key = session.get("selected_size") or "small"
+        size_row: List[InlineKeyboardButton] = []
+        for key in ("small", "medium", "large"):
+            size_info = self.DRAW_SIZE_PRESETS.get(key) or {}
+            label = size_info.get("label") or key.title()
+            if key == size_key:
+                label = f"✅ {label}"
+            size_row.append(InlineKeyboardButton(label, callback_data=f"draw:size_{key}"))
+        rows.append(size_row)
+
+        rows.append([InlineKeyboardButton("🎨 Generate Image", callback_data="draw:generate")])
+        rows.append([InlineKeyboardButton("❌ Close", callback_data="draw:cancel")])
         return InlineKeyboardMarkup(rows)
 
     async def draw_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1767,6 +1781,9 @@ class YouTubeTelegramBot:
             "selected_model_group": active_family or (default_model.get("group") or "general"),
             "model_switch_enabled": model_switch_enabled,
             "drawthings": dt_info,
+            "preset_picker_show_all": False,
+            "enhance_mode": "local",
+            "selected_size": "small",
         }
 
         logging.info(
@@ -1778,7 +1795,6 @@ class YouTubeTelegramBot:
             active_family,
         )
 
-        session["preset_picker_show_all"] = False
         self._update_draw_status_banner(session)
         session["status_message"] = None
 
@@ -2063,37 +2079,82 @@ class YouTubeTelegramBot:
                 pass
             return
 
-        if action in ("enhance_local", "enhance_cloud"):
-            concept = session.get("active_prompt") or session.get("original_prompt") or ""
-            if not concept:
+        if action.startswith("mode_"):
+            mode = action.split("_", 1)[1]
+            if mode not in ("local", "cloud", "none"):
+                try:
+                    await query.answer("Unknown enhancement mode.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["enhance_mode"] = mode
+            self._update_draw_status_banner(session)
+            mode_labels = {"local": "Local", "cloud": "Cloud", "none": "Off"}
+            session["status_message"] = f"🖌️ Enhance set to {mode_labels.get(mode, mode.title())}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action.startswith("size_"):
+            size_key = action.split("_", 1)[1]
+            size_info = self.DRAW_SIZE_PRESETS.get(size_key)
+            if not size_info:
+                try:
+                    await query.answer("Unknown size.", show_alert=True)
+                except Exception:
+                    pass
+                return
+            session["selected_size"] = size_key
+            self._update_draw_status_banner(session)
+            session["status_message"] = f"🖼️ Size set to {size_info.get('label', size_key.title())}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
+            return
+
+        if action == "generate":
+            base_prompt = session.get("original_prompt") or ""
+            if not base_prompt.strip():
                 try:
                     await query.answer("Prompt is empty.", show_alert=True)
                 except Exception:
                     pass
                 return
-            session["status_message"] = "✨ Enhancing prompt via Local model…" if action == "enhance_local" else "🌐 Enhancing prompt via Cloud model…"
-            session["status_button_label"] = "✨ Enhancing…" if action == "enhance_local" else "🌐 Enhancing…"
-            session["buttons_disabled"] = True
-            self._store_draw_session(chat_id, message_id, session)
-            await self._refresh_draw_prompt(query, session)
-            logging.info("draw: enhancing prompt via %s (len=%d)", "local" if action == "enhance_local" else "cloud", len(concept))
+
+            enhance_mode = session.get("enhance_mode") or "local"
+            family = session.get("selected_model_group")
+            style_key = session.get("selected_style")
+            style_hint = self._draw_choice_label(session, "style", style_key) if style_key else None
+
             try:
-                family = session.get("selected_model_group")
-                style_key = session.get("selected_style")
-                style_hint = None
-                if style_key:
-                    style_hint = self._draw_choice_label(session, "style", style_key)
-                if action == "enhance_local":
-                    enhanced = await draw_service.enhance_prompt_local(concept, family=family, style_hint=style_hint)
+                if enhance_mode == "local":
+                    session["status_message"] = "✨ Enhancing prompt via Local model…"
+                    session["status_button_label"] = "✨ Enhancing…"
+                    session["buttons_disabled"] = True
+                    self._store_draw_session(chat_id, message_id, session)
+                    await self._refresh_draw_prompt(query, session)
+                    enhanced = await draw_service.enhance_prompt_local(base_prompt, family=family, style_hint=style_hint)
+                    session["active_prompt"] = (enhanced or base_prompt).strip() or base_prompt
                     session["active_source"] = "local"
-                else:
-                    enhanced = await draw_service.enhance_prompt_cloud(concept, family=family, style_hint=style_hint)
+                    session["status_message"] = "✅ Prompt enhanced."
+                elif enhance_mode == "cloud":
+                    session["status_message"] = "🌐 Enhancing prompt via Cloud model…"
+                    session["status_button_label"] = "🌐 Enhancing…"
+                    session["buttons_disabled"] = True
+                    self._store_draw_session(chat_id, message_id, session)
+                    await self._refresh_draw_prompt(query, session)
+                    enhanced = await draw_service.enhance_prompt_cloud(base_prompt, family=family, style_hint=style_hint)
+                    session["active_prompt"] = (enhanced or base_prompt).strip() or base_prompt
                     session["active_source"] = "cloud"
+                    session["status_message"] = "✅ Prompt enhanced."
+                else:
+                    session["active_prompt"] = session.get("active_prompt") or base_prompt
+                    session["active_source"] = "base"
+                    session["status_message"] = "🎨 Using current prompt."
             except Exception as exc:
-                logging.warning("draw: prompt enhancement failed (%s): %s", action, exc)
-                session["status_message"] = f"⚠️ Enhancement failed: {str(exc)[:120]}"
+                logging.warning("draw: prompt enhancement failed (%s): %s", enhance_mode, exc)
                 session["buttons_disabled"] = False
                 session["status_button_label"] = None
+                session["status_message"] = f"⚠️ Enhancement failed: {str(exc)[:120]}"
                 self._store_draw_session(chat_id, message_id, session)
                 await self._refresh_draw_prompt(query, session)
                 try:
@@ -2101,17 +2162,25 @@ class YouTubeTelegramBot:
                 except Exception:
                     pass
                 return
-            enhanced = (enhanced or concept).strip()
-            session["active_prompt"] = enhanced if enhanced else concept
-            if session["active_prompt"].strip() == (session.get("original_prompt") or "").strip():
-                session["active_source"] = "base"
-                session["status_message"] = "✅ Prompt reset to original."
-            else:
-                session["status_message"] = "✅ Prompt enhanced."
+
             session["buttons_disabled"] = False
             session["status_button_label"] = None
             self._store_draw_session(chat_id, message_id, session)
             await self._refresh_draw_prompt(query, session)
+
+            size_key = session.get("selected_size") or "small"
+            size_info = self.DRAW_SIZE_PRESETS.get(size_key) or {}
+            size_label = size_info.get("label") or size_key.title()
+            width = size_info.get("width")
+            height = size_info.get("height")
+
+            await self._draw_execute_generation(
+                query,
+                session,
+                size_label=size_label,
+                width=width,
+                height=height,
+            )
             return
 
         if action == "model":
@@ -2306,6 +2375,8 @@ class YouTubeTelegramBot:
                 except Exception:
                     pass
                 return
+            session["selected_size"] = size_key
+            self._update_draw_status_banner(session)
             label = preset.get("label") or _clean_label(size_key)
             await self._draw_execute_generation(
                 query,
