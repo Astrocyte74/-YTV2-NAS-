@@ -1463,6 +1463,17 @@ class YouTubeTelegramBot:
         size_label = size_info.get("label") or size_key.title()
         banner_bits.append(f"🖼️ Size: {size_label}")
 
+        health = session.get("drawthings_health") or {}
+        probe = health.get("probe") or {}
+        elapsed = probe.get("elapsedMs")
+        if isinstance(elapsed, (int, float)):
+            banner_bits.append(f"🧪 {int(elapsed)} ms probe")
+        gpu_hint = health.get("gpuLikely")
+        if gpu_hint is True:
+            banner_bits.append("🖥️ GPU: likely")
+        elif gpu_hint is False:
+            banner_bits.append("🖥️ GPU: uncertain")
+
         switching = "Switchable" if session.get("model_switch_enabled", False) else "Fixed"
         banner_bits.append(f"🔁 {switching}")
 
@@ -1582,10 +1593,12 @@ class YouTubeTelegramBot:
                 entry = mapping.get(key)
                 if not isinstance(entry, dict):
                     continue
-                label = entry.get("label") or _clean_label(key)
+                base_label = entry.get("label") or _clean_label(key)
+                desc = entry.get("desc")
+                display = f"{base_label} — {desc}" if desc else base_label
                 if key == selected:
-                    label = f"✅ {label}"
-                rows.append([InlineKeyboardButton(label, callback_data=f"draw:style_select:{key}")])
+                    display = f"✅ {display}"
+                rows.append([InlineKeyboardButton(display, callback_data=f"draw:style_select:{key}")])
             rows.append([InlineKeyboardButton("🚫 None", callback_data="draw:style_clear")])
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data="draw:picker_back")])
         elif target == "negative":
@@ -1784,6 +1797,7 @@ class YouTubeTelegramBot:
             "preset_picker_show_all": False,
             "enhance_mode": "local",
             "selected_size": "small",
+            "drawthings_health": {},
         }
 
         logging.info(
@@ -1795,8 +1809,30 @@ class YouTubeTelegramBot:
             active_family,
         )
 
+        health_warning = None
+        if base:
+            try:
+                health_info = await draw_service.fetch_drawthings_health(base, force_refresh=True)
+                session["drawthings_health"] = health_info or {}
+                if health_info:
+                    if not health_info.get("reachable", True):
+                        health_warning = "⚠️ Draw Things health check failed (unreachable)."
+                    else:
+                        probe = health_info.get("probe") or {}
+                        elapsed = probe.get("elapsedMs")
+                        if not probe.get("ok", True):
+                            health_warning = "⚠️ Draw Things probe failed; open the app and ensure the model is loaded."
+                        elif isinstance(elapsed, (int, float)) and elapsed > 5000:
+                            seconds = elapsed / 1000.0
+                            health_warning = f"⚠️ Draw Things probe is slow ({seconds:.1f}s). It may be running on CPU."
+            except Exception as exc:
+                logging.warning("draw: health fetch failed: %s", exc)
+                session["drawthings_health"] = {}
+        else:
+            session["drawthings_health"] = {}
+
         self._update_draw_status_banner(session)
-        session["status_message"] = None
+        session["status_message"] = health_warning
 
         text = self._format_draw_prompt(session)
         keyboard = self._build_draw_keyboard(session)
@@ -2377,14 +2413,9 @@ class YouTubeTelegramBot:
                 return
             session["selected_size"] = size_key
             self._update_draw_status_banner(session)
-            label = preset.get("label") or _clean_label(size_key)
-            await self._draw_execute_generation(
-                query,
-                session,
-                size_label=label,
-                width=int(preset.get("width", 0)) if preset.get("width") else None,
-                height=int(preset.get("height", 0)) if preset.get("height") else None,
-            )
+            session["status_message"] = f"🖼️ Size set to {preset.get('label', size_key.title())}."
+            self._store_draw_session(chat_id, message_id, session)
+            await self._refresh_draw_prompt(query, session)
             return
 
         try:

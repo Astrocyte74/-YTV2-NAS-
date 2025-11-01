@@ -168,6 +168,7 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
             "key": key,
             "label": label,
             "prompt": prompt,
+            "desc": value.get("desc") if isinstance(value, dict) else None,
         }
         style_map[key] = entry
 
@@ -228,6 +229,8 @@ def _normalize_presets(raw: Dict[str, Any]) -> Dict[str, Any]:
 _PRESET_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _PRESET_CACHE_TTL_SECONDS = 300
 
+_HEALTH_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_HEALTH_CACHE_TTL_SECONDS = 30
 
 async def fetch_presets(base_api_url: str, *, ttl: int = _PRESET_CACHE_TTL_SECONDS, force_refresh: bool = False) -> Dict[str, Any]:
     base = (base_api_url or "").strip()
@@ -250,6 +253,34 @@ async def fetch_presets(base_api_url: str, *, ttl: int = _PRESET_CACHE_TTL_SECON
 
     data = await loop.run_in_executor(None, _call)
     _PRESET_CACHE[base] = (now, data)
+    return data
+
+
+async def fetch_drawthings_health(
+    base_api_url: str,
+    *,
+    ttl: int = _HEALTH_CACHE_TTL_SECONDS,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    base = (base_api_url or "").strip()
+    if not base:
+        raise RuntimeError("Hub base URL is not configured.")
+
+    now = time.time()
+    cached = _HEALTH_CACHE.get(base)
+    if not force_refresh and cached and now - cached[0] <= ttl:
+        return cached[1]
+
+    url = f"{base.rstrip('/')}/drawthings/health"
+    loop = asyncio.get_running_loop()
+
+    def _call() -> Dict[str, Any]:
+        resp = requests.get(url, timeout=12)
+        resp.raise_for_status()
+        return resp.json() or {}
+
+    data = await loop.run_in_executor(None, _call)
+    _HEALTH_CACHE[base] = (now, data)
     return data
 
 
@@ -393,6 +424,7 @@ __all__ = [
     "DrawGenerationError",
     "clear_preset_cache",
     "fetch_presets",
+    "fetch_drawthings_health",
     "enhance_prompt_local",
     "enhance_prompt_cloud",
     "generate_image",
