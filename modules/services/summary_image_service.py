@@ -51,16 +51,173 @@ CATEGORY_KEYWORDS: Dict[str, List[str]] = {
         "divine",
         "temple",
         "testament",
+        "devotional",
     ],
     "tech": [
+        "technology",
         "ai",
         "machine learning",
+        "neural",
         "robot",
         "chip",
+        "semiconductor",
         "gadget",
         "hardware",
         "software",
+        "developer",
+        "coding",
+        "api",
         "electronics",
+        "dirac",
+    ],
+    "innovation": [
+        "innovation",
+        "invent",
+        "prototype",
+        "breakthrough",
+        "lab",
+        "research",
+        "futuristic",
+    ],
+    "science": [
+        "science",
+        "biology",
+        "physics",
+        "chemistry",
+        "astronomy",
+        "space",
+        "galaxy",
+        "research",
+        "experiment",
+        "laboratory",
+        "climate",
+        "ecology",
+        "nature",
+        "genetics",
+        "microscopy",
+        "discovery",
+    ],
+    "business": [
+        "business",
+        "market",
+        "startup",
+        "revenue",
+        "finance",
+        "strategy",
+        "economy",
+        "investment",
+        "company",
+        "sales",
+        "leadership",
+        "enterprise",
+        "merger",
+        "growth",
+        "valuation",
+        "board",
+    ],
+    "maker": [
+        "how-to",
+        "tutorial",
+        "diy",
+        "build",
+        "hands-on",
+        "workshop",
+        "craft",
+        "repair",
+        "setup",
+        "solder",
+        "forge",
+        "makerspace",
+        "installation",
+        "guide",
+        "project",
+    ],
+    "education": [
+        "education",
+        "lecture",
+        "class",
+        "course",
+        "seminar",
+        "professor",
+        "learning",
+        "student",
+        "university",
+        "school",
+        "curriculum",
+        "academic",
+        "lesson",
+    ],
+    "history": [
+        "history",
+        "historic",
+        "ancient",
+        "timeline",
+        "empire",
+        "battle",
+        "revolution",
+        "wwii",
+        "ww2",
+        "wwi",
+        "world war",
+        "cold war",
+    ],
+    "news": [
+        "breaking",
+        "headline",
+        "policy",
+        "politics",
+        "election",
+        "government",
+        "news",
+        "report",
+        "journalism",
+        "analysis",
+        "world news",
+        "press",
+    ],
+    "health": [
+        "health",
+        "wellness",
+        "fitness",
+        "exercise",
+        "nutrition",
+        "mental health",
+        "therapy",
+        "medicine",
+        "clinical",
+        "healthcare",
+        "mindfulness",
+    ],
+    "entertainment": [
+        "entertainment",
+        "music",
+        "film",
+        "movie",
+        "series",
+        "tv",
+        "art",
+        "creative",
+        "performance",
+        "culture",
+        "festival",
+        "animation",
+        "vlog",
+        "podcast",
+        "streaming",
+        "cinema",
+    ],
+    "sports": [
+        "sport",
+        "team",
+        "match",
+        "game",
+        "season",
+        "championship",
+        "player",
+        "athlete",
+        "league",
+        "score",
+        "tournament",
     ],
 }
 
@@ -106,8 +263,118 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             'Stylized 1:1 tech briefing illustration for "{title}". '
             "Visualize {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Use a bold cinematic collage with neon accents, floating UI diagrams, and depth of field. "
+            "Use a bold cinematic collage with neon accents, glass reflections, and crisp HUD overlays. "
             "No text or logos."
+        ),
+    ),
+    "innovation": PromptTemplate(
+        key="innovation",
+        style_preset="cinematic",
+        prompt_template=(
+            'Stylized 1:1 innovation collage for "{title}". '
+            "Blend {headline} across science and technology. "
+            "Highlight motifs such as {motifs}. "
+            "Layer luminous circuitry, molecular diagrams, and cosmic gradients with futuristic depth. "
+            "No text or logos."
+        ),
+    ),
+    "science": PromptTemplate(
+        key="science",
+        style_preset="cinematic",
+        prompt_template=(
+            'Stylized 1:1 science briefing illustration for "{title}". '
+            "Visualize {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "Layer luminous diagrams, molecular structures, and research instrumentation with balanced composition and neutral palette. "
+            "No text or equations."
+        ),
+    ),
+    "business": PromptTemplate(
+        key="business",
+        style_preset="studio",
+        prompt_template=(
+            'Stylized 1:1 business insight collage for "{title}". '
+            "Translate {headline} into visuals. "
+            "Highlight motifs such as {motifs}. "
+            "Combine skyline silhouettes, data charts, and collaborative workspaces using clean geometry, glass, and chrome materials. "
+            "No text or logos."
+        ),
+    ),
+    "maker": PromptTemplate(
+        key="maker",
+        style_preset="illustration",
+        prompt_template=(
+            'Stylized 1:1 workshop illustration for "{title}". '
+            "Turn {headline} into a hands-on scene. "
+            "Highlight motifs such as {motifs}. "
+            "Show tools, blueprints, and step-by-step components on a workbench with warm practical lighting and tactile textures. "
+            "No text or lettering."
+        ),
+    ),
+    "education": PromptTemplate(
+        key="education",
+        style_preset="studio",
+        prompt_template=(
+            'Stylized 1:1 academic insight illustration for "{title}". '
+            "Translate {headline} into a thoughtful study scene. "
+            "Highlight motifs such as {motifs}. "
+            "Show books, chalkboards, diagrams, and study spaces with soft natural light and orderly composition. "
+            "No text or lettering."
+        ),
+    ),
+    "history": PromptTemplate(
+        key="history",
+        style_preset="retro_film",
+        prompt_template=(
+            'Stylized 1:1 historical timeline collage for "{title}". '
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "Blend vintage maps, archival artifacts, and layered silhouettes with aged film grain and sepia tones. "
+            "No text or banners."
+        ),
+    ),
+    "news": PromptTemplate(
+        key="news",
+        style_preset="cinematic_warm",
+        prompt_template=(
+            'Stylized 1:1 news briefing illustration for "{title}". '
+            "Convey {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "Assemble photojournalistic elements—press lights, microphones, city skylines—with bold contrasts and dynamic depth. "
+            "No text or captions."
+        ),
+    ),
+    "health": PromptTemplate(
+        key="health",
+        style_preset="portrait",
+        prompt_template=(
+            'Stylized 1:1 wellness illustration for "{title}". '
+            "Express {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "Use calming natural light, abstract body forms, and organic gradients to suggest balance and recovery. "
+            "No text or medical icons."
+        ),
+    ),
+    "entertainment": PromptTemplate(
+        key="entertainment",
+        style_preset="pixar",
+        prompt_template=(
+            'Stylized 1:1 entertainment spotlight illustration for "{title}". '
+            "Translate {headline} into stage-ready visuals. "
+            "Highlight motifs such as {motifs}. "
+            "Layer spotlights, instruments, film reels, and expressive color bursts with cinematic energy. "
+            "No text or logos."
+        ),
+    ),
+    "sports": PromptTemplate(
+        key="sports",
+        style_preset="cinematic",
+        prompt_template=(
+            'Stylized 1:1 sports highlight illustration for "{title}". '
+            "Capture {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "Freeze dynamic motion trails, stadium lighting, and athletes in action with high-energy contrast and dramatic shadows. "
+            "No text or team logos."
         ),
     ),
     "spiritual": PromptTemplate(
@@ -162,10 +429,9 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
         lowered_topics = " ".join(str(t).lower() for t in topics if t)
-        if any(token in lowered_topics for token in CATEGORY_KEYWORDS["spiritual"]):
-            return "spiritual"
-        if any(token in lowered_topics for token in CATEGORY_KEYWORDS["tech"]):
-            return "tech"
+        for key, keywords in CATEGORY_KEYWORDS.items():
+            if any(token in lowered_topics for token in keywords):
+                return "spiritual" if key == "spiritual" else key
     return "default"
 
 

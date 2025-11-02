@@ -13,7 +13,7 @@ try:
 except Exception:  # pragma: no cover
     ZoneInfo = None  # type: ignore
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import unicodedata
 
 try:
@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import BadRequest, RetryAfter
 
 from modules.metrics import metrics
 from modules import ledger
@@ -80,6 +81,27 @@ def get_dashboard_base() -> Optional[str]:
     )
 
 
+async def _safe_edit_status(query, text: str, reply_markup=None):
+    while True:
+        try:
+            return await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=reply_markup,
+            )
+        except RetryAfter as exc:
+            await asyncio.sleep(exc.retry_after)
+        except BadRequest as exc:
+            message = (getattr(exc, "message", None) or str(exc) or "").lower()
+            if "query is too old" in message or "message to edit not found" in message:
+                return await query.message.reply_text(
+                    text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=reply_markup,
+                )
+            raise
+
+
 def post_dashboard_json(endpoint: str, payload: Dict[str, Any], timeout: int = 30) -> Optional[Dict[str, Any]]:
     base = get_dashboard_base()
     if not base or requests is None:
@@ -112,6 +134,95 @@ def _is_local_summary_unavailable(exc: Exception) -> bool:
         "bad gateway",
     )
     return any(keyword in message for keyword in keywords)
+
+
+_SUMMARY_PLACEHOLDER_PREFIXES = (
+    "unable to generate",
+    "unable to create",
+    "summary generation failed",
+)
+
+
+def _extract_primary_summary_text(result: Dict[str, Any]) -> str:
+    if not isinstance(result, dict):
+        return ""
+    summary = result.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    if isinstance(summary, dict):
+        for key in ("summary", "comprehensive", "bullet_points", "key_insights", "audio"):
+            candidate = summary.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    for key in ("comprehensive", "bullet_points", "key_insights", "audio"):
+        candidate = result.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _summary_has_useful_content(result: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    text = _extract_primary_summary_text(result)
+    if not text:
+        return False, "Summary text was empty."
+    lowered = text.strip().lower()
+    for prefix in _SUMMARY_PLACEHOLDER_PREFIXES:
+        if lowered.startswith(prefix):
+            return False, text
+    return True, None
+
+
+async def _handle_summary_placeholder(
+    handler,
+    query,
+    summary_type: str,
+    proficiency_level: Optional[str],
+    user_name: str,
+    provider_key: str,
+    provider_label: str,
+    detail: Optional[str],
+) -> None:
+    detail_text = ""
+    if detail:
+        trimmed = detail.strip()
+        if len(trimmed) > 200:
+            trimmed = trimmed[:197] + "…"
+        detail_text = f"\n• Detail: {trimmed}"
+
+    message_lines = [
+        f"❌ {provider_label} could not generate a usable summary.",
+        "No report or image was saved." + detail_text,
+        "Pick another engine below or try again later.",
+    ]
+
+    reply_markup = None
+    if query.message:
+        provider_options = handler._summary_provider_options()
+        if provider_options:
+            chat_id = query.message.chat.id
+            message_id = query.message.message_id
+            session_payload = {
+                "summary_type": summary_type,
+                "proficiency_level": proficiency_level,
+                "user_name": user_name,
+                "provider_options": provider_options,
+            }
+            handler._store_summary_session(chat_id, message_id, session_payload)
+            buttons: List[List[InlineKeyboardButton]] = []
+            for key, option in provider_options.items():
+                button_label = option.get("button_label") or option.get("label") or key.title()
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            button_label,
+                            callback_data=f"summary_provider:{key}",
+                        )
+                    ]
+                )
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+            reply_markup = InlineKeyboardMarkup(buttons)
+
+    await query.edit_message_text("\n".join(message_lines), reply_markup=reply_markup)
 
 
 def fetch_report_from_dashboard(video_id: str, timeout: int = 8) -> Optional[Dict[str, Any]]:
@@ -583,7 +694,40 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         if last_voice:
             session_payload['last_voice'] = last_voice
 
+    processor_info = result.get('processor_info') or {}
+    proc_provider = processor_info.get('llm_provider') or ''
+    proc_model = processor_info.get('model') or ''
+    proc_label = proc_provider or 'unknown'
+    if proc_model:
+        proc_label = f"{proc_provider}/{proc_model}" if proc_provider else proc_model
+
     if provider:
+        provider_label = "Local TTS hub" if provider == "local" else "OpenAI TTS"
+        voice_hint = ""
+        selected_voice = session_payload.get('selected_voice') or {}
+        last_voice = session_payload.get('last_voice')
+        if last_voice:
+            voice_hint = f" • {handler._escape_markdown(last_voice)}"
+        else:
+            eng = selected_voice.get('engine')
+            fav = selected_voice.get('favorite_slug')
+            voice_id = selected_voice.get('voice_id')
+            if eng and fav:
+                voice_hint_value = handler._escape_markdown(f"{eng}:{fav}")
+                voice_hint = f" • {voice_hint_value}"
+            elif voice_id:
+                voice_hint = f" • {handler._escape_markdown(voice_id)}"
+
+        status_lines = [
+            "🎙️ Summary ready.",
+            f"LLM: {handler._escape_markdown(proc_label)}",
+            f"Starting text-to-speech • {provider_label}{voice_hint}",
+        ]
+        try:
+            await _safe_edit_status(query, "\n".join(status_lines))
+        except Exception as exc:
+            logging.debug("Unable to update TTS status message: %s", exc)
+
         try:
             await handler._execute_tts_job(query, session_payload, provider)
         finally:
@@ -923,6 +1067,37 @@ async def process_content_summary(
                 await query.edit_message_text(f"❌ {error_message}")
                 logging.info("❌ Processing error: %s", error_message)
             return
+
+        has_summary, placeholder_detail = _summary_has_useful_content(result)
+        if not has_summary:
+            logging.warning(
+                "Summary output from %s lacked usable content (detail=%s); skipping exports.",
+                llm_label,
+                placeholder_detail,
+            )
+            await _handle_summary_placeholder(
+                handler,
+                query,
+                summary_type,
+                proficiency_level,
+                user_name,
+                provider_key,
+                llm_label,
+                placeholder_detail,
+            )
+            return
+
+        if summary_type.startswith("audio"):
+            status_lines = [
+                "🎙️ Summary ready.",
+                f"LLM: {handler._escape_markdown(llm_label)}",
+                "Preparing text-to-speech…",
+            ]
+            status_text = "\n".join(status_lines)
+            try:
+                await _safe_edit_status(query, status_text)
+            except Exception as exc:
+                logging.debug("Unable to refresh audio status message: %s", exc)
 
         export_info.update({"html_path": None, "json_path": None})
         try:

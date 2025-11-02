@@ -25,7 +25,7 @@ except ImportError:
     requests = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import RetryAfter
+from telegram.error import RetryAfter, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.constants import ParseMode
 
@@ -894,6 +894,143 @@ class YouTubeTelegramBot:
         
         await update.message.reply_text(help_message)
     
+    async def _check_api_credentials(self) -> Dict[str, Dict[str, str]]:
+        """
+        Perform lightweight probes against supported cloud providers to verify API keys.
+        Returns provider keyed dict with state/detail metadata.
+        """
+        if requests is None:  # type: ignore[name-defined]
+            return {
+                "openai": {"state": "skipped", "detail": "requests library unavailable"},
+                "anthropic": {"state": "skipped", "detail": "requests library unavailable"},
+                "openrouter": {"state": "skipped", "detail": "requests library unavailable"},
+            }
+
+        # Refresh environment-backed credentials so we pick up recent changes
+        try:
+            llm_config.load_environment()
+        except Exception as exc:
+            logging.warning("Failed to refresh LLM config before status probe: %s", exc)
+
+        timeout = float(os.getenv("STATUS_API_PROBE_TIMEOUT", "6"))
+
+        async def run_probe(func: Callable[[], Dict[str, str]]) -> Dict[str, str]:
+            try:
+                return await asyncio.to_thread(func)
+            except Exception as exc:  # Defensive catch for unexpected threading errors
+                return {"state": "error", "detail": f"{type(exc).__name__}: {exc}"}
+
+        def truncate(payload: str) -> str:
+            payload = (payload or "").strip()
+            return payload if len(payload) <= 80 else f"{payload[:77]}..."
+
+        def probe_openai() -> Dict[str, str]:
+            key = getattr(llm_config, "openai_key", None)
+            if not key:
+                return {"state": "missing", "detail": "not set"}
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            }
+            url = "https://api.openai.com/v1/models?limit=1"
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)  # type: ignore[name-defined]
+            except requests.RequestException as exc:  # type: ignore[name-defined]
+                return {"state": "error", "detail": f"{type(exc).__name__}: {exc}"}
+            if resp.status_code == 200:
+                return {"state": "ok", "detail": "OK (200)"}
+            reason = truncate(resp.reason or "")
+            snippet = truncate(resp.text)
+            msg = reason or f"HTTP {resp.status_code}"
+            if snippet:
+                msg = f"{msg} – {snippet}"
+            return {"state": "error", "detail": msg}
+
+        def probe_anthropic() -> Dict[str, str]:
+            key = getattr(llm_config, "anthropic_key", None)
+            if not key:
+                return {"state": "missing", "detail": "not set"}
+            headers = {
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01",
+            }
+            url = "https://api.anthropic.com/v1/models"
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)  # type: ignore[name-defined]
+            except requests.RequestException as exc:  # type: ignore[name-defined]
+                return {"state": "error", "detail": f"{type(exc).__name__}: {exc}"}
+            if resp.status_code == 200:
+                return {"state": "ok", "detail": "OK (200)"}
+            reason = truncate(resp.reason or "")
+            snippet = truncate(resp.text)
+            msg = reason or f"HTTP {resp.status_code}"
+            if snippet:
+                msg = f"{msg} – {snippet}"
+            return {"state": "error", "detail": msg}
+
+        def probe_openrouter() -> Dict[str, str]:
+            key = getattr(llm_config, "openrouter_key", None)
+            if not key:
+                return {"state": "missing", "detail": "not set"}
+            headers = {
+                "Authorization": f"Bearer {key}",
+            }
+            url = "https://openrouter.ai/api/v1/auth/key"
+            try:
+                resp = requests.get(url, headers=headers, timeout=timeout)  # type: ignore[name-defined]
+            except requests.RequestException as exc:  # type: ignore[name-defined]
+                return {"state": "error", "detail": f"{type(exc).__name__}: {exc}"}
+            if resp.status_code == 200:
+                return {"state": "ok", "detail": "OK (200)"}
+            reason = truncate(resp.reason or "")
+            snippet = truncate(resp.text)
+            msg = reason or f"HTTP {resp.status_code}"
+            if snippet:
+                msg = f"{msg} – {snippet}"
+            return {"state": "error", "detail": msg}
+
+        results = await asyncio.gather(
+            run_probe(probe_openai),
+            run_probe(probe_anthropic),
+            run_probe(probe_openrouter),
+        )
+        summary = {
+            "openai": results[0],
+            "anthropic": results[1],
+            "openrouter": results[2],
+        }
+        try:
+            logging.debug(
+                "Status API probes: openai=%s, anthropic=%s, openrouter=%s",
+                summary["openai"].get("state"),
+                summary["anthropic"].get("state"),
+                summary["openrouter"].get("state"),
+            )
+        except Exception:
+            pass
+        return summary
+
+    @staticmethod
+    def _render_api_key_line(label: str, result: Optional[Dict[str, str]]) -> str:
+        if not result:
+            return f"• {label}: ⚠️ not checked"
+        state = result.get("state", "error")
+        detail = result.get("detail", "").strip()
+        emoji = {
+            "ok": "✅",
+            "missing": "⚠️",
+            "skipped": "⚠️",
+            "error": "❌",
+        }.get(state, "⚠️")
+        if not detail:
+            detail = {
+                "ok": "OK",
+                "missing": "not set",
+                "skipped": "skipped",
+                "error": "error",
+            }.get(state, "unknown")
+        return f"• {label}: {emoji} {detail}"
+
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status command."""
         user_id = update.effective_user.id
@@ -978,16 +1115,20 @@ class YouTubeTelegramBot:
             f"• LLM_MODEL: {env_or('LLM_MODEL')}",
         ])
 
-        # Cloud key sanity
+        # Cloud API credentials: probe actual validity when possible
         try:
-            from llm_config import llm_config as _cfg
-            lines.extend([
-                f"• OPENAI_API_KEY: {'✅' if bool(getattr(_cfg, 'openai_key', None)) else '❌'}",
-                f"• ANTHROPIC_API_KEY: {'✅' if bool(getattr(_cfg, 'anthropic_key', None)) else '❌'}",
-                f"• OPENROUTER_API_KEY: {'✅' if bool(getattr(_cfg, 'openrouter_key', None)) else '❌'}",
-            ])
-        except Exception:
-            pass
+            probe_results = await self._check_api_credentials()
+        except Exception as exc:
+            probe_results = {
+                "openai": {"state": "error", "detail": f"probe failed: {exc}"},
+                "anthropic": {"state": "error", "detail": f"probe failed: {exc}"},
+                "openrouter": {"state": "error", "detail": f"probe failed: {exc}"},
+            }
+        lines.extend([
+            self._render_api_key_line("OPENAI_API_KEY", probe_results.get("openai")),
+            self._render_api_key_line("ANTHROPIC_API_KEY", probe_results.get("anthropic")),
+            self._render_api_key_line("OPENROUTER_API_KEY", probe_results.get("openrouter")),
+        ])
 
         # Auto-process snapshot
         ap_provider = env_or('AUTO_PROCESS_PROVIDER')
@@ -2851,11 +2992,13 @@ class YouTubeTelegramBot:
             logging.debug(f"Ollama model list unavailable: {exc}")
 
         preferred = os.getenv("OLLAMA_SUMMARY_MODEL")
+        default_env = os.getenv("OLLAMA_DEFAULT_MODEL")
+        quick_env = os.getenv("QUICK_LOCAL_MODEL")
         cached = self._cached_ollama_summarizer()
         cached_model = getattr(cached, "model", None) if cached else None
 
         ordered: List[str] = []
-        for candidate in (cached_model, preferred):
+        for candidate in (cached_model, preferred, default_env, quick_env):
             if candidate and candidate not in ordered:
                 ordered.append(candidate)
         for model in models:
@@ -5025,6 +5168,11 @@ class YouTubeTelegramBot:
                         return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
                     except RetryAfter as exc:
                         await asyncio.sleep(exc.retry_after)
+                    except BadRequest as exc:
+                        message = (getattr(exc, 'message', None) or str(exc) or "").lower()
+                        if "query is too old" in message or "message to edit not found" in message:
+                            return await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
+                        raise
 
 
             # Calculate available space for summary content

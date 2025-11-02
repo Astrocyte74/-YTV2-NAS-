@@ -377,7 +377,27 @@ class YouTubeSummarizer:
             },
         }
 
-        if summary_image_service.SUMMARY_IMAGE_ENABLED:
+        summary_for_image = ""
+        if isinstance(result.get("summary"), str):
+            summary_for_image = result["summary"]
+        if not summary_for_image and isinstance(summary_data, dict):
+            for key in ("summary", "comprehensive", "bullet_points", "key_insights", "audio"):
+                candidate = summary_data.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    summary_for_image = candidate
+                    break
+        allow_image = False
+        if summary_for_image:
+            lowered = summary_for_image.strip().lower()
+            disallowed_prefixes = (
+                "unable to generate",
+                "unable to create",
+                "summary generation failed",
+            )
+            if not any(lowered.startswith(prefix) for prefix in disallowed_prefixes):
+                allow_image = True
+
+        if summary_image_service.SUMMARY_IMAGE_ENABLED and allow_image:
             try:
                 image_meta = await summary_image_service.maybe_generate_summary_image(result)
                 if image_meta:
