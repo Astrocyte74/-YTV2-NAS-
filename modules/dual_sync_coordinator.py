@@ -322,6 +322,7 @@ class DualSyncCoordinator:
 
                         # Persist media JSON via content upsert
                         content_update = dict(content_data)
+                        content_update["has_audio"] = True
                         content_update["media"] = media
                         if media_meta:
                             content_update["media_metadata"] = media_meta
