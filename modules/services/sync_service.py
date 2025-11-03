@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from nas_sync import dual_sync_upload
 from modules import ledger
+from modules.summary_variants import normalize_variant_id
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,66 @@ def _update_report_media_metadata(
         if isinstance(duration, int) and duration > 0:
             media_meta["mp3_duration_seconds"] = int(duration)
         data["media_metadata"] = media_meta
+
+        summary_section = data.get("summary")
+        if not isinstance(summary_section, dict):
+            summary_section = {}
+            data["summary"] = summary_section
+
+        if audio_url:
+            summary_section["audio_url"] = audio_url
+
+        variants_list = summary_section.get("variants")
+        if not isinstance(variants_list, list):
+            variants_list = []
+        audio_entry = None
+        for entry in variants_list:
+            if not isinstance(entry, dict):
+                continue
+            variant_id = normalize_variant_id(entry.get("variant") or entry.get("summary_type") or entry.get("type"))
+            if variant_id.startswith("audio"):
+                audio_entry = entry
+                break
+        if audio_entry is None:
+            audio_entry = {
+                "variant": "audio",
+                "kind": "audio",
+            }
+            text_value = summary_section.get("summary")
+            if isinstance(text_value, str) and text_value.strip():
+                audio_entry["text"] = text_value.strip()
+            variants_list.append(audio_entry)
+        if audio_url:
+            audio_entry["audio_url"] = audio_url
+        if isinstance(duration, int) and duration > 0:
+            audio_entry["duration"] = int(duration)
+        summary_section["variants"] = variants_list
+
+        ingest_variants = data.get("summary_variants")
+        if not isinstance(ingest_variants, list):
+            ingest_variants = []
+        ingest_audio_entry = None
+        for entry in ingest_variants:
+            if not isinstance(entry, dict):
+                continue
+            variant_id = normalize_variant_id(entry.get("variant") or entry.get("summary_type") or entry.get("type"))
+            if variant_id.startswith("audio"):
+                ingest_audio_entry = entry
+                break
+        if ingest_audio_entry is None:
+            ingest_audio_entry = {
+                "variant": "audio",
+                "kind": "audio",
+            }
+            text_value = summary_section.get("summary")
+            if isinstance(text_value, str) and text_value.strip():
+                ingest_audio_entry["text"] = text_value.strip()
+            ingest_variants.append(ingest_audio_entry)
+        if audio_url:
+            ingest_audio_entry["audio_url"] = audio_url
+        if isinstance(duration, int) and duration > 0:
+            ingest_audio_entry["duration"] = int(duration)
+        data["summary_variants"] = ingest_variants
 
         if version is not None:
             data["audio_version"] = int(version)
