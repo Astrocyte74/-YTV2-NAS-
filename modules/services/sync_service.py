@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,40 @@ def _to_path(value: Optional[PathLike]) -> Optional[Path]:
     if value is None:
         return None
     return value if isinstance(value, Path) else Path(value)
+
+
+def _update_report_media_metadata(
+    report_path: Path,
+    audio_url: Optional[str],
+    duration: Optional[int],
+    version: Optional[int],
+) -> None:
+    """
+    Persist audio metadata alongside the local report JSON so subsequent
+    uploads keep media fields in sync with the dashboard contract.
+    """
+    try:
+        if not report_path or not report_path.exists():
+            return
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+
+        media = data.get("media") or {}
+        media["has_audio"] = True
+        if audio_url:
+            media["audio_url"] = audio_url
+        data["media"] = media
+
+        media_meta = data.get("media_metadata") or {}
+        if isinstance(duration, int) and duration > 0:
+            media_meta["mp3_duration_seconds"] = int(duration)
+        data["media_metadata"] = media_meta
+
+        if version is not None:
+            data["audio_version"] = int(version)
+
+        report_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.debug("Unable to persist audio metadata for %s: %s", report_path, exc)
 
 
 def run_dual_sync(
@@ -64,6 +99,32 @@ def run_dual_sync(
         logger.info("✅ Dual-sync success: %s → %s", label, ", ".join(targets))
     else:
         logger.error("❌ Dual-sync failed for %s", label)
+
+    if audio:
+        audio_meta: Optional[Dict[str, Any]] = None
+        if isinstance(sync_results, dict):
+            postgres_audio = (sync_results.get("postgres") or {}).get("audio") or {}
+            sqlite_audio = (sync_results.get("sqlite") or {}).get("audio") or {}
+            candidate = postgres_audio if postgres_audio else sqlite_audio
+            if candidate and candidate.get("status") == "ok":
+                audio_meta = candidate
+        if audio_meta:
+            raw_duration = audio_meta.get("duration")
+            try:
+                duration_value = int(raw_duration) if raw_duration is not None else None
+            except (TypeError, ValueError):
+                duration_value = None
+            raw_version = audio_meta.get("audio_version")
+            try:
+                version_value = int(raw_version) if raw_version is not None else None
+            except (TypeError, ValueError):
+                version_value = None
+            _update_report_media_metadata(
+                path,
+                audio_meta.get("audio_url"),
+                duration_value,
+                version_value,
+            )
 
     error: Optional[str]
     if success:

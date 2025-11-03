@@ -16,9 +16,8 @@ if str(_ROOT) not in _sys.path:
     _sys.path.insert(0, str(_ROOT))
 
 from modules.render_api_client import RenderAPIClient
-from modules.postgres_writer import PostgresWriter
 from modules.report_generator import get_mp3_duration_seconds
-
+import psycopg
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -60,26 +59,36 @@ def main() -> int:
     # Duration
     dur = get_mp3_duration_seconds(str(mp3)) or None
 
-    pw = PostgresWriter()
-    update = {
-        "id": args.content_id,
-        "video_id": args.video_id,
-        "title": "temp",
-        "canonical_url": "https://example.com",
-        "thumbnail_url": "",
-        "summary": {"summary": "tmp"},
-        "media": {"has_audio": True},
-        "audio_version": int(time.time()),
-    }
+    version = int(time.time())
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        raise SystemExit("DATABASE_URL is required for database update")
+
+    assignments = []
+    params = []
+
     if url:
-        update["media"]["audio_url"] = url
+        assignments.append("media = coalesce(media, '{}'::jsonb) || jsonb_build_object('has_audio', true, 'audio_url', %s)")
+        params.append(url)
+    else:
+        assignments.append("media = coalesce(media, '{}'::jsonb) || jsonb_build_object('has_audio', true)")
+
     if isinstance(dur, int) and dur > 0:
-        update["media_metadata"] = {"mp3_duration_seconds": int(dur)}
+        assignments.append("media_metadata = coalesce(media_metadata, '{}'::jsonb) || jsonb_build_object('mp3_duration_seconds', %s)")
+        params.append(int(dur))
 
-    res = pw.upload_content(update)
-    print("persist_result=", res)
+    assignments.append("audio_version = %s")
+    params.append(version)
+    assignments.append("has_audio = true")
+
+    params.append(args.video_id)
+
+    sql = "UPDATE content SET " + ", ".join(assignments) + " WHERE video_id = %s"
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            print('rows_updated=', cur.rowcount)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

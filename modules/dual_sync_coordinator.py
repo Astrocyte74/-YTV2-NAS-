@@ -331,7 +331,14 @@ class DualSyncCoordinator:
                         try:
                             persist_result = self.postgres_client.upload_content(content_update)
                             if persist_result:
-                                result['audio'] = {"status": "ok", "audio_url": audio_url, "duration": duration}
+                                audio_payload: Dict[str, Any] = {"status": "ok"}
+                                if audio_url:
+                                    audio_payload["audio_url"] = audio_url
+                                if duration is not None:
+                                    audio_payload["duration"] = duration
+                                if audio_version is not None:
+                                    audio_payload["audio_version"] = audio_version
+                                result['audio'] = audio_payload
                                 self.stats['postgres']['audio_success'] += 1
                                 metrics.record_audio(True)
                                 emit_report_event(
