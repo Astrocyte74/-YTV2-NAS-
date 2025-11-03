@@ -33,6 +33,15 @@ Audio Upload Strategy
   2) If not set or insert returns None, automatically fall back to HTTP ingest using `RENDER_DASHBOARD_URL` + `INGEST_TOKEN`.
 - Result: No `AUDIO_PUBLIC_BASE` required; audio reliably appears on the dashboard.
 
+Authoritative fields written by NAS (after 200 OK upload)
+- `media.has_audio = true`
+- `media.audio_url = /exports/by_video/<videoId>.mp3` (Reddit legacy: `/exports/audio/reddit<file_stem>.mp3`)
+- `media_metadata.mp3_duration_seconds = <int>` (ffprobe)
+- Optional: `audio_version = <unix_ts>` (dashboard may append `?v=`)
+
+JSON semantics
+- Prefer omission over null when a field is unknown/unavailable (e.g., omit `audio_url` and `mp3_duration_seconds` if upload fails).
+
 Typical Logs
 - Direct PG content upsert:
   - `[SYNC] target=postgres ... op=report status=ok upserted=True`
@@ -55,4 +64,3 @@ Troubleshooting (MP3 not playable)
 Notes
 - The server sanitizes filenames but updates DB using the original `video_id` (e.g., `web:`/`reddit:` prefixes are preserved).
 - Send `video_id` consistently between content and audio calls.
-

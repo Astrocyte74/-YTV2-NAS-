@@ -190,47 +190,72 @@ class RenderAPIClient:
             
         try:
             # Prepare multipart form data - use requests directly (not session wrapper)
-            with open(audio_path, 'rb') as audio_file:
-                files = {
-                    'audio': (audio_path.name, audio_file, 'audio/mpeg')
-                }
-                data = {
-                    'content_id': content_id
-                }
-                
-                # Use requests directly to ensure proper multipart headers
-                import requests
-                headers = {}
-                if self.ingest_token:
-                    headers['X-INGEST-TOKEN'] = self.ingest_token
-                if self.sync_secret:
-                    headers['Authorization'] = f'Bearer {self.sync_secret}'
-                elif not headers.get('Authorization') and self.ingest_token:
-                    headers['Authorization'] = f'Bearer {self.ingest_token}'
-
-                response = requests.post(
-                    f"{self.base_url}/api/upload-audio",
-                    files=files,
-                    data=data,
-                    headers=headers or None,
-                    timeout=30
-                )
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"Uploaded audio for content: {content_id}")
-                return result
-            else:
-                error_msg = f"Failed to upload audio: {response.status_code}"
+            import random
+            import requests
+            max_attempts = 5
+            backoff = 1.0
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
                 try:
-                    error_detail = response.json()
-                    error_msg += f" - {error_detail.get('error', 'Unknown error')}"
-                except:
-                    error_msg += f" - {response.text[:200]}"
-                
-                logger.error(error_msg)
-                response.raise_for_status()
-                
+                    with open(audio_path, 'rb') as audio_file:
+                        files = {
+                            'audio': (audio_path.name, audio_file, 'audio/mpeg')
+                        }
+                        data = {
+                            'content_id': content_id
+                        }
+                        headers = {}
+                        if self.ingest_token:
+                            headers['X-INGEST-TOKEN'] = self.ingest_token
+                        if self.sync_secret:
+                            headers['Authorization'] = f'Bearer {self.sync_secret}'
+                        elif not headers.get('Authorization') and self.ingest_token:
+                            headers['Authorization'] = f'Bearer {self.ingest_token}'
+
+                        response = requests.post(
+                            f"{self.base_url}/api/upload-audio",
+                            files=files,
+                            data=data,
+                            headers=headers or None,
+                            timeout=30
+                        )
+
+                    if response.status_code == 200:
+                        result = response.json()
+                        logger.info(f"Uploaded audio for content: {content_id}")
+                        return result
+
+                    # Non-200 → consider retry if server-side
+                    if 500 <= response.status_code < 600 and attempt < max_attempts:
+                        jitter = backoff * random.uniform(0.8, 1.2)
+                        logger.warning(f"Audio upload {attempt}/{max_attempts} failed {response.status_code}; retrying in {jitter:.1f}s")
+                        import time as _t
+                        _t.sleep(jitter)
+                        backoff *= 2
+                        continue
+                    else:
+                        error_msg = f"Failed to upload audio: {response.status_code}"
+                        try:
+                            error_detail = response.json()
+                            error_msg += f" - {error_detail.get('error', 'Unknown error')}"
+                        except Exception:
+                            error_msg += f" - {response.text[:200]}"
+                        logger.error(error_msg)
+                        response.raise_for_status()
+                except (requests.RequestException, OSError) as e:
+                    last_exc = e
+                    if attempt < max_attempts:
+                        jitter = backoff * random.uniform(0.8, 1.2)
+                        logger.warning(f"Audio upload error {type(e).__name__}: {e}; retrying in {jitter:.1f}s")
+                        import time as _t
+                        _t.sleep(jitter)
+                        backoff *= 2
+                        continue
+                    raise
+            # If we got here, raise last exception
+            if last_exc:
+                raise last_exc
+            raise RuntimeError("audio upload failed: no response")
         except requests.RequestException as e:
             logger.error(f"Audio upload failed: {e}")
             raise

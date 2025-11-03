@@ -264,86 +264,72 @@ class DualSyncCoordinator:
                 logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=report status=ok upserted={report_result.get('upserted')}")
 
                 if not self.sqlite_enabled:
-                    self._upload_render_assets(content_data, audio_path, db_video_id)
+                    # Upload only non-audio assets here; audio is handled below with persistence of media JSON
+                    self._upload_render_assets(content_data, None, db_video_id)
 
-                # Audio sync SECOND (sets has_audio flag after metadata exists)
+                # Audio sync SECOND (upload via HTTP; then set media JSON and persist)
                 if audio_path and audio_path.is_file():
-                    logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=attempting")
-                    audio_result = self.postgres_client.upload_audio(db_video_id, audio_path)
+                    logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=attempting_upload")
+                    http_audio_result = None
+                    try:
+                        if self.render_client:
+                            http_audio_result = self.render_client.upload_audio_file(audio_path, raw_video_id)
+                    except Exception as http_exc:
+                        logger.warning(f"[SYNC] target=postgres video_id={raw_video_id} op=audio upload error={str(http_exc)[:120]}")
 
-                    if audio_result:
-                        result['audio'] = audio_result
-                        self.stats['postgres']['audio_success'] += 1
-                        metrics.record_audio(True)
-                        emit_report_event(
-                            'audio-synced',
-                            {
-                                'video_id': db_video_id,
-                                'content_id': content_data.get('id') or f"yt:{db_video_id}",
-                                'audio_path': str(audio_path),
-                                'targets': ['postgres'],
-                            },
-                        )
-                        logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=ok url={audio_result.get('public_url')}")
-                    else:
-                        # Fallback: use HTTP ingest to upload MP3 to the dashboard if configured
-                        base_url = os.getenv('RENDER_DASHBOARD_URL') or os.getenv('POSTGRES_DASHBOARD_URL') or os.getenv('RENDER_API_URL')
-                        ingest_token = os.getenv('INGEST_TOKEN')
-                        if base_url and ingest_token:
-                            try:
-                                from .postgres_sync_client import PostgreSQLSyncClient
-                                logger.info(
-                                    f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=fallback_http_ingest"
-                                )
-                                http_client = PostgreSQLSyncClient(base_url=base_url, ingest_token=ingest_token)
-                                # Use the original/raw ID so web:/reddit: prefixes are preserved for the server
-                                http_audio_result = http_client.upload_audio(raw_video_id, audio_path)
-                                if http_audio_result:
-                                    result['audio'] = http_audio_result
-                                    self.stats['postgres']['audio_success'] += 1
-                                    metrics.record_audio(True)
-                                    emit_report_event(
-                                        'audio-synced',
-                                        {
-                                            'video_id': db_video_id,
-                                            'content_id': content_data.get('id') or f"yt:{db_video_id}",
-                                            'audio_path': str(audio_path),
-                                            'targets': ['postgres'],
-                                        },
-                                    )
-                                    logger.info(
-                                        f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=ok (http) url={http_audio_result.get('public_url')}"
-                                    )
-                                else:
-                                    self.stats['postgres']['audio_fail'] += 1
-                                    metrics.record_audio(False)
-                                    emit_report_event(
-                                        'audio-sync-failed',
-                                        {
-                                            'video_id': db_video_id,
-                                            'content_id': content_data.get('id') or f"yt:{db_video_id}",
-                                            'audio_path': str(audio_path),
-                                        },
-                                    )
-                                    logger.error(
-                                        f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=fail (http fallback failed)"
-                                    )
-                            except Exception as http_exc:
-                                self.stats['postgres']['audio_fail'] += 1
-                                metrics.record_audio(False)
+                    if http_audio_result:
+                        # Compute duration and canonical path
+                        try:
+                            from .report_generator import get_mp3_duration_seconds
+                            duration = get_mp3_duration_seconds(str(audio_path))
+                        except Exception:
+                            duration = None
+                        try:
+                            from .services.audio_path import build_audio_path
+                            audio_url = build_audio_path(content_data) or None
+                        except Exception:
+                            audio_url = None
+
+                        media = {"has_audio": True}
+                        if audio_url:
+                            media["audio_url"] = audio_url
+                        media_meta = {}
+                        if isinstance(duration, int) and duration > 0:
+                            media_meta["mp3_duration_seconds"] = int(duration)
+
+                        # Cache-busting version
+                        try:
+                            audio_version = int(datetime.utcnow().timestamp())
+                        except Exception:
+                            audio_version = None
+
+                        # Persist media JSON via content upsert
+                        content_update = dict(content_data)
+                        content_update["media"] = media
+                        if media_meta:
+                            content_update["media_metadata"] = media_meta
+                        if audio_version is not None:
+                            content_update["audio_version"] = audio_version
+
+                        try:
+                            persist_result = self.postgres_client.upload_content(content_update)
+                            if persist_result:
+                                result['audio'] = {"status": "ok", "audio_url": audio_url, "duration": duration}
+                                self.stats['postgres']['audio_success'] += 1
+                                metrics.record_audio(True)
                                 emit_report_event(
-                                    'audio-sync-error',
+                                    'audio-synced',
                                     {
                                         'video_id': db_video_id,
                                         'content_id': content_data.get('id') or f"yt:{db_video_id}",
                                         'audio_path': str(audio_path),
-                                        'error': str(http_exc)[:100],
+                                        'targets': ['postgres'],
                                     },
                                 )
-                                logger.error(
-                                    f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=error (http fallback): {http_exc}"
-                                )
-                        else:
+                                logger.info(f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=ok url={audio_url}")
+                            else:
+                                raise RuntimeError("persist failed")
+                        except Exception as persist_exc:
                             self.stats['postgres']['audio_fail'] += 1
                             metrics.record_audio(False)
                             emit_report_event(
@@ -355,8 +341,22 @@ class DualSyncCoordinator:
                                 },
                             )
                             logger.error(
-                                "[SYNC] target=postgres op=audio status=fail (no AUDIO_PUBLIC_BASE and no HTTP ingest configured; set INGEST_TOKEN and RENDER_DASHBOARD_URL)"
+                                f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=fail error={str(persist_exc)[:120]}"
                             )
+                    else:
+                        self.stats['postgres']['audio_fail'] += 1
+                        metrics.record_audio(False)
+                        emit_report_event(
+                            'audio-sync-failed',
+                            {
+                                'video_id': db_video_id,
+                                'content_id': content_data.get('id') or f"yt:{db_video_id}",
+                                'audio_path': str(audio_path),
+                            },
+                        )
+                        logger.error(
+                            f"[SYNC] target=postgres video_id={raw_video_id} op=audio status=fail (upload)"
+                        )
             else:
                 self.stats['postgres']['report_fail'] += 1
                 metrics.record_ingest(False, db_video_id)

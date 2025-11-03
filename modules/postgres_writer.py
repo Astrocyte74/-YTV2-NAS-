@@ -60,6 +60,9 @@ class DBColumns:
     has_subcategories_json: bool
     has_analysis_json: bool
     has_summary_image_url: bool
+    has_media_json: bool
+    has_media_metadata_json: bool
+    has_audio_version: bool
 
 
 class PostgresWriter:
@@ -117,6 +120,9 @@ class PostgresWriter:
             has_subcategories_json=("subcategories_json" in cols) if cols else True,
             has_analysis_json=("analysis_json" in cols) if cols else True,
             has_summary_image_url=("summary_image_url" in cols) if cols else True,
+            has_media_json=("media" in cols) if cols else False,
+            has_media_metadata_json=("media_metadata" in cols) if cols else False,
+            has_audio_version=("audio_version" in cols) if cols else False,
         )
         return self._columns_cache
 
@@ -186,7 +192,7 @@ class PostgresWriter:
             content_data.get("duration_seconds")
             or content_data.get("media_info", {}).get("audio_duration_seconds")
             or youtube_meta.get("duration_seconds")
-            or 0
+            or None
         )
 
         # time & booleans
@@ -268,6 +274,12 @@ class PostgresWriter:
                     "language": language,
                 })
 
+        # Optional media JSONs: pass through as-is (omit when empty/None)
+        media_json = content_data.get("media") or None
+        media_metadata_json = content_data.get("media_metadata") or None
+
+        audio_version = content_data.get("audio_version")
+
         return {
             "video_id": video_id,
             "id": raw_id,
@@ -276,13 +288,16 @@ class PostgresWriter:
             "canonical_url": canonical_url,
             "thumbnail_url": thumbnail_url,
             "summary_image_url": summary_image_url,
-            "duration_seconds": int(duration_seconds) if duration_seconds else None,
+            "duration_seconds": int(duration_seconds) if isinstance(duration_seconds, (int, float)) and duration_seconds else None,
             "indexed_at": indexed_at,
             "has_audio": has_audio,
             "language": language,
             "analysis_json": analysis_json,
             "subcategories_json": subcats,
             "topics_json": topics_json,
+            "media": media_json,
+            "media_metadata": media_metadata_json,
+            "audio_version": int(audio_version) if isinstance(audio_version, (int, float)) else None,
             "summary_variants": summary_variants,
         }
 
@@ -318,6 +333,12 @@ class PostgresWriter:
             insert_cols.append("subcategories_json")
         if cols.has_topics_json:
             insert_cols.append("topics_json")
+        if cols.has_media_json:
+            insert_cols.append("media")
+        if cols.has_media_metadata_json:
+            insert_cols.append("media_metadata")
+        if cols.has_audio_version:
+            insert_cols.append("audio_version")
 
         # Prepare parameter dict with JSON serialization where needed
         params: Dict[str, Any] = {k: payload.get(k) for k in insert_cols}
@@ -327,6 +348,10 @@ class PostgresWriter:
             params["subcategories_json"] = json.dumps(params["subcategories_json"]) 
         if params.get("topics_json") is not None and not isinstance(params["topics_json"], (str, bytes)):
             params["topics_json"] = json.dumps(params["topics_json"]) 
+        if params.get("media") is not None and not isinstance(params["media"], (str, bytes)):
+            params["media"] = json.dumps(params["media"]) 
+        if params.get("media_metadata") is not None and not isinstance(params["media_metadata"], (str, bytes)):
+            params["media_metadata"] = json.dumps(params["media_metadata"]) 
 
         # Build SQL strings
         cols_sql = ", ".join(insert_cols)
@@ -350,6 +375,12 @@ class PostgresWriter:
             set_updates.append("subcategories_json = EXCLUDED.subcategories_json")
         if cols.has_topics_json:
             set_updates.append("topics_json = EXCLUDED.topics_json")
+        if cols.has_media_json:
+            set_updates.append("media = EXCLUDED.media")
+        if cols.has_media_metadata_json:
+            set_updates.append("media_metadata = EXCLUDED.media_metadata")
+        if cols.has_audio_version:
+            set_updates.append("audio_version = EXCLUDED.audio_version")
         set_updates.append("updated_at = now()")
         upsert_sql = (
             f"INSERT INTO content ({cols_sql}) VALUES ({vals_sql}) "
