@@ -67,19 +67,6 @@ def main() -> int:
     limit_sql = f"LIMIT {int(args.limit)}" if args.limit and args.limit > 0 else ""
     where_extra = args.where.strip()
 
-    # Prefer JSONB media.has_audio, else fallback to has_audio column
-    query = """
-        SELECT video_id, media, media_metadata
-        FROM content
-        WHERE (
-            (media ->> 'has_audio')::boolean IS TRUE
-            OR (has_audio IS TRUE)
-        )
-    """
-    if where_extra:
-        query += f" AND ({where_extra})\n"
-    query += f" ORDER BY updated_at DESC {limit_sql}"
-
     cleared = 0
     filled = 0
     checked = 0
@@ -87,6 +74,31 @@ def main() -> int:
 
     with psycopg.connect(dsn, autocommit=True) as conn:
         with conn.cursor() as cur:
+            # Discover columns present in 'content'
+            cur.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = 'content'
+                """
+            )
+            cols = {r[0] for r in cur.fetchall()}
+            has_media = 'media' in cols
+            has_media_md = 'media_metadata' in cols
+
+            # Build a schema-aware SELECT
+            select_parts = ["video_id"]
+            select_parts.append("media" if has_media else "NULL AS media")
+            select_parts.append("media_metadata" if has_media_md else "NULL AS media_metadata")
+
+            base_where = "(has_audio IS TRUE)"
+            if has_media:
+                base_where = base_where + " OR ((media ->> 'has_audio')::boolean IS TRUE)"
+
+            query = f"SELECT {', '.join(select_parts)} FROM content WHERE ({base_where})"
+            if where_extra:
+                query += f" AND ({where_extra})"
+            query += f" ORDER BY updated_at DESC {limit_sql}"
+
             cur.execute(query)
             rows = cur.fetchall()
             import json as _json
@@ -133,17 +145,28 @@ def main() -> int:
                         print(f"DRY-RUN clear: {video_id} url={audio_url} status={status}")
                     else:
                         try:
-                            cur.execute(
-                                """
-                                UPDATE content
-                                SET media = jsonb_set(COALESCE(media, '{}'::jsonb) - 'audio_url', '{has_audio}', 'false'::jsonb, true),
-                                    has_audio = FALSE,
-                                    updated_at = now(),
-                                    media_metadata = CASE WHEN media_metadata IS NULL THEN media_metadata ELSE (media_metadata - 'mp3_duration_seconds') END
-                                WHERE video_id = %s
-                                """,
-                                (video_id,),
-                            )
+                            if has_media:
+                                cur.execute(
+                                    """
+                                    UPDATE content
+                                    SET media = jsonb_set(COALESCE(media, '{}'::jsonb) - 'audio_url', '{has_audio}', 'false'::jsonb, true),
+                                        has_audio = FALSE,
+                                        updated_at = now(),
+                                        media_metadata = CASE WHEN media_metadata IS NULL THEN media_metadata ELSE (media_metadata - 'mp3_duration_seconds') END
+                                    WHERE video_id = %s
+                                    """,
+                                    (video_id,),
+                                )
+                            else:
+                                cur.execute(
+                                    """
+                                    UPDATE content
+                                    SET has_audio = FALSE,
+                                        updated_at = now()
+                                    WHERE video_id = %s
+                                    """,
+                                    (video_id,),
+                                )
                         except Exception:
                             errors += 1
 

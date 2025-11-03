@@ -7,6 +7,14 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from pathlib import Path as _Path
+import sys as _sys
+
+# Ensure project root on sys.path for module imports when running as a script
+_ROOT = _Path(__file__).resolve().parents[1]
+if str(_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(_ROOT))
+
 from modules.render_api_client import RenderAPIClient
 from modules.postgres_writer import PostgresWriter
 from modules.report_generator import get_mp3_duration_seconds
@@ -44,6 +52,9 @@ def main() -> int:
         from urllib.parse import urlparse
         p = urlparse(url)
         url = p.path
+    # If server returned a bare filename, assume /exports/audio/<filename>
+    if url and '/' not in url:
+        url = f"/exports/audio/{url}"
     print("chosen_url=", url)
 
     # Duration
@@ -72,4 +83,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
