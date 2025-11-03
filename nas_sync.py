@@ -252,21 +252,25 @@ def upload_to_render(report_path, audio_path=None, max_retries=6):
 
 
 def convert_legacy_report_to_api_format(legacy_report: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert legacy JSON report format to universal schema API format."""
-    
+    """Convert legacy JSON report format to universal schema API format.
+
+    Also normalizes legacy summary blocks so Postgres ingest can upsert
+    text/audio variants (needed for dashboard rendering).
+    """
+
     def parse_json_field(value):
         if isinstance(value, list):
             return value
         if isinstance(value, str):
             try:
                 return json.loads(value)
-            except:
+            except Exception:
                 return []
         return []
-    
+
     # Extract video metadata from legacy format
     video_info = legacy_report.get('video', {})
-    
+
     # Convert to universal schema format
     content_data = {
         'content_source': 'youtube',
@@ -293,7 +297,7 @@ def convert_legacy_report_to_api_format(legacy_report: Dict[str, Any]) -> Dict[s
             'has_audio': bool(legacy_report.get('media_metadata', {}).get('has_audio', False)),
             'audio_duration_seconds': legacy_report.get('media_metadata', {}).get('mp3_duration_seconds', 0),
             'has_transcript': True,  # Assume true for legacy reports
-            'transcript_chars': len(str(legacy_report.get('summary', {}).get('content', ''))),
+            'transcript_chars': len(str(legacy_report.get('summary', {}).get('summary', '') or legacy_report.get('summary', {}).get('content', ''))),
             'word_count': legacy_report.get('stats', {}).get('summary_word_count', 0)
         },
         'processing_metadata': {
@@ -301,17 +305,24 @@ def convert_legacy_report_to_api_format(legacy_report: Dict[str, Any]) -> Dict[s
             'content_id': legacy_report.get('metadata', {}).get('report_id', '')
         }
     }
-    
-    # Add summary if available
-    summary_content = legacy_report.get('summary', {}).get('content', '')
-    if summary_content:
+
+    # Normalize summary for ingest: prefer summary.summary; fallback to summary.content
+    legacy_summary = legacy_report.get('summary', {}) or {}
+    summary_text = legacy_summary.get('summary') or legacy_summary.get('content') or ''
+    summary_type = legacy_summary.get('summary_type') or legacy_summary.get('type') or 'comprehensive'
+    if isinstance(summary_text, str) and summary_text.strip():
         content_data['summary'] = {
-            'content': {
-                'summary': summary_content,
-                'summary_type': legacy_report.get('summary', {}).get('type', 'comprehensive')
-            }
+            'summary': summary_text.strip(),
+            'summary_type': summary_type,
         }
-    
+        # Seed summary_variants so writer upserts into content_summaries
+        content_data['summary_variants'] = [
+            {
+                'variant': summary_type,
+                'text': summary_text.strip(),
+            }
+        ]
+
     return content_data
 
 def sync_single_content_to_render(content_id: str, audio_path: str = None) -> bool:
