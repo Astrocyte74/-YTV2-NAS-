@@ -4403,12 +4403,14 @@ class YouTubeTelegramBot:
                         'selected_voice': selected_voice or {},
                     }
                     self._store_tts_session(chat_id, message_id, preselected)
+                    logging.info("[TTS-COMBO] Stored message-anchored preselect for local combo: chat=%s msg=%s", chat_id, message_id)
                     # Also anchor by content so downstream can recover preselect if message key changes
                     try:
                         content_id = (self.current_item or {}).get('content_id')
                         normalized_id = self._normalize_content_id(content_id) if content_id else None
                         if normalized_id:
                             self._store_content_tts_preselect(normalized_id, preselected)
+                            logging.info("[TTS-COMBO] Stored content-anchored preselect: video_id=%s", normalized_id)
                     except Exception:
                         pass
                     await self._execute_summary_with_model(query, session, "ollama", model_option)
