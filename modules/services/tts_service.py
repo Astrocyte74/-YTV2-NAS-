@@ -97,6 +97,11 @@ async def enqueue_job(handler, query, session: Dict[str, Any]) -> None:
 async def execute_job(handler, query, session: Dict[str, Any], provider: str) -> None:
     provider_key = (provider or "openai").lower()
     summary_text = session.get("summary_text") or session.get("text") or ""
+    # Minimal diagnostic: log provider + text length right at TTS execution
+    try:
+        logging.info("[TTS-EXEC] provider=%s text_len=%d", provider_key, len(summary_text))
+    except Exception:
+        pass
     if not summary_text:
         logging.warning("TTS: session missing text; aborting")
         await query.answer("Missing summary text", show_alert=True)

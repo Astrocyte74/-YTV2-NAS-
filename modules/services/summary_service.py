@@ -784,6 +784,11 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
             logging.debug("Unable to post TTS status message: %s", exc)
 
         try:
+            # Minimal diagnostic: log provider + summary_text length before TTS
+            try:
+                logging.info("[TTS-START] provider=%s text_len=%d", provider, len(summary or ''))
+            except Exception:
+                pass
             await handler._execute_tts_job(query, session_payload, provider)
         finally:
             try:
