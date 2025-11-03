@@ -606,6 +606,10 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
         if image_path:
             try:
+                try:
+                    await _safe_edit_status(query, "🖼️ Attaching illustration…")
+                except Exception:
+                    pass
                 title_text = result.get("metadata", {}).get("title") or "Summary illustration"
                 caption = f"🎨 *Summary Illustration*\n{handler._escape_markdown(title_text)}"
                 with image_path.open("rb") as photo_file:
@@ -622,7 +626,35 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
     except Exception as exc:
         logging.error("Error sending formatted response: %s", exc)
-        await query.edit_message_text(f"❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
+        # Fallback UI message
+        reported = False
+        try:
+            await query.edit_message_text(
+                "❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
+            reported = True
+        except Exception as e2:
+            msg = str(getattr(e2, 'message', None) or e2).lower()
+            if "query is too old" in msg or "message to edit not found" in msg:
+                try:
+                    await query.message.reply_text(
+                        "❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
+                    reported = True
+                except Exception:
+                    pass
+            else:
+                logging.debug("Secondary error while reporting formatting error: %s", e2)
+
+        # Even if formatting failed, continue with TTS for audio summaries
+        try:
+            if isinstance(summary_type, str) and summary_type.startswith("audio"):
+                try:
+                    # Small status nudge for UX
+                    await query.message.reply_text("⏳ Summary generated. Starting TTS…")
+                except Exception:
+                    pass
+                await handler._prepare_tts_generation(query, result, summary, summary_type)
+        except Exception as e3:
+            logging.debug("Skipped TTS continuation after formatting error: %s", e3)
 
 
 async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary_text: str, summary_type: str) -> None:
@@ -981,7 +1013,7 @@ async def process_content_summary(
     if extra_lines:
         message = f"{message}\n\n" + " • ".join(extra_lines)
 
-    await query.edit_message_text(message)
+    await _safe_edit_status(query, message)
 
     try:
         normalized_id = handler._normalize_content_id(content_id)
@@ -1113,6 +1145,11 @@ async def process_content_summary(
             json_path_obj = Path(json_path)
             if json_path_obj.exists():
                 logging.info("✅ Exported JSON report: %s", json_path)
+                # UX: nudge status so Telegram users see progress during longer runs
+                try:
+                    await _safe_edit_status(query, "📄 Report saved. Syncing to dashboard…")
+                except Exception:
+                    pass
             else:
                 logging.warning("⚠️ JSON export returned path but file not created: %s", json_path)
                 logging.warning("   This will cause dual-sync to fail!")
@@ -1161,6 +1198,10 @@ async def process_content_summary(
                         summary_type,
                         targets=outcome["targets"],
                     )
+                    try:
+                        await _safe_edit_status(query, "✅ Synced to dashboard. Formatting reply…")
+                    except Exception:
+                        pass
                 # run_dual_sync logs failures; no additional handling required here.
             else:
                 json_path_obj = Path(json_path)
@@ -1185,6 +1226,10 @@ async def process_content_summary(
                             targets=outcome["targets"],
                         )
                         logging.info("⏳ Audio sync will happen after TTS generation")
+                        try:
+                            await _safe_edit_status(query, "✅ Synced metadata. ⏳ Audio will upload after TTS…")
+                        except Exception:
+                            pass
                 else:
                     logging.warning("⚠️ JSON report not found for content sync: %s", report_path)
 
