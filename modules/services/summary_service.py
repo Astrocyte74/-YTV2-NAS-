@@ -703,6 +703,13 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         chat_id = query.message.chat.id if query.message else None
         message_id = query.message.message_id if query.message else None
         preselected = handler._get_tts_session(chat_id, message_id) if (chat_id and message_id) else None
+        # If a message-anchored preselect exists, promote it to content-anchored immediately
+        try:
+            if isinstance(preselected, dict) and preselected.get('auto_run') and normalized_video_id and hasattr(handler, '_store_content_tts_preselect'):
+                handler._store_content_tts_preselect(normalized_video_id, preselected)
+                logging.info("[TTS-PREP] promoted message preselect to content preselect for %s", normalized_video_id)
+        except Exception:
+            pass
         # Fallback: find any auto-run TTS session anchored to this chat that matches the summary type
         if not preselected and chat_id is not None:
             try:
@@ -780,15 +787,11 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
             await handler._execute_tts_job(query, session_payload, provider)
         finally:
             try:
-                # Consume the one-shot preselection so it doesn't affect later flows
+                # Consume the one-shot message-anchored preselection
                 handler._remove_tts_session(chat_id, message_id)
             except Exception:
                 pass
-            try:
-                if normalized_video_id and hasattr(handler, '_remove_content_tts_preselect'):
-                    handler._remove_content_tts_preselect(normalized_video_id)
-            except Exception:
-                pass
+            # Do NOT remove content-anchored preselect here; defer until audio delivery succeeds
     else:
         await handler._prompt_tts_provider(query, session_payload, title)
 
