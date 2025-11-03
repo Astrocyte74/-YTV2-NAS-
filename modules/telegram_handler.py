@@ -299,6 +299,8 @@ class YouTubeTelegramBot:
         self.started_at = time.time()
         # Interactive TTS sessions keyed by (chat_id, message_id)
         self.tts_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Content-anchored preselect for TTS combos keyed by normalized video_id
+        self.tts_preselect_by_content: Dict[str, Dict[str, Any]] = {}
         # Interactive summary sessions keyed by (chat_id, message_id)
         self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Interactive Draw Things sessions keyed by (chat_id, message_id)
@@ -4401,6 +4403,14 @@ class YouTubeTelegramBot:
                         'selected_voice': selected_voice or {},
                     }
                     self._store_tts_session(chat_id, message_id, preselected)
+                    # Also anchor by content so downstream can recover preselect if message key changes
+                    try:
+                        content_id = (self.current_item or {}).get('content_id')
+                        normalized_id = self._normalize_content_id(content_id) if content_id else None
+                        if normalized_id:
+                            self._store_content_tts_preselect(normalized_id, preselected)
+                    except Exception:
+                        pass
                     await self._execute_summary_with_model(query, session, "ollama", model_option)
                     return
                 else:
@@ -4748,6 +4758,22 @@ class YouTubeTelegramBot:
 
     def _remove_tts_session(self, chat_id: int, message_id: int) -> None:
         self.tts_sessions.pop(self._tts_session_key(chat_id, message_id), None)
+
+    # --- Content-anchored TTS preselect helpers ---
+    def _store_content_tts_preselect(self, normalized_video_id: str, payload: Dict[str, Any]) -> None:
+        if not normalized_video_id:
+            return
+        self.tts_preselect_by_content[normalized_video_id] = payload
+
+    def _get_content_tts_preselect(self, normalized_video_id: str) -> Optional[Dict[str, Any]]:
+        if not normalized_video_id:
+            return None
+        return self.tts_preselect_by_content.get(normalized_video_id)
+
+    def _remove_content_tts_preselect(self, normalized_video_id: str) -> None:
+        if not normalized_video_id:
+            return
+        self.tts_preselect_by_content.pop(normalized_video_id, None)
 
     def _build_tts_keyboard(self, favorites: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
         return ui_build_tts_keyboard(favorites)

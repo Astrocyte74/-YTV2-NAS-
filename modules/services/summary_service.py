@@ -721,6 +721,14 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         preselected = None
 
     provider = None
+    # Attempt message-anchored preselect first
+    if not (isinstance(preselected, dict) and preselected.get('auto_run')):
+        # Fallback to content-anchored preselect (normalized video id)
+        try:
+            if normalized_video_id and hasattr(handler, '_get_content_tts_preselect'):
+                preselected = handler._get_content_tts_preselect(normalized_video_id)
+        except Exception:
+            pass
     if isinstance(preselected, dict) and preselected.get('auto_run'):
         provider = (preselected.get('provider') or '').strip().lower() or None
         sel = preselected.get('selected_voice') or {}
@@ -771,6 +779,11 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
             try:
                 # Consume the one-shot preselection so it doesn't affect later flows
                 handler._remove_tts_session(chat_id, message_id)
+            except Exception:
+                pass
+            try:
+                if normalized_video_id and hasattr(handler, '_remove_content_tts_preselect'):
+                    handler._remove_content_tts_preselect(normalized_video_id)
             except Exception:
                 pass
     else:
