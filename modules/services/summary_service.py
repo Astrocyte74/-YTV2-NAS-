@@ -721,7 +721,7 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         preselected = None
 
     provider = None
-    logging.debug("[TTS-PREP] video_id=%s ledger_id=%s", normalized_video_id, ledger_id)
+    logging.info("[TTS-PREP] video_id=%s ledger_id=%s", normalized_video_id, ledger_id)
     # Attempt message-anchored preselect first
     # Attempt message-anchored preselect first
     if not (isinstance(preselected, dict) and preselected.get('auto_run')):
@@ -729,7 +729,7 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         try:
             if normalized_video_id and hasattr(handler, '_get_content_tts_preselect'):
                 preselected = handler._get_content_tts_preselect(normalized_video_id)
-                logging.debug("[TTS-PREP] content preselect found=%s", bool(preselected))
+                logging.info("[TTS-PREP] content preselect found=%s", bool(preselected))
         except Exception:
             pass
     if isinstance(preselected, dict) and preselected.get('auto_run'):
