@@ -606,8 +606,9 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
         if image_path:
             try:
+                # Use a separate reply so we don't overwrite the summary message
                 try:
-                    await _safe_edit_status(query, "🖼️ Attaching illustration…")
+                    await query.message.reply_text("🖼️ Attaching illustration…")
                 except Exception:
                     pass
                 title_text = result.get("metadata", {}).get("title") or "Summary illustration"
@@ -626,32 +627,35 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
     except Exception as exc:
         logging.error("Error sending formatted response: %s", exc)
-        # Fallback UI message
-        reported = False
+        # Fallback UI message: always reply so we don't overwrite any existing summary content
         try:
-            await query.edit_message_text(
+            await query.message.reply_text(
                 "❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
-            reported = True
         except Exception as e2:
-            msg = str(getattr(e2, 'message', None) or e2).lower()
-            if "query is too old" in msg or "message to edit not found" in msg:
-                try:
-                    await query.message.reply_text(
-                        "❌ Error formatting response. The summary was generated but couldn't be displayed properly.")
-                    reported = True
-                except Exception:
-                    pass
-            else:
-                logging.debug("Secondary error while reporting formatting error: %s", e2)
+            logging.debug("Secondary error while reporting formatting error: %s", e2)
 
         # Even if formatting failed, continue with TTS for audio summaries
         try:
             if isinstance(summary_type, str) and summary_type.startswith("audio"):
+                # Decide whether we will auto-run TTS or prompt provider
+                preselected = None
                 try:
-                    # Small status nudge for UX
-                    await query.message.reply_text("⏳ Summary generated. Starting TTS…")
+                    chat_id = query.message.chat.id if query.message else None
+                    message_id = query.message.message_id if query.message else None
+                    if chat_id and message_id:
+                        preselected = handler._get_tts_session(chat_id, message_id)
                 except Exception:
-                    pass
+                    preselected = None
+                if isinstance(preselected, dict) and preselected.get('auto_run'):
+                    try:
+                        await query.message.reply_text("⏳ Summary generated. Starting TTS…")
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await query.message.reply_text("⏳ Summary generated. Preparing TTS options…")
+                    except Exception:
+                        pass
                 await handler._prepare_tts_generation(query, result, summary, summary_type)
         except Exception as e3:
             logging.debug("Skipped TTS continuation after formatting error: %s", e3)
