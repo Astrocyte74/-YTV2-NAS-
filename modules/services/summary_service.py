@@ -739,6 +739,20 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
                 logging.info("[TTS-PREP] content preselect found=%s", bool(preselected))
         except Exception:
             pass
+    # One-line diagnostic of preselect content before branching
+    try:
+        if isinstance(preselected, dict):
+            logging.info(
+                "[TTS-PREP] preselected keys=%s auto_run=%s provider=%s",
+                list(preselected.keys()),
+                preselected.get('auto_run'),
+                preselected.get('provider'),
+            )
+        else:
+            logging.info("[TTS-PREP] preselected is not a dict (type=%s)", type(preselected).__name__)
+    except Exception:
+        pass
+
     if isinstance(preselected, dict) and preselected.get('auto_run'):
         provider = (preselected.get('provider') or '').strip().lower() or None
         sel = preselected.get('selected_voice') or {}

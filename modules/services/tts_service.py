@@ -158,6 +158,17 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             provider_key,
             session.get("title"),
         )
+        try:
+            logging.info(
+                "[TTS-BEFORE] provider=%s voice=%s engine=%s favorite=%s file=%s",
+                provider_key,
+                voice_id,
+                engine_id,
+                favorite_slug,
+                audio_filename,
+            )
+        except Exception:
+            pass
         audio_filepath = await handler.summarizer.generate_tts_audio(
             summary_text,
             audio_filename,
@@ -167,6 +178,10 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             engine=engine_id,
             favorite_slug=favorite_slug,
         )
+        try:
+            logging.info("[TTS-AFTER] provider=%s result=%s", provider_key, audio_filepath)
+        except Exception:
+            pass
         # Remember last-used favorite for quick pick
         try:
             alias_slug = None
