@@ -86,28 +86,33 @@ def _update_report_media_metadata(
         ingest_variants = data.get("summary_variants")
         if not isinstance(ingest_variants, list):
             ingest_variants = []
-        ingest_audio_entry = None
+        # Only include an 'audio' ingest variant when we actually have a playable URL.
+        # This prevents writing placeholder audio variants to Postgres that would
+        # cause the dashboard to show an audio icon without a backing file.
+        # Remove any pre-existing placeholder audio variant without audio_url.
+        filtered: list = []
+        existing_audio = None
         for entry in ingest_variants:
             if not isinstance(entry, dict):
                 continue
             variant_id = normalize_variant_id(entry.get("variant") or entry.get("summary_type") or entry.get("type"))
             if variant_id.startswith("audio"):
-                ingest_audio_entry = entry
-                break
-        if ingest_audio_entry is None:
-            ingest_audio_entry = {
-                "variant": "audio",
-                "kind": "audio",
-            }
+                existing_audio = entry
+                # Skip keeping this if it doesn't have an audio_url; we'll add a fresh
+                # one below only when audio_url is present.
+                continue
+            filtered.append(entry)
+        if audio_url:
+            audio_obj = existing_audio or {"variant": "audio", "kind": "audio"}
+            audio_obj["audio_url"] = audio_url
+            if isinstance(duration, int) and duration > 0:
+                audio_obj["duration"] = int(duration)
+            # Optionally propagate text for convenience
             text_value = summary_section.get("summary")
             if isinstance(text_value, str) and text_value.strip():
-                ingest_audio_entry["text"] = text_value.strip()
-            ingest_variants.append(ingest_audio_entry)
-        if audio_url:
-            ingest_audio_entry["audio_url"] = audio_url
-        if isinstance(duration, int) and duration > 0:
-            ingest_audio_entry["duration"] = int(duration)
-        data["summary_variants"] = ingest_variants
+                audio_obj.setdefault("text", text_value.strip())
+            filtered.append(audio_obj)
+        data["summary_variants"] = filtered
 
         if version is not None:
             data["audio_version"] = int(version)

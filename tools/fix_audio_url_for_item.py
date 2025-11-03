@@ -68,16 +68,16 @@ def main() -> int:
     params = []
 
     if url:
-        assignments.append("media = coalesce(media, '{}'::jsonb) || jsonb_build_object('has_audio', true, 'audio_url', %s)")
+        assignments.append("media = coalesce(media, '{}'::jsonb) || jsonb_build_object('has_audio', true, 'audio_url', %s::text)")
         params.append(url)
     else:
         assignments.append("media = coalesce(media, '{}'::jsonb) || jsonb_build_object('has_audio', true)")
 
     if isinstance(dur, int) and dur > 0:
-        assignments.append("media_metadata = coalesce(media_metadata, '{}'::jsonb) || jsonb_build_object('mp3_duration_seconds', %s)")
+        assignments.append("media_metadata = coalesce(media_metadata, '{}'::jsonb) || jsonb_build_object('mp3_duration_seconds', %s::int)")
         params.append(int(dur))
 
-    assignments.append("audio_version = %s")
+    assignments.append("audio_version = %s::int")
     params.append(version)
     assignments.append("has_audio = true")
 
