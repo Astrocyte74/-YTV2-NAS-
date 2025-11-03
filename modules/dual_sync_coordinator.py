@@ -278,17 +278,34 @@ class DualSyncCoordinator:
                         logger.warning(f"[SYNC] target=postgres video_id={raw_video_id} op=audio upload error={str(http_exc)[:120]}")
 
                     if http_audio_result:
-                        # Compute duration and canonical path
+                        # Compute duration and determine audio_url. Prefer server-returned path.
                         try:
                             from .report_generator import get_mp3_duration_seconds
                             duration = get_mp3_duration_seconds(str(audio_path))
                         except Exception:
                             duration = None
+                        audio_url = None
                         try:
-                            from .services.audio_path import build_audio_path
-                            audio_url = build_audio_path(content_data) or None
+                            # Server may return 'public_url', 'relative_path', or just 'filename'
+                            for k in ('public_url','relative_path','url','path','filename','file'):
+                                v = http_audio_result.get(k)
+                                if isinstance(v, str) and v:
+                                    audio_url = v
+                                    break
+                            if audio_url and audio_url.startswith('http'):
+                                from urllib.parse import urlparse
+                                p = urlparse(audio_url)
+                                audio_url = p.path
+                            if audio_url and '/' not in audio_url:
+                                audio_url = f"/exports/audio/{audio_url}"
                         except Exception:
                             audio_url = None
+                        if not audio_url:
+                            try:
+                                from .services.audio_path import build_audio_path
+                                audio_url = build_audio_path(content_data) or None
+                            except Exception:
+                                audio_url = None
 
                         media = {"has_audio": True}
                         if audio_url:
