@@ -760,9 +760,10 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
             f"Starting text-to-speech • {provider_label}{voice_hint}",
         ]
         try:
-            await _safe_edit_status(query, "\n".join(status_lines))
+            # Post as a new message so we never overwrite the summary
+            await query.message.reply_text("\n".join(status_lines), parse_mode=ParseMode.MARKDOWN)
         except Exception as exc:
-            logging.debug("Unable to update TTS status message: %s", exc)
+            logging.debug("Unable to post TTS status message: %s", exc)
 
         try:
             await handler._execute_tts_job(query, session_payload, provider)
