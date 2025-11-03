@@ -159,7 +159,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             session.get("title"),
         )
         try:
-            logging.info(
+            logging.warning(
                 "[TTS-BEFORE] provider=%s voice=%s engine=%s favorite=%s file=%s",
                 provider_key,
                 voice_id,
@@ -179,7 +179,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             favorite_slug=favorite_slug,
         )
         try:
-            logging.info("[TTS-AFTER] provider=%s result=%s", provider_key, audio_filepath)
+            logging.warning("[TTS-AFTER] provider=%s result=%s", provider_key, audio_filepath)
         except Exception:
             pass
         # Remember last-used favorite for quick pick
