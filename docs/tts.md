@@ -66,18 +66,21 @@
 - Local hub base URL: `TTSHUB_API_BASE` (required for `local` provider)
 - OpenAI key: `OPENAI_API_KEY` (required for `openai` provider)
 - Audio combos and quick picks (Telegram UI):
-  - `QUICK_LOCAL_MODEL` – default local LLM model (e.g., `gemma3:12b`)
+  - `QUICK_LOCAL_MODEL` – default local LLM model for audio (e.g., `gemma3:12b`)
   - `QUICK_CLOUD_MODEL` – default cloud LLM model (e.g., `google/gemini-2.5-flash-lite`); accepts a comma-separated list and uses the first available entry
   - `TTS_QUICK_FAVORITE` – comma‑separated local favorites to show as one‑tap quicks (e.g., `kokoro|favorite--bm-daniel,xtts|favorite--mkb-2`)
   - `TTS_CLOUD_VOICE` – default OpenAI voice for cloud combo/quick paths (e.g., `fable`)
+  - `LLM_AUTO_DEFAULT_SECONDS` – when > 0, auto‑selects the LLM on the audio path after N seconds (prefers QUICK_LOCAL_MODEL, then QUICK_CLOUD_MODEL)
+  - `TTS_AUTO_DEFAULT_SECONDS` – when > 0, auto‑selects TTS after N seconds (prefers first TTS_QUICK_FAVORITE, then TTS_CLOUD_VOICE)
+  - `TTS_FALLBACK_TO_OPENAI` – `1|true|yes` enables automatic switch to OpenAI if local TTS times out or is unavailable
+  - `SUMMARY_STATUS_INTERVAL` – seconds between summary status spinner updates prior to illustration (default 10)
 
 ### Audio Combos and Early TTS (Telegram)
 
-- Audio combos are one‑tap runs that choose both LLM + TTS:
-  - Local Combo → `QUICK_LOCAL_MODEL` + first item from `TTS_QUICK_FAVORITE`
-  - Cloud Combo → `QUICK_CLOUD_MODEL` + `TTS_CLOUD_VOICE`
-- When you choose “Other LLM from Cloud/Local” and select a model, the UI now prompts for TTS first (favorites surface immediately). After TTS selection, summary generation starts and TTS auto‑runs at completion.
-- The in‑progress status line shows the selected LLM and, when known, the TTS provider/voice.
+- Combos continue to use your defaults, but audio runs are now linear for reliability:
+  - Summary runs first (LLM may auto‑default with a visible countdown), then TTS prompt appears (with its own countdown auto‑default).
+  - This avoids stale Telegram callbacks and guarantees the same hub path as manual selection.
+- The in‑progress status shows LLM and, once TTS starts, provider/voice with chunk/combining/upload progress.
 - Dashboard sync (summary audio only):
   - `DATABASE_URL` – Postgres connection for direct upserts
   - `AUDIO_PUBLIC_BASE` – Base used to construct public audio URLs (e.g., `https://your-host` → `${AUDIO_PUBLIC_BASE}/exports/<file>.mp3`)
