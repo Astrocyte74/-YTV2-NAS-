@@ -3000,6 +3000,11 @@ Multiple Categories (when content genuinely spans areas):
     ) -> Optional[str]:
         """Generate TTS audio with support for local hub or OpenAI."""
         provider = (provider or "openai").lower()
+        try:
+            import logging as _logging
+            _logging.info("[TTS] enter generate_tts_audio provider=%s text_len=%d", provider, len(text or ""))
+        except Exception:
+            pass
 
         # Generate filename if not provided
         if not output_filename:
@@ -3031,6 +3036,11 @@ Multiple Categories (when content genuinely spans areas):
 
         should_chunk = len(text) > limit
         chunks = self._split_text_for_tts(text, max_chunk_chars=limit) if should_chunk else [text]
+        try:
+            import logging as _logging
+            _logging.info("[TTS] chunk decision provider=%s limit=%d chunks=%d", provider, limit, len(chunks))
+        except Exception:
+            pass
 
         async def _call_progress(event: dict):
             if not progress:
