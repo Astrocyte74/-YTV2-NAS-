@@ -191,6 +191,67 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
     if not handler.summarizer:
         handler.summarizer = YouTubeSummarizer()
 
+    # Progress hook declared before TTS start
+    async def _progress_hook(evt: Dict[str, Any]):
+        nonlocal progress_task
+        nonlocal status_msg
+        try:
+            stage = evt.get('stage')
+            # Disable periodic once we receive a fine-grained signal
+            if progress_task:
+                try:
+                    progress_task.cancel()
+                except Exception:
+                    pass
+                progress_task = None
+            # Ensure we have a status message to update; if not, create one now
+            if not status_msg:
+                try:
+                    bootstrap = "⏳ Generating TTS"
+                    status_msg = await query.message.reply_text(bootstrap, parse_mode=ParseMode.MARKDOWN)
+                except Exception:
+                    return
+            if stage == 'init':
+                await status_msg.edit_text(
+                    f"⏳ Generating TTS (preparing)"
+                    + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            elif stage == 'single_start':
+                await status_msg.edit_text(
+                        f"🎵 Generating TTS (single)"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            elif stage == 'chunk_start':
+                idx = evt.get('index')
+                total = evt.get('total')
+                await status_msg.edit_text(
+                        f"🎵 Generating TTS (chunk {idx}/{total})"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            elif stage == 'combining':
+                parts = evt.get('parts')
+                await status_msg.edit_text(
+                        f"🧩 Combining audio ({parts} part{'s' if parts and parts!=1 else ''})"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            elif stage == 'error':
+                await status_msg.edit_text(
+                    f"❌ TTS failed"
+                    + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        except Exception:
+            pass
+
     try:
         logging.info(
             "🧩 Starting TTS generation via %s | title=%s",
@@ -208,61 +269,10 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             )
         except Exception:
             pass
-        async def _progress_hook(evt: Dict[str, Any]):
-            nonlocal progress_task
-            try:
-                stage = evt.get('stage')
-                # Disable periodic once we receive a fine-grained signal
-                if progress_task:
-                    try:
-                        progress_task.cancel()
-                    except Exception:
-                        pass
-                    progress_task = None
-                if not status_msg:
-                    return
-                if stage == 'init':
-                    await status_msg.edit_text(
-                        f"⏳ Generating TTS (preparing)"
-                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
-                        + f" • {provider_label}",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                elif stage == 'single_start':
-                    await status_msg.edit_text(
-                        f"🎵 Generating TTS (single)"
-                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
-                        + f" • {provider_label}",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                elif stage == 'chunk_start':
-                    idx = evt.get('index')
-                    total = evt.get('total')
-                    await status_msg.edit_text(
-                        f"🎵 Generating TTS (chunk {idx}/{total})"
-                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
-                        + f" • {provider_label}",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                elif stage == 'combining':
-                    parts = evt.get('parts')
-                    await status_msg.edit_text(
-                        f"🧩 Combining audio ({parts} part{'s' if parts and parts!=1 else ''})"
-                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
-                        + f" • {provider_label}",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-                elif stage == 'error':
-                    await status_msg.edit_text(
-                        f"❌ TTS failed"
-                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
-                        + f" • {provider_label}",
-                        parse_mode=ParseMode.MARKDOWN,
-                    )
-            except Exception:
-                pass
-
-        audio_filepath = await handler.summarizer.generate_tts_audio(
+        # Enforce a timeout for TTS synthesis to avoid indefinite hangs
+        import asyncio as _asyncio
+        tts_timeout = int(os.getenv('TTS_TIMEOUT_SECONDS', '180'))
+        audio_filepath = await _asyncio.wait_for(handler.summarizer.generate_tts_audio(
             summary_text,
             audio_filename,
             json_placeholder,
@@ -271,7 +281,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             engine=engine_id,
             favorite_slug=favorite_slug,
             progress=_progress_hook,
-        )
+        ), timeout=tts_timeout)
         try:
             logging.warning("[TTS-AFTER] provider=%s result=%s", provider_key, audio_filepath)
         except Exception:
@@ -287,6 +297,15 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
                 handler._remember_last_tts_voice(query.from_user.id, alias_slug)
         except Exception:
             pass
+    except _asyncio.TimeoutError:
+        logging.error("TTS synthesis timed out after %ss", os.getenv('TTS_TIMEOUT_SECONDS', '180'))
+        await query.answer("TTS timed out", show_alert=True)
+        await _update_status(
+            f"❌ TTS timed out"
+            + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+            + f" • {provider_label}"
+        )
+        return
     except LocalTTSUnavailable as exc:
         logging.warning("Local TTS unavailable during execution: %s", exc)
         await handle_local_unavailable(handler, query, session, message=str(exc))
