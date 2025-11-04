@@ -190,7 +190,12 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
     voice_id = selected_voice.get("voice_id")
     engine_id = selected_voice.get("engine")
 
-    await query.answer(f"Generating audio via {provider_key.title()}…")
+    # Best-effort: answering very old callback queries may raise 400 "query is too old".
+    try:
+        await query.answer(f"Generating audio via {provider_key.title()}…")
+    except Exception:
+        # Non-fatal; continue status via separate messages
+        pass
     provider_label = "Local TTS hub" if provider_key == "local" else "OpenAI TTS"
 
     voice_label = session.get("last_voice") or ""
