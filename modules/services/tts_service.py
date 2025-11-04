@@ -114,30 +114,43 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
             sess['selected_voice'] = selected_voice or {}
             sess['auto_run'] = True
             handler._store_tts_session(chat_id, message_id, sess)
-            # Update the selection message to indicate TTS is starting and remove keyboard
+            # Drive the same code path as manual selection to avoid timing pitfalls
             try:
-                provider_label = 'Local TTS hub' if default_provider == 'local' else 'OpenAI TTS'
-                voice_label = ''
+                # Build a tts_voice payload matching manual clicks
+                payload = None
+                if default_provider == 'local' and selected_voice and selected_voice.get('favorite_slug') and selected_voice.get('engine'):
+                    payload = f"fav|{selected_voice.get('engine')}|{selected_voice.get('favorite_slug')}"
+                elif selected_voice and selected_voice.get('voice_id'):
+                    payload = f"cat|{selected_voice.get('voice_id')}"
+                if payload:
+                    from modules.services import tts_service as _tts
+                    await _tts.handle_callback(handler, query, f"tts_voice:{payload}")
+                    return
+            except Exception:
+                # Fallback: directly start TTS if callback emulation fails
                 try:
-                    if selected_voice and selected_voice.get('favorite_slug') and selected_voice.get('engine'):
-                        voice_label = f" • {selected_voice.get('engine')}:{selected_voice.get('favorite_slug')}"
-                    elif selected_voice and selected_voice.get('voice_id'):
-                        voice_label = f" • {selected_voice.get('voice_id')}"
+                    provider_label = 'Local TTS hub' if default_provider == 'local' else 'OpenAI TTS'
+                    voice_label = ''
+                    try:
+                        if selected_voice and selected_voice.get('favorite_slug') and selected_voice.get('engine'):
+                            voice_label = f" • {selected_voice.get('engine')}:{selected_voice.get('favorite_slug')}"
+                        elif selected_voice and selected_voice.get('voice_id'):
+                            voice_label = f" • {selected_voice.get('voice_id')}"
+                    except Exception:
+                        pass
+                    await handler.application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=f"🎙️ Starting text-to-speech • {provider_label}{voice_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=None,
+                    )
                 except Exception:
                     pass
-                await handler.application.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=f"🎙️ Starting text-to-speech • {provider_label}{voice_label}",
-                    parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=None,
-                )
-            except Exception:
-                pass
-            try:
-                await handler._execute_tts_job(query, sess, default_provider)
-            except Exception:
-                pass
+                try:
+                    await handler._execute_tts_job(query, sess, default_provider)
+                except Exception:
+                    pass
         _asyncio.create_task(_auto_default())
     except Exception:
         pass
