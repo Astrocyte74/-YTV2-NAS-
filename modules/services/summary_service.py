@@ -622,8 +622,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             except Exception as exc:
                 logging.debug("Failed to send summary image to Telegram: %s", exc)
 
-        if summary_type.startswith("audio"):
-            await handler._prepare_tts_generation(query, result, summary, summary_type)
+        # TTS handoff occurs after this try/except to avoid duplicate starts if UI raises
 
     except Exception as exc:
         logging.error("Error sending formatted response: %s", exc)
@@ -634,31 +633,14 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
         except Exception as e2:
             logging.debug("Secondary error while reporting formatting error: %s", e2)
 
-        # Even if formatting failed, continue with TTS for audio summaries
-        try:
-            if isinstance(summary_type, str) and summary_type.startswith("audio"):
-                # Decide whether we will auto-run TTS or prompt provider
-                preselected = None
-                try:
-                    chat_id = query.message.chat.id if query.message else None
-                    message_id = query.message.message_id if query.message else None
-                    if chat_id and message_id:
-                        preselected = handler._get_tts_session(chat_id, message_id)
-                except Exception:
-                    preselected = None
-                if isinstance(preselected, dict) and preselected.get('auto_run'):
-                    try:
-                        await query.message.reply_text("⏳ Summary generated. Starting TTS…")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        await query.message.reply_text("⏳ Summary generated. Preparing TTS options…")
-                    except Exception:
-                        pass
-                await handler._prepare_tts_generation(query, result, summary, summary_type)
-        except Exception as e3:
-            logging.debug("Skipped TTS continuation after formatting error: %s", e3)
+        # (No TTS handoff here; see below)
+
+    # Start TTS once, regardless of UI success/failure
+    try:
+        if isinstance(summary_type, str) and summary_type.startswith("audio"):
+            await handler._prepare_tts_generation(query, result, summary, summary_type)
+    except Exception as e3:
+        logging.debug("TTS handoff error after formatted response: %s", e3)
 
 
 async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary_text: str, summary_type: str) -> None:
@@ -1035,7 +1017,7 @@ async def process_content_summary(
         default_prefix = prefix_map.get(source, "🔄")
         message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
 
-    # Enrich the status with chosen LLM (always); include TTS if preselected for audio
+    # Enrich the status with chosen LLM; do not pre-announce TTS here to avoid duplicate lines
     try:
         chat_id = query.message.chat.id if query.message else None
         message_id = query.message.message_id if query.message else None
@@ -1051,7 +1033,7 @@ async def process_content_summary(
     extra_lines = []
     if llm_label:
         extra_lines.append(f"LLM: {llm_label}")
-    # TTS line (audio only)
+    # TTS line (audio only) — show only if a preselect exists, but avoid 'Starting…' here
     if base_type.startswith("audio") and isinstance(preselected, dict):
         tts_provider = (preselected.get('provider') or '').lower()
         sel = preselected.get('selected_voice') or {}
