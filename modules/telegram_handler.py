@@ -1303,6 +1303,37 @@ class YouTubeTelegramBot:
             if session and (session.get("active") or session.get("mode") == "ai-ai"):
                 await self._ollama_handle_user_text(update, session, message_text)
                 return
+            # Early dashboard storage gate (optional; only when token + base present)
+            try:
+                base = (os.getenv('RENDER_DASHBOARD_URL') or os.getenv('RENDER_API_URL') or '').strip().rstrip('/')
+                tok = (os.getenv('DASHBOARD_DEBUG_TOKEN') or '').strip()
+                if base and tok and requests:
+                    hr = requests.get(
+                        f"{base}/api/health/storage",
+                        headers={"Authorization": f"Bearer {tok}"},
+                        timeout=float(os.getenv('STATUS_API_PROBE_TIMEOUT', '6')),
+                    )
+                    if hr.ok and hr.headers.get('content-type','').startswith('application/json'):
+                        used_pct = int((hr.json() or {}).get('used_pct') or 0)
+                        # Informational thresholds
+                        if used_pct >= 99:
+                            await update.message.reply_text(
+                                "🚫 Storage is critically full on the dashboard (≥99%). "
+                                "Pausing new processing until space is freed. Try again soon."
+                            )
+                            return
+                        elif used_pct >= 95:
+                            await update.message.reply_text(
+                                f"⚠️ Storage very high on dashboard (~{used_pct}%). "
+                                "Uploads may be throttled or delayed."
+                            )
+                        elif used_pct >= 90:
+                            await update.message.reply_text(
+                                f"⚠️ Heads up: dashboard storage at ~{used_pct}%."
+                            )
+            except Exception:
+                # Never block on probe errors
+                pass
         logging.info(f"Received message from {user_name} ({user_id}): {message_text[:100]}...")
         
         # Check for YouTube links first (primary flow)
