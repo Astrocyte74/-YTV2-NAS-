@@ -90,36 +90,56 @@ def format_summary_html(text: str) -> str:
     normalized = re.sub(r"^```.*$", "", normalized, flags=re.MULTILINE)
     normalized = normalized.replace("```", "")
 
-    blocks = [block.strip() for block in re.split(r"\n\s*\n", normalized) if block.strip()]
-    html_blocks: List[str] = []
+    out: List[str] = []
+    in_list = False
 
-    for block in blocks:
-        lines = [line.strip() for line in block.split("\n") if line.strip()]
-        # Heading block: a single line ending with ':' (short, human heading)
-        if len(lines) == 1 and re.match(r"^[A-Za-z][\w \-/]{1,60}:$", lines[0]):
-            heading = lines[0][:-1].strip()
-            html_blocks.append(f"<h3 class=\"kp-heading\">{html.escape(heading)}</h3>")
+    def flush_list():
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    heading_re = re.compile(r"^[A-Za-z][\w \-/]{1,60}:$")
+    bottom_re = re.compile(r"^bottom\s+line:\s*(.*)$", flags=re.IGNORECASE)
+
+    for raw in normalized.splitlines():
+        line = raw.strip()
+        if not line:
+            flush_list()
             continue
 
-        # Bottom line detection (case-insensitive)
-        if len(lines) == 1 and re.match(r"^(?i)bottom\s+line:\s*", lines[0]):
-            rest = re.sub(r"^(?i)bottom\s+line:\s*", "", lines[0]).strip()
+        # Heading line
+        if heading_re.match(line):
+            flush_list()
+            heading = line[:-1].strip()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(heading)}</h3>")
+            continue
+
+        # Bottom line
+        m = bottom_re.match(line)
+        if m:
+            flush_list()
+            rest = (m.group(1) or "").strip()
             label = "Bottom line:"
             content = f"<strong>{html.escape(label)}</strong> {html.escape(rest)}" if rest else f"<strong>{html.escape(label)}</strong>"
-            html_blocks.append(f"<p class=\"kp-takeaway\">{content}</p>")
+            out.append(f"<p class=\"kp-takeaway\">{content}</p>")
             continue
 
-        # Bulleted list block
-        if lines and all(re.match(r"^[\-*•]", line) for line in lines):
-            items = []
-            for line in lines:
-                cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
-                items.append(f"<li>{html.escape(cleaned)}</li>")
-            html_blocks.append(f"<ul class=\"kp-list\">{''.join(items)}</ul>")
-        else:
-            html_blocks.append(f"<p>{html.escape(block)}</p>")
+        # Bullet line
+        if re.match(r"^[\-*•]", line):
+            if not in_list:
+                out.append("<ul class=\"kp-list\">")
+                in_list = True
+            cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
+            out.append(f"<li>{html.escape(cleaned)}</li>")
+            continue
 
-    return "\n".join(html_blocks)
+        # Paragraph
+        flush_list()
+        out.append(f"<p>{html.escape(line)}</p>")
+
+    flush_list()
+    return "\n".join(out)
 
 
 def _clone_variant_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
