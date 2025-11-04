@@ -2999,9 +2999,26 @@ Multiple Categories (when content genuinely spans areas):
         exports_dir.mkdir(exist_ok=True)
         output_path = exports_dir / output_filename
 
-        # Determine whether chunking is required (OpenAI limit ~4096 chars)
-        should_chunk = len(text) > 4090
-        chunks = self._split_text_for_tts(text) if should_chunk else [text]
+        # Determine whether chunking is required (provider-aware)
+        # OpenAI typically needs ~4090 char chunks; local hubs may benefit from smaller chunks.
+        local_chunk_chars = None
+        try:
+            local_chunk_chars = int(os.getenv('TTS_LOCAL_CHUNK_CHARS', '1800'))
+        except Exception:
+            local_chunk_chars = 1800
+        openai_chunk_chars = None
+        try:
+            openai_chunk_chars = int(os.getenv('TTS_OPENAI_CHUNK_CHARS', '4090'))
+        except Exception:
+            openai_chunk_chars = 4090
+
+        if provider == 'local':
+            limit = max(500, local_chunk_chars or 1800)
+        else:
+            limit = max(1000, openai_chunk_chars or 4090)
+
+        should_chunk = len(text) > limit
+        chunks = self._split_text_for_tts(text, max_chunk_chars=limit) if should_chunk else [text]
 
         async def _call_progress(event: dict):
             if not progress:
