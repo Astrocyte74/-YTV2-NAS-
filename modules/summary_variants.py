@@ -92,6 +92,7 @@ def format_summary_html(text: str) -> str:
 
     out: List[str] = []
     in_list = False
+    pending_heading: Optional[str] = None
 
     def flush_list():
         nonlocal in_list
@@ -106,13 +107,15 @@ def format_summary_html(text: str) -> str:
         line = raw.strip()
         if not line:
             flush_list()
+            # Keep pending_heading across blank lines
             continue
 
-        # Heading line
+        # Heading line with colon
         if heading_re.match(line):
             flush_list()
             heading = line[:-1].strip()
             out.append(f"<h3 class=\"kp-heading\">{html.escape(heading)}</h3>")
+            pending_heading = None
             continue
 
         # Bottom line
@@ -125,6 +128,12 @@ def format_summary_html(text: str) -> str:
             out.append(f"<p class=\"kp-takeaway\">{content}</p>")
             continue
 
+        # If we have a pending heading and now see bullets, emit heading
+        if pending_heading and re.match(r"^[\-*•]", line):
+            flush_list()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(pending_heading)}</h3>")
+            pending_heading = None
+
         # Bullet line
         if re.match(r"^[\-*•]", line):
             if not in_list:
@@ -134,11 +143,29 @@ def format_summary_html(text: str) -> str:
             out.append(f"<li>{html.escape(cleaned)}</li>")
             continue
 
-        # Paragraph
+        # Potential heading without colon: short line, next block is a list (handled above)
+        if len(line) <= 60 and not re.search(r"[.!?]$", line) and not re.match(r"^[a-z]", line):
+            # Defer decision until we know what follows
+            # If another non-bullet line comes next, we'll emit as paragraph then
+            if pending_heading:
+                # Previous pending wasn't followed by bullets; emit as paragraph
+                flush_list()
+                out.append(f"<p>{html.escape(pending_heading)}</p>")
+            pending_heading = line
+            continue
+
+        # Paragraph (and flush any pending heading as paragraph)
+        if pending_heading:
+            flush_list()
+            out.append(f"<p>{html.escape(pending_heading)}</p>")
+            pending_heading = None
         flush_list()
         out.append(f"<p>{html.escape(line)}</p>")
 
     flush_list()
+    # If file ended with a pending non-bullet heading, emit as paragraph
+    if pending_heading:
+        out.append(f"<p>{html.escape(pending_heading)}</p>")
     return "\n".join(out)
 
 

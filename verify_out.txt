@@ -1,0 +1,48 @@
+✅ youtube-transcript-api loaded successfully
+🧠 Ollama base: http://10.0.4.2:7860/api/ollama
+🧠 Using unified local client (hub/direct); skipping ChatOllama init
+📄 Processing transcript directly (400 chars)
+🔄 Summary generation (bullet-points) attempt 1/3
+🔄 Headline generation attempt 1/3
+📝 Generated Headline: Alphafly 3 Dominated Sydney Marathon 2025, Reviewing Performance and Footwear Choices.
+Analyzing content...
+🔄 Content analysis attempt 1/3
+🤖 Raw AI JSON Response:
+   ```json
+{
+  "categories": [
+    {
+      "category": "Sports",
+      "subcategories": ["Game Analysis"]
+    },
+    {
+      "category": "Reviews & Products",
+      "subcategories": ["Product Reviews"]
+    },
+    {
+      "category": "Technology",
+      "subcategories": ["Tech Reviews & Comparisons"]
+    }
+  ],
+  "languages": {
+    "video_language": "en",
+    "summary_language": "en"
+  },
+  "content_type": "Review",
+  "complexity_level": "Beginner",
+  "key_topics": ["running-shoes", "marathon", "performance-analysis", "super-shoes"],
+  "named_entities": ["Alphafly 3", "Vaporfly 4", "Asics MetaSpeed Sky", "Sydney Marathon"]
+}
+```
+🎯 AI Analysis Results:
+   Categories: ['Sports', 'Reviews & Products', 'Technology']
+   Per-category subcats: {'Sports': ['Game Analysis'], 'Reviews & Products': ['Product Reviews'], 'Technology': ['Tech Reviews & Comparisons']}
+   Content Type: Review
+   Complexity: Beginner
+   Schema Version: 2
+TYPE: <class 'dict'>
+--- SUMMARY TEXT ---
+{'summary': "- This video reviews super-shoe performance at the Sydney Marathon 2025.\n- The video reviews super-shoe performance.\n• The video focuses on the Sydney Marathon 2025.\n• Alphafly 3 dominated the Sydney Marathon 2025.\n• Vaporfly 4 reached the podium at the Sydney Marathon 2025.\n• Asics MetaSpeed Sky Tokyo won the men's race at the Sydney Marathon 2025.\n• The course is scenic.\n• The course is twisty.\n• The course is hilly.\n• The course is not considered fast.\n• MetaSpeed Ray compliance begins on September 11, 2025.\n• The video compares course characteristics and footwear choices.\n• Concrete brand mentions and specific models are included in the review.\n• Alphafly 3’s performance contrasted with other models.\n• The video upload date is 20251104.\n• The video duration is 300 seconds.\nBottom line: The video summarizes super-shoe performance at the Sydney Marathon 2025, highlighting specific models and their results.", 'headline': 'Alphafly 3 Dominated Sydney Marathon 2025, Reviewing Performance and Footwear Choices.', 'summary_type': 'bullet-points', 'generated_at': '2025-11-04T22:58:03.632629', 'language': 'en'}
+
+--- FORMATTED HTML ---
+

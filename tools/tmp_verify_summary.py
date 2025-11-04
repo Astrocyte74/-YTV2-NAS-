@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 import os
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 import asyncio
 from youtube_summarizer import YouTubeSummarizer
 from modules.summary_variants import format_summary_html
@@ -17,7 +22,11 @@ async def main():
     )
     meta = {"title":"Test Summary","uploader":"Tester","url":"http://example.com","duration":300,"language":"en"}
     res = await y.process_text_content(content_id='TEST_FORMAT_CHECK', text=text, metadata=meta, summary_type='bullet-points')
-    summary_text = (res.get('summary') if isinstance(res, dict) else str(res)) or ''
+    print('TYPE:', type(res))
+    if isinstance(res, dict):
+        summary_text = (res.get('summary') or '')
+    else:
+        summary_text = str(res)
     print('--- SUMMARY TEXT ---')
     print(summary_text)
     print('\n--- FORMATTED HTML ---')
@@ -25,4 +34,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
