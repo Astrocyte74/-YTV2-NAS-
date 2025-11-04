@@ -3279,12 +3279,8 @@ class YouTubeTelegramBot:
             return
 
         selected_model = model_options[index]
-        # For audio variants, prompt TTS preselection before starting summary
-        summary_type = session.get("summary_type") or ""
-        if isinstance(summary_type, str) and summary_type.startswith("audio"):
-            await self._start_tts_preselect_flow(query, session, provider_key, selected_model)
-        else:
-            await self._execute_summary_with_model(query, session, provider_key, selected_model)
+        # Linear flow: run summary first; TTS selection happens after summary
+        await self._execute_summary_with_model(query, session, provider_key, selected_model)
 
     async def _handle_summary_model_back(self, query) -> None:
         chat_id = query.message.chat.id
@@ -4427,12 +4423,8 @@ class YouTubeTelegramBot:
                 self._remember_last_model(user_id, provider_key, model_option.get("model"))
             except Exception:
                 pass
-            # Early TTS only for audio variants; otherwise run summary directly
-            summary_type = (session.get("summary_type") or "").strip().lower()
-            if summary_type.startswith("audio"):
-                await self._start_tts_preselect_flow(query, session, provider_key, model_option)
-            else:
-                await self._execute_summary_with_model(query, session, provider_key, model_option)
+            # Linear flow: always run summary first; TTS selection occurs after summary
+            await self._execute_summary_with_model(query, session, provider_key, model_option)
             return
         elif callback_data.startswith("summary_combo:"):
             # One-tap combo: derive model + TTS from env quicks and auto-run end-to-end
@@ -4463,12 +4455,7 @@ class YouTubeTelegramBot:
                     }
                     # Preselect OpenAI TTS voice from env (default: fable)
                     cloud_voice = (os.getenv("TTS_CLOUD_VOICE") or "fable").strip()
-                    preselected = {
-                        'auto_run': True,
-                        'provider': 'openai',
-                        'selected_voice': {'favorite_slug': None, 'voice_id': cloud_voice, 'engine': None},
-                    }
-                    self._store_tts_session(chat_id, message_id, preselected)
+                    # Do not preselect TTS here; keep linear flow
                     await self._execute_summary_with_model(query, session, "cloud", model_option)
                     return
                 elif combo_kind == "local":
@@ -4493,22 +4480,7 @@ class YouTubeTelegramBot:
                             if "|" in token:
                                 eng, slug = token.split("|", 1)
                                 selected_voice = {'favorite_slug': slug.strip(), 'voice_id': None, 'engine': eng.strip()}
-                    preselected = {
-                        'auto_run': True,
-                        'provider': 'local',
-                        'selected_voice': selected_voice or {},
-                    }
-                    self._store_tts_session(chat_id, message_id, preselected)
-                    logging.info("[TTS-COMBO] Stored message-anchored preselect for local combo: chat=%s msg=%s", chat_id, message_id)
-                    # Also anchor by content so downstream can recover preselect if message key changes
-                    try:
-                        content_id = (self.current_item or {}).get('content_id')
-                        normalized_id = self._normalize_content_id(content_id) if content_id else None
-                        if normalized_id:
-                            self._store_content_tts_preselect(normalized_id, preselected)
-                            logging.info("[TTS-COMBO] Stored content-anchored preselect: video_id=%s", normalized_id)
-                    except Exception:
-                        pass
+                    # Do not preselect TTS here; keep linear flow
                     await self._execute_summary_with_model(query, session, "ollama", model_option)
                     return
                 else:
