@@ -114,6 +114,26 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
             sess['selected_voice'] = selected_voice or {}
             sess['auto_run'] = True
             handler._store_tts_session(chat_id, message_id, sess)
+            # Update the selection message to indicate TTS is starting and remove keyboard
+            try:
+                provider_label = 'Local TTS hub' if default_provider == 'local' else 'OpenAI TTS'
+                voice_label = ''
+                try:
+                    if selected_voice and selected_voice.get('favorite_slug') and selected_voice.get('engine'):
+                        voice_label = f" • {selected_voice.get('engine')}:{selected_voice.get('favorite_slug')}"
+                    elif selected_voice and selected_voice.get('voice_id'):
+                        voice_label = f" • {selected_voice.get('voice_id')}"
+                except Exception:
+                    pass
+                await handler.application.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=f"🎙️ Starting text-to-speech • {provider_label}{voice_label}",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=None,
+                )
+            except Exception:
+                pass
             try:
                 await handler._execute_tts_job(query, sess, default_provider)
             except Exception:
@@ -792,6 +812,18 @@ async def handle_callback(handler, query, callback_data: str) -> None:
         voice_id,
         engine_id,
     )
+
+    # Update the selection message to indicate TTS is starting and remove keyboard
+    try:
+        provider_label = 'Local TTS hub' if provider_choice == 'local' else 'OpenAI TTS'
+        starting_text = (
+            f"🎙️ Starting text-to-speech"
+            + (f" • {handler._escape_markdown(session.get('last_voice',''))}" if session.get('last_voice') else '')
+            + f" • {provider_label}"
+        )
+        await query.edit_message_text(starting_text, parse_mode=ParseMode.MARKDOWN, reply_markup=None)
+    except Exception:
+        pass
 
     if session.get('preselect_only'):
         # Store selection and kick off pending summary; do not synthesize yet
