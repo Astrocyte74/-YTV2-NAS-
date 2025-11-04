@@ -3243,6 +3243,13 @@ class YouTubeTelegramBot:
             await self._show_main_summary_options(query)
             return
 
+        # UX: reflect the chosen LLM/model immediately so the menu "updates"
+        try:
+            chosen_label = provider_label or f"{model_option.get('provider','').title()}"
+            await query.edit_message_text(f"🧠 Using {self._escape_markdown(chosen_label)}… Starting summary…", parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
         await self._process_content_summary(
             query,
             summary_type,

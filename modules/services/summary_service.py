@@ -713,14 +713,22 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         # Fallback: find any auto-run TTS session anchored to this chat that matches the summary type
         if not preselected and chat_id is not None:
             try:
+                base_target = (summary_type or '').split(':', 1)[0]
                 for (c_id, m_id), sess in list(getattr(handler, 'tts_sessions', {}).items()):
                     if c_id != chat_id or not isinstance(sess, dict):
                         continue
                     if not sess.get('auto_run'):
                         continue
-                    st = sess.get('summary_type')
-                    if not st or st == summary_type:
+                    st = (sess.get('summary_type') or '')
+                    st_base = st.split(':', 1)[0] if isinstance(st, str) else ''
+                    if not st or st == summary_type or st_base == base_target:
                         preselected = sess
+                        # Also promote to content-anchored for robustness
+                        try:
+                            if normalized_video_id and hasattr(handler, '_store_content_tts_preselect'):
+                                handler._store_content_tts_preselect(normalized_video_id, preselected)
+                        except Exception:
+                            pass
                         break
             except Exception:
                 pass

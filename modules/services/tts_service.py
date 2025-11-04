@@ -669,6 +669,14 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
     except Exception:
         pass
 
+    # Once delivery succeeds, clear any content-anchored preselect for this item
+    try:
+        if normalized_video_id and hasattr(handler, '_remove_content_tts_preselect'):
+            handler._remove_content_tts_preselect(normalized_video_id)
+            logging.info("[TTS] Cleared content-anchored preselect for %s after delivery", normalized_video_id)
+    except Exception:
+        pass
+
 
 async def prepare_generation(handler, query, result: Dict[str, Any], summary_text: str, summary_type: str) -> None:
     video_info = result.get('metadata', {})
