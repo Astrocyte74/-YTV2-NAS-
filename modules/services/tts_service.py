@@ -67,14 +67,60 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows),
         )
-        handler._store_tts_session(query.message.chat_id, query.message.message_id, session_payload)
+        chat_id, message_id = query.message.chat_id, query.message.message_id
+        handler._store_tts_session(chat_id, message_id, session_payload)
     else:
         prompt_message = await query.message.reply_text(
             prompt_text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=InlineKeyboardMarkup(rows),
         )
-        handler._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
+        chat_id, message_id = prompt_message.chat_id, prompt_message.message_id
+        handler._store_tts_session(chat_id, message_id, session_payload)
+
+    # Auto-default after a short delay if user does not select a voice/provider.
+    try:
+        import asyncio as _asyncio
+        auto_delay = int(os.getenv('TTS_AUTO_DEFAULT_SECONDS', '5'))
+        async def _auto_default():
+            try:
+                await _asyncio.sleep(auto_delay)
+            except Exception:
+                return
+            sess = handler._get_tts_session(chat_id, message_id)
+            if not isinstance(sess, dict):
+                return
+            # If user already interacted, skip
+            if sess.get('selected_voice') or sess.get('provider') or sess.get('auto_run'):
+                return
+            # Choose defaults: prefer local favorite from TTS_QUICK_FAVORITE, else OpenAI voice
+            default_provider = 'local'
+            selected_voice = None
+            fav_env = (os.getenv('TTS_QUICK_FAVORITE') or '').strip()
+            if fav_env:
+                first = [s.strip() for s in fav_env.split(',') if s.strip()]
+                if first:
+                    token = first[0]
+                    if '|' in token:
+                        eng, slug = token.split('|', 1)
+                        selected_voice = {'favorite_slug': slug.strip(), 'voice_id': None, 'engine': eng.strip()}
+            # If no local base configured, fall back to OpenAI
+            client = handler._resolve_tts_client(sess.get('tts_base'))
+            if not (client and client.base_api_url and selected_voice):
+                default_provider = 'openai'
+                cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+                selected_voice = {'favorite_slug': None, 'voice_id': cloud_voice, 'engine': None}
+            sess['provider'] = default_provider
+            sess['selected_voice'] = selected_voice or {}
+            sess['auto_run'] = True
+            handler._store_tts_session(chat_id, message_id, sess)
+            try:
+                await handler._execute_tts_job(query, sess, default_provider)
+            except Exception:
+                pass
+        _asyncio.create_task(_auto_default())
+    except Exception:
+        pass
 
 
 async def handle_local_unavailable(handler, query, session: Dict[str, Any], message: str = "") -> None:
