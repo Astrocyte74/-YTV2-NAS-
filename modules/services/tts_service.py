@@ -141,6 +141,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             voice_label = ""
 
     status_msg = None
+    progress_task = None
     try:
         status_text = (
             f"⏳ Generating TTS"
@@ -158,6 +159,32 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             await status_msg.edit_text(message, parse_mode=ParseMode.MARKDOWN)
         except Exception:
             pass
+
+    # Optional: background progress pings while TTS runs
+    if status_msg:
+        try:
+            import asyncio as _asyncio
+            start_ts = time.monotonic()
+            async def _progress_updater():
+                idx = 0
+                symbols = ['⏳','⌛']
+                while True:
+                    await _asyncio.sleep(10)
+                    elapsed = int(time.monotonic() - start_ts)
+                    sym = symbols[idx % len(symbols)]
+                    idx += 1
+                    try:
+                        await status_msg.edit_text(
+                            f"{sym} Generating TTS ({elapsed}s)"
+                            + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                            + f" • {provider_label}",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    except Exception:
+                        break
+            progress_task = _asyncio.create_task(_progress_updater())
+        except Exception:
+            progress_task = None
 
     if not handler.summarizer:
         handler.summarizer = YouTubeSummarizer()
@@ -245,6 +272,12 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
+    finally:
+        try:
+            if progress_task:
+                progress_task.cancel()
+        except Exception:
+            pass
 
 
 async def handle_callback(handler, query, callback_data: str) -> None:
