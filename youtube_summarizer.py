@@ -110,6 +110,18 @@ class YouTubeSummarizer:
         # Lazy-initialized local TTS hub client
         self._tts_hub_client: Optional[TTSHubClient] = None
 
+        # Optional status callback for UI progress (set by caller)
+        self.status_callback = None  # type: ignore[attr-defined]
+
+    def _notify_status(self, message: str) -> None:
+        """Notify external status callback if configured (non-blocking)."""
+        try:
+            cb = getattr(self, "status_callback", None)
+            if callable(cb) and isinstance(message, str) and message.strip():
+                cb(message.strip())
+        except Exception:
+            pass
+
     def _apply_ytdlp_env(self, ydl_opts: dict) -> None:
         """Apply environment-driven tweaks to yt-dlp options.
 
@@ -323,6 +335,10 @@ class YouTubeSummarizer:
             summary_language = transcript_language
 
         print("Analyzing content...")
+        try:
+            self._notify_status("🔎 Analyzing content & categorizing…")
+        except Exception:
+            pass
         if isinstance(summary_data, dict):
             summary_text = summary_data.get("summary", "") or ""
             if not summary_text:
@@ -1283,6 +1299,10 @@ class YouTubeSummarizer:
         
         # For shorter transcripts, use direct processing
         print(f"📄 Processing transcript directly ({len(transcript):,} chars)")
+        try:
+            self._notify_status("📝 Drafting audio summary text…")
+        except Exception:
+            pass
         
         # Normalize summary_type to canonical keys for robust matching
         TYPE_MAP = {
@@ -1315,6 +1335,10 @@ class YouTubeSummarizer:
             
             # Then translate/adapt with vocabulary support
             target_lang = "French" if normalized_type == "audio_fr" else "Spanish"
+            try:
+                self._notify_status(f"🌐 Translating to {target_lang}…")
+            except Exception:
+                pass
             final_audio_text = await self._create_translated_audio_summary(
                 base_audio_text, target_lang, proficiency_level
             )

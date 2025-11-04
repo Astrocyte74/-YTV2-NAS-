@@ -1109,6 +1109,20 @@ async def process_content_summary(
                 logging.info("🔄 Content exists but not marked synced - processing fresh")
 
         logging.info("🎬 PROCESSING: %s | %s | user: %s | URL: %s", display_id, summary_type, user_name, url)
+        # Hook summarizer status to Telegram status updates
+        try:
+            import asyncio as _asyncio
+            def _cb(msg: str) -> None:
+                try:
+                    _asyncio.get_running_loop().create_task(_safe_edit_status(query, msg))
+                except Exception:
+                    pass
+            try:
+                setattr(summarizer, 'status_callback', _cb)
+            except Exception:
+                pass
+        except Exception:
+            pass
         llm_provider = getattr(summarizer, "llm_provider", "unknown")
         llm_model = getattr(summarizer, "model", "unknown")
         llm_label = provider_label or f"{llm_provider}/{llm_model}"
@@ -1324,6 +1338,12 @@ async def process_content_summary(
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)
         await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
+    finally:
+        # Detach status callback to avoid cross-talk with future runs
+        try:
+            setattr(summarizer, 'status_callback', None)
+        except Exception:
+            pass
 
 
 async def _handle_local_summary_unavailable(
