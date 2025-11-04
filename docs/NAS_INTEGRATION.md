@@ -1,43 +1,49 @@
-# NAS ↔ Render Integration (Postgres + HTTP Ingest)
+# NAS ↔ Render Integration (Postgres + Uploads)
 
 This document summarizes how the NAS syncs summaries and audio to the Render‑hosted dashboard and what env vars are required.
 
 Overview
 - Content writes: direct PostgreSQL upsert from NAS
-- Audio uploads: HTTP ingest to Render (preferred) with token auth
-- Read APIs for UI remain unchanged (`/api/reports`, `/api/filters`)
+- Audio/Image uploads: authenticated multipart uploads to the dashboard
+- Read APIs: `/api/reports`, `/api/filters`, `/<id>.json` enriched with audio variants
 
 Environment Variables
 - NAS:
   - `DATABASE_URL` – Postgres DSN used by the NAS for direct content upserts
   - `RENDER_DASHBOARD_URL` – e.g., https://ytv2-dashboard-postgres.onrender.com
   - `INGEST_TOKEN` – copy from Render service env; used for private ingest
+  - `SYNC_SECRET` – optional bearer token; either header works for uploads
   - Optional: `DUAL_SYNC`, `POSTGRES_ONLY` (we run `POSTGRES_ONLY=true`)
-  - Optional: `AUDIO_PUBLIC_BASE` – not required when using HTTP ingest
+  - Optional: `AUDIO_PUBLIC_BASE` – not required; use HTTP uploads instead
 - Render (dashboard):
   - `DATABASE_URL_POSTGRES_NEW` – Postgres DSN
   - `INGEST_TOKEN` – shared secret for NAS ingest
 
 Endpoints (Render)
-- `POST /ingest/report` (JSON): upserts content by `video_id`
-- `POST /ingest/audio` (multipart): saves MP3 and flips `has_audio=true`
+- JSON read:
+  - `GET /api/reports` — list view; enriched `summary_variants`
+  - `GET /<video_id>.json` — single view; enriched `summary_variants`, `has_audio`
+- Uploads (multipart):
+  - `POST /api/upload-audio` — primary audio upload (accepts `Authorization: Bearer` or `X-INGEST-TOKEN`)
+  - `POST /api/upload-image` — summary image upload (same auth)
+  - Fallback: `POST /ingest/audio` — legacy ingest
 - Health checks:
   - `GET /health/ingest` → `{status:'ok', token_set:true, pg_dsn_set:true}`
   - `GET /api/reports?size=1` → sanity read
 
 Audio Upload Strategy
-- Preferred: Keep direct Postgres for content metadata, and upload MP3s via HTTP ingest.
-- Why: The dashboard serves audio from its filesystem; HTTP ingest ensures the file exists on Render and updates DB flags.
+- Preferred: Direct Postgres for metadata + `POST /api/upload-audio` for the MP3.
+- Why: The dashboard serves audio from its filesystem; uploads ensure the file exists and then JSON enrichment pulls `audio_url`/`duration` from `content`.
 - Coordinator behavior (NAS):
-  1) Try direct Postgres audio variant insert only if `AUDIO_PUBLIC_BASE` is set.
-  2) If not set or insert returns None, automatically fall back to HTTP ingest using `RENDER_DASHBOARD_URL` + `INGEST_TOKEN`.
-- Result: No `AUDIO_PUBLIC_BASE` required; audio reliably appears on the dashboard.
+  1) Upload via `/api/upload-audio` with either `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN: $INGEST_TOKEN`.
+  2) On success, update Postgres: `has_audio=true`, `media.audio_url`, `media_metadata.mp3_duration_seconds`, `audio_version`.
+  3) Fallback: `/ingest/audio` is available if needed.
 
 Authoritative fields written by NAS (after 200 OK upload)
-- `media.has_audio = true`
-- `media.audio_url = /exports/by_video/<videoId>.mp3` (Reddit legacy: `/exports/audio/reddit<file_stem>.mp3`)
-- `media_metadata.mp3_duration_seconds = <int>` (ffprobe)
-- Optional: `audio_version = <unix_ts>` (dashboard may append `?v=`)
+- `content.has_audio = true`
+- `content.media.audio_url = "/exports/audio/<filename>.mp3"` (root‑relative)
+- `content.media_metadata.mp3_duration_seconds = <int>` (ffprobe)
+- Optional: `content.audio_version = <unix_ts>` (dashboard appends `?v=`)
 
 JSON semantics
 - Prefer omission over null when a field is unknown/unavailable (e.g., omit `audio_url` and `mp3_duration_seconds` if upload fails).
@@ -55,12 +61,13 @@ Typical Logs
 Troubleshooting (MP3 not playable)
 1) Verify health: `curl -sS "$RENDER_DASHBOARD_URL/health/ingest" | jq`
    - Expect `token_set:true`, `pg_dsn_set:true`.
-2) Check the by‑video URL: `curl -I "$RENDER_DASHBOARD_URL/exports/by_video/<video_id>.mp3"`
-   - Expect `200`. If `404`, the MP3 didn’t upload; confirm `INGEST_TOKEN` and `RENDER_DASHBOARD_URL` on NAS.
-3) Look for fallback logs:
+2) Check the returned URL: `curl -I "$RENDER_DASHBOARD_URL/exports/audio/<filename>.mp3?v=<audio_version>"`
+   - Expect `200` with non‑zero `Content-Length`. If `404` or size 0, re‑upload.
+3) Look for coordinator logs:
    - `status=fallback_http_ingest` followed by `status=ok (http)` indicates success.
-4) If you must use direct PG for audio URLs, set `AUDIO_PUBLIC_BASE` to a real, public base that serves your NAS files (not recommended).
+4) Disk full on Render produces 500s and zero‑byte artifacts; increase `/app/data` or clean old files. Server writes atomically to avoid partial files.
 
 Notes
-- The server sanitizes filenames but updates DB using the original `video_id` (e.g., `web:`/`reddit:` prefixes are preserved).
-- Send `video_id` consistently between content and audio calls.
+- Upload responses include `public_url`/`relative_path` and `size`; prefer server‑returned paths.
+- The server sanitizes filenames and keeps DB `video_id` stable.
+- Send consistent `video_id` between content and audio calls.

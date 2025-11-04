@@ -237,6 +237,33 @@ asyncio.run(run())
 PY
 ```
 
+## NAS → Dashboard Uploads (Audio)
+
+Primary endpoint
+- `POST /api/upload-audio` (multipart)
+- Auth: either `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN: $INGEST_TOKEN`
+- Response JSON includes `public_url` (e.g., `/exports/audio/<filename>.mp3`) and `size` (bytes). Treat `size==0` as failure and retry.
+
+Fallback endpoint
+- `POST /ingest/audio` (multipart, legacy)
+- Auth: `X-INGEST-TOKEN: $INGEST_TOKEN`
+
+Post‑upload Postgres fields (NAS writes):
+- `content.has_audio = true`
+- `content.media.audio_url = "/exports/audio/<filename>.mp3"` (root‑relative)
+- `content.media_metadata.mp3_duration_seconds = <int>`
+- `content.audio_version = <unix_ts>` (dashboard appends `?v=`)
+
+Verification
+- HEAD: `curl -I "$RENDER_DASHBOARD_URL/exports/audio/<filename>.mp3?v=<audio_version>"` → 200 with non‑zero `Content-Length`.
+- JSON: `curl "$RENDER_DASHBOARD_URL/<video_id>.json?v=2"` contains `{ kind:'audio', audio_url, duration }` and `has_audio:true`.
+
+Dashboard read semantics
+- List (`/api/reports`) and single (`/<id>.json`) enrich `summary_variants` using `content.media`/`media_metadata`. You do not need to write `<audio>` HTML into `summaries`.
+
+Operational notes
+- Upload handlers stream to temp and atomically replace on success (prevents zero‑byte files). Ensure `/app/data` has sufficient free space on Render.
+
 View selection logs and collision handling
 
 ```bash

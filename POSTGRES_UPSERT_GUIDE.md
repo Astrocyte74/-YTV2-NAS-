@@ -1,6 +1,6 @@
 # Postgres Upsert Guide (NAS → Dashboard)
 
-This guide defines the minimal schema, roles, and UPSERT patterns the NAS should use to write directly to the dashboard’s Postgres database. The dashboard is Postgres-only and does not accept HTTP uploads.
+This guide defines the minimal schema, roles, and UPSERT patterns the NAS should use to write directly to the dashboard’s Postgres database. The dashboard also accepts authenticated uploads for audio/images; the read path enriches JSON responses with audio variants joined from the `content` row.
 
 ## Connectivity
 
@@ -145,17 +145,21 @@ Preferred column: `subcategories_json` (dashboard also checks `analysis_json->'c
 
 ## Audio Handling
 
-- Upload endpoints are removed. To surface “Audio Summary” chips, insert audio variants with playable links in `html`, for example:
+Preferred write pattern:
+- Upload MP3 via `POST /api/upload-audio` (auth: `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN`). The server returns `public_url` (e.g., `/exports/audio/<filename>.mp3`) and `size`.
+- Update `content`:
+  - `has_audio = true`
+  - `media.audio_url = "/exports/audio/<filename>.mp3"` (root‑relative)
+  - `media_metadata.mp3_duration_seconds = <int>`
+  - `audio_version = <unix_ts>` (used for `?v=` cache busting)
 
-```html
-<audio controls src="https://YOUR_S3_BUCKET/yourfile.mp3"></audio>
-```
-
-- Set `has_audio=true` in `content` when at least one audio variant exists.
+Read pattern:
+- The dashboard’s JSON endpoints (`/<id>.json`, `/api/reports`) enrich `summary_variants` with `{ kind:'audio', audio_url, duration }` when the fields above exist on `content`.
+- You do not need to store `<audio>` HTML in `summaries` for playback.
 
 ## Gotchas
 
 - Card eligibility: requires at least one summary variant with non-null `html` per video.
 - Language filter uses `content.language`; you can also mirror into `analysis_json` for completeness.
 - SQL LIKE patterns require escaping percent signs in the dashboard code (NAS doesn’t need to handle this on writes).
-
+- Ensure sufficient disk space on the dashboard’s `/app/data` volume; uploads write atomically but will fail with 500 if the disk is full.

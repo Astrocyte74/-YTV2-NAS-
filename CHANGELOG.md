@@ -1,5 +1,37 @@
 # Changelog
 
+## 2025-11-03 — Robust audio uploads, JSON enrichment, and cleanup tools
+
+Highlights
+- Dashboard JSON now enriches audio variants for both list and single views (`audio_url + duration`); `has_audio` mirrors list semantics.
+- Upload handlers hardened: streaming multipart parsing, atomic temp→rename writes, and clear error logging; support `Authorization: Bearer` and `X-INGEST-TOKEN`.
+- NAS only emits audio variants when a playable `audio_url` exists; removed legacy placeholders to prevent “audio icon only” cards.
+- Backfill and cleanup tools added for rapid remediation.
+
+User‑Facing Changes
+- Listen chips appear only when a real MP3 is present; older placeholder cards were cleaned up.
+- JSON endpoints return enriched `summary_variants` with audio entries and accurate `has_audio`.
+
+Technical Changes
+- NAS: emit audio ingest variants only when `audio_url` is present; strip placeholder entries.
+- NAS tools:
+  - `tools/batch_fix_audio_urls.py`
+  - `tools/scan_and_fix_from_exports.py`
+  - `tools/cleanup_audio_variants_no_url.py`
+  - `tools/cleanup_broken_audio_cards.py`
+- Dashboard:
+  - `/api/upload-audio` and `/api/upload-image` now accept Bearer or X-INGEST-TOKEN; parse streaming; write atomically; return `public_url`/`size`.
+  - List and single JSON use the same enrichment path.
+
+Operational Notes
+- Ensure sufficient free space on the Render disk mounted at `/app/data`; uploads fail with 500 and won’t write partial files. Use HEAD to validate `Content-Length > 0`.
+- Prefer server‑returned `public_url` and treat size==0 as failure.
+
+Verification
+- Upload: `POST /api/upload-audio` → 200 JSON with `public_url` and `size > 0`.
+- HEAD: `/exports/audio/<filename>.mp3?v=<audio_version>` → 200, non‑zero size.
+- JSON: `/<id>.json` shows `has_audio:true` and audio variant with `audio_url + duration`.
+
 ## 2025-10-18 — TTS provider selection, improved picker UX, favorites default, and docs
 
 Highlights

@@ -126,15 +126,27 @@ LLM_MODEL=anthropic/claude-3-sonnet
 OPENROUTER_API_KEY=your_key_here
 ```
 
-### Dashboard Integration (Postgres-only)
+### Dashboard Integration (Postgres + Uploads)
 
-The dashboard no longer accepts uploads. NAS writes directly to Postgres using UPSERTs into `content` and `summaries` (latest per `(video_id, variant)`).
+The dashboard reads from Postgres for content/variants and also accepts authenticated uploads for audio/images. The read path enriches response JSON so audio variants include `audio_url` and `duration` joined from the `content` row.
+
+Write path (NAS side):
+- Direct UPSERTs into Postgres (`content`, `summaries`) for metadata and text/html variants.
+- Upload MP3s/images to the dashboard using:
+  - `POST /api/upload-audio` (multipart) — primary
+  - `POST /api/upload-image` (multipart)
+  - Fallback: `POST /ingest/audio` is still available for compatibility
+- Auth: either `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN: $INGEST_TOKEN`.
+
+Read path (Dashboard JSON):
+- `/<video_id>.json` and `/api/reports` include `summary_variants` with `{ kind:'audio', audio_url, duration }` when `content.media.audio_url` and `media_metadata.mp3_duration_seconds` are set.
+- `has_audio` reflects the DB flag and/or presence of an enriched audio variant.
 
 Requirements for cards to show:
-- At least one summary variant must have non-null `html`
-- `language` on `content` is used for language filtering
+- At least one summary variant must have non-null `html` (for text views) or an enriched audio variant.
+- `language` on `content` is used for language filtering.
 
-See `POSTGRES_UPSERT_GUIDE.md` for DDL, indexes, role grants, and UPSERT examples.
+See `POSTGRES_UPSERT_GUIDE.md` and `docs/NAS_INTEGRATION.md` for DDL, role grants, upload, and health details.
 
 ### Backfill & Recovery Tools
 
@@ -273,12 +285,20 @@ docker-compose down && docker-compose up -d
 ## 🎵 Audio Delivery Path
 
 1. NAS generates `exports/audio_<video_id>_<timestamp>.mp3` after TTS.
-2. `PostgresWriter.upload_content(...)` upserts metadata and HTML‑bearing variants into Postgres.
-3. Audio upload to Render:
-   - Preferred (default): HTTP ingest fallback via `POST /ingest/audio` (auth `X-INGEST-TOKEN`). No `AUDIO_PUBLIC_BASE` required.
-   - Optional (advanced): direct Postgres audio variant when `AUDIO_PUBLIC_BASE` points to a public base that serves NAS files.
-4. Render stores the MP3 under `/app/data/exports/audio/` and serves it at `/exports/by_video/<video_id>.mp3`; dashboard Listen chips stream it.
-5. Health/ops: `GET /health/ingest` shows `token_set` and `pg_dsn_set`. Details in `docs/NAS_INTEGRATION.md`.
+2. NAS uploads the MP3 to the dashboard:
+   - Primary: `POST /api/upload-audio` with `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN: $INGEST_TOKEN`.
+   - Fallback: `POST /ingest/audio` with `X-INGEST-TOKEN`.
+   - Server returns JSON including `public_url` (e.g., `/exports/audio/<filename>.mp3`) and `size`. Treat `size==0` as failure and retry.
+3. NAS flips Postgres flags/fields on success:
+   - `content.has_audio = true`
+   - `content.media.audio_url = "/exports/audio/<filename>.mp3"` (root‑relative)
+   - `content.media_metadata.mp3_duration_seconds = <int>`
+   - `content.audio_version = <unix_ts>` (dashboard appends `?v=`)
+4. Dashboard JSON (`/<id>.json`, `/api/reports`) is enriched with `{ kind:'audio', audio_url, duration }` and `has_audio:true`.
+5. Health/ops:
+   - `GET /health/ingest` shows `token_set` and `pg_dsn_set`.
+   - HEAD `https://…/exports/audio/<filename>.mp3?v=<audio_version>` should return 200 with non‑zero `Content-Length`.
+   - Disk: ensure sufficient space on `/app/data` (Render) for uploads; server writes with atomic temp→rename to avoid partial files.
 
 ## ⚡ Auto‑Process (Idle Run)
 

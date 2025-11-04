@@ -58,7 +58,11 @@
   - `TTSHUB_TIMEOUT_SYNTH` — synthesis POST (default `20`)
   - These apply only to TTS requests and can be left at defaults in most setups.
 
-## Dashboard Notes (Postgres-only)
-- Dashboard reads from Postgres only; it does not scan JSON or accept upload endpoints.
-- Ensure at least one summary variant has non-null HTML so a card appears.
-- `language` on `content` is used for language filtering.
+## Dashboard Notes (Postgres + Uploads)
+- Dashboard reads from Postgres and accepts authenticated uploads for audio/images.
+- JSON endpoints (`/api/reports`, `/<id>.json`) enrich `summary_variants` with `{ kind:'audio', audio_url, duration }` based on `content.media`/`media_metadata`.
+- Ensure:
+  - At least one text variant has non‑null `html` (for text cards), or
+  - A playable audio variant exists (NAS wrote `media.audio_url` and `mp3_duration_seconds`).
+- Audio uploads: `POST /api/upload-audio` (Bearer or X‑INGEST‑TOKEN). Fallback: `POST /ingest/audio`.
+- Health: `GET /health/ingest` reports `token_set` and `pg_dsn_set`.
