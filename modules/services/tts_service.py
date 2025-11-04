@@ -160,8 +160,10 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
         except Exception:
             pass
 
-    # Optional: background progress pings while TTS runs
-    if status_msg:
+    # Optional: background progress pings while TTS runs (used only if no chunk signals)
+    use_periodic = True
+    # We'll disable periodic if we receive fine-grained progress events.
+    if status_msg and use_periodic:
         try:
             import asyncio as _asyncio
             start_ts = time.monotonic()
@@ -206,6 +208,60 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             )
         except Exception:
             pass
+        async def _progress_hook(evt: Dict[str, Any]):
+            nonlocal progress_task
+            try:
+                stage = evt.get('stage')
+                # Disable periodic once we receive a fine-grained signal
+                if progress_task:
+                    try:
+                        progress_task.cancel()
+                    except Exception:
+                        pass
+                    progress_task = None
+                if not status_msg:
+                    return
+                if stage == 'init':
+                    await status_msg.edit_text(
+                        f"⏳ Generating TTS (preparing)"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif stage == 'single_start':
+                    await status_msg.edit_text(
+                        f"🎵 Generating TTS (single)"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif stage == 'chunk_start':
+                    idx = evt.get('index')
+                    total = evt.get('total')
+                    await status_msg.edit_text(
+                        f"🎵 Generating TTS (chunk {idx}/{total})"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif stage == 'combining':
+                    parts = evt.get('parts')
+                    await status_msg.edit_text(
+                        f"🧩 Combining audio ({parts} part{'s' if parts and parts!=1 else ''})"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                elif stage == 'error':
+                    await status_msg.edit_text(
+                        f"❌ TTS failed"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            except Exception:
+                pass
+
         audio_filepath = await handler.summarizer.generate_tts_audio(
             summary_text,
             audio_filename,
@@ -214,6 +270,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             voice=voice_id,
             engine=engine_id,
             favorite_slug=favorite_slug,
+            progress=_progress_hook,
         )
         try:
             logging.warning("[TTS-AFTER] provider=%s result=%s", provider_key, audio_filepath)
@@ -260,7 +317,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
         return
 
     logging.info("📦 TTS file ready: %s", audio_filepath)
-    await finalize_delivery(handler, query, session, Path(audio_filepath), provider_key)
+    await finalize_delivery(handler, query, session, Path(audio_filepath), provider_key, update_status=_update_status)
 
     try:
         if status_msg:
@@ -633,7 +690,7 @@ async def handle_callback(handler, query, callback_data: str) -> None:
             await handle_local_unavailable(handler, query, session, message=str(exc))
             return
 
-async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path: Path, provider: str) -> None:
+async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path: Path, provider: str, update_status=None) -> None:
     provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
     metrics.record_tts(True)
     video_info = session.get('video_info') or {}
@@ -682,6 +739,12 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
         if content_identifier and ':' not in content_identifier:
             content_identifier = f"yt:{content_identifier}"
 
+        # Update UI before dashboard upload
+        try:
+            if update_status:
+                await update_status("📡 Uploading audio to dashboard…")
+        except Exception:
+            pass
         sync_result = sync_service.sync_audio_variant(
             normalized_id,
             summary_type,
@@ -697,6 +760,11 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
             )
         if content_identifier:
             logging.debug("Audio ready for %s (dashboard upload via Postgres)", content_identifier)
+        try:
+            if update_status and sync_result.get("success"):
+                await update_status("✅ Uploaded audio to dashboard")
+        except Exception:
+            pass
 
         audio_reply_markup = handler._build_audio_inline_keyboard(
             normalized_id,
