@@ -24,6 +24,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+import requests
 
 try:
     import psycopg  # type: ignore
@@ -122,6 +123,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=100, help="max files to examine from exports (default 100)")
     ap.add_argument("--cap", type=int, default=50, help="max fixes to attempt this run (default 50)")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--respect-storage", action="store_true", help="Check /api/health/storage and abort when critically full")
+    ap.add_argument("--block-pct", type=int, default=int(os.getenv("DASHBOARD_STORAGE_BLOCK_PCT") or 98), help="Block when used_pct >= this value (default env or 98)")
     args = ap.parse_args()
 
     dsn = os.getenv("DATABASE_URL")
@@ -132,6 +135,20 @@ def main() -> int:
     if not pairs:
         print({"checked": 0, "candidates": 0, "updated": 0})
         return 0
+
+    if args.respect_storage:
+        base = (os.getenv("RENDER_DASHBOARD_URL") or os.getenv("RENDER_API_URL") or "").rstrip("/")
+        tok = os.getenv("DASHBOARD_DEBUG_TOKEN")
+        if base and tok:
+            try:
+                r = requests.get(f"{base}/api/health/storage", headers={"Authorization": f"Bearer {tok}"}, timeout=10)
+                if r.status_code == 200:
+                    used_pct = int((r.json() or {}).get("used_pct") or 0)
+                    if used_pct >= args.block_pct:
+                        print({"blocked": True, "used_pct": used_pct, "threshold": args.block_pct})
+                        return 2
+            except Exception:
+                pass
 
     need = select_needing_fix(dsn, pairs, args.cap)
     if not need:
@@ -152,4 +169,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

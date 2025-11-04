@@ -15,8 +15,8 @@ Utility scripts to assist with operations, testing, and migration tasks. Run the
 - `list_audio_rows.py` – Lists summary rows matching a `video_id` substring (useful for debugging legacy prefixes).
 - `strip_yt_prefix_in_summaries.py` – Cleans older `yt:`-prefixed `video_id` rows.
 - `backfill_metadata.py`, `backfill_analysis.py`, `cleanup_reports.py` – Historical JSON maintenance scripts. Review source before use.
-- `batch_fix_audio_urls.py` – Finds local MP3s and fixes rows with `has_audio=true` but missing `media.audio_url` by uploading and updating Postgres. Use `--limit` and `--dry-run`.
-- `scan_and_fix_from_exports.py` – Scans `/app/exports` for MP3s and fixes corresponding rows (even when `has_audio=false`). Use `--limit`, `--cap`, and `--dry-run`.
+- `batch_fix_audio_urls.py` – Finds local MP3s and fixes rows with `has_audio=true` but missing `media.audio_url` by uploading and updating Postgres. Use `--limit`, `--dry-run`. Optional `--respect-storage` (aborts when `/api/health/storage` used_pct ≥ threshold; configurable via `--block-pct` or `DASHBOARD_STORAGE_BLOCK_PCT`, default 98).
+- `scan_and_fix_from_exports.py` – Scans `/app/exports` for MP3s and fixes corresponding rows (even when `has_audio=false`). Use `--limit`, `--cap`, `--dry-run`. Optional `--respect-storage` and `--block-pct` as above.
 - `cleanup_audio_variants_no_url.py` – Removes `summaries` rows where `variant='audio'` but `content` has no `media.audio_url` and `has_audio=false`.
 - `cleanup_broken_audio_cards.py` – Audits for cards that claim audio but have no playable MP3 (HEAD 200). Can dry‑run or delete.
 

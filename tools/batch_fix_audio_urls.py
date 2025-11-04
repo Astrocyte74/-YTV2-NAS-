@@ -26,6 +26,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+import requests
 from pathlib import Path
 from typing import Optional, List, Tuple
 
@@ -121,12 +122,29 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--respect-storage", action="store_true", help="Check /api/health/storage and abort when critically full")
+    ap.add_argument("--block-pct", type=int, default=int(os.getenv("DASHBOARD_STORAGE_BLOCK_PCT") or 98), help="Block when used_pct >= this value (default env or 98)")
     args = ap.parse_args()
 
     rows = discover_missing(args.limit)
     if not rows:
         print({"checked": 0, "updated": 0, "skipped": 0})
         return 0
+
+    if args.respect_storage:
+        base = (os.getenv("RENDER_DASHBOARD_URL") or os.getenv("RENDER_API_URL") or "").rstrip("/")
+        tok = os.getenv("DASHBOARD_DEBUG_TOKEN")
+        if base and tok:
+            try:
+                r = requests.get(f"{base}/api/health/storage", headers={"Authorization": f"Bearer {tok}"}, timeout=10)
+                if r.status_code == 200:
+                    used_pct = int((r.json() or {}).get("used_pct") or 0)
+                    if used_pct >= args.block_pct:
+                        print({"blocked": True, "used_pct": used_pct, "threshold": args.block_pct})
+                        return 2
+            except Exception:
+                # If the probe fails, proceed rather than blocking the batch
+                pass
 
     updated = 0
     skipped = 0
