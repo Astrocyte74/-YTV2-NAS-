@@ -4314,22 +4314,52 @@ class YouTubeTelegramBot:
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
             picks = self._quick_pick_candidates(provider_options, user_id)
 
-            # Auto-select LLM for audio summaries: prefer local QUICK_LOCAL_MODEL
+            # Auto-select LLM for audio summaries after a short delay: prefer local QUICK_LOCAL_MODEL
             if summary_type.startswith("audio"):
                 try:
                     default_local = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+                    llm_delay = int(os.getenv("LLM_AUTO_DEFAULT_SECONDS", "0") or "0")
                 except Exception:
                     default_local = ""
-                if default_local:
-                    model_option = {
-                        "provider": "ollama",
-                        "model": default_local,
-                        "label": f"Ollama • {self._short_model_name(default_local)}",
-                        "button_label": f"{self._short_label(self._short_model_name(default_local), 24)}",
-                    }
-                    # Linear flow: run summary; TTS selection happens after
-                    await self._execute_summary_with_model(query, session_payload, "ollama", model_option)
-                    return
+                    llm_delay = 0
+                if default_local and llm_delay > 0:
+                    try:
+                        import asyncio as _asyncio
+                        chat_id = query.message.chat.id
+                        message_id = query.message.message_id
+                        async def _auto_llm_default():
+                            try:
+                                await _asyncio.sleep(llm_delay)
+                            except Exception:
+                                return
+                            sess = self._get_summary_session(chat_id, message_id)
+                            if not isinstance(sess, dict):
+                                return
+                            # If user already picked a provider/model, skip auto-run
+                            if sess.get("selected_provider"):
+                                return
+                            model_option = {
+                                "provider": "ollama",
+                                "model": default_local,
+                                "label": f"Ollama • {self._short_model_name(default_local)}",
+                                "button_label": f"{self._short_label(self._short_model_name(default_local), 24)}",
+                            }
+                            try:
+                                # Update the selection message to indicate summary is starting and clear the keyboard
+                                from telegram.constants import ParseMode as _PM
+                                await self.application.bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=message_id,
+                                    text=f"🧠 Starting summary • Ollama • {self._short_model_name(default_local)}",
+                                    parse_mode=_PM.MARKDOWN,
+                                    reply_markup=None,
+                                )
+                            except Exception:
+                                pass
+                            await self._execute_summary_with_model(query, sess or session_payload, "ollama", model_option)
+                        _asyncio.create_task(_auto_llm_default())
+                    except Exception:
+                        pass
             # Fallback: show provider keyboard
             if summary_type.startswith("audio"):
                 keyboard = self._build_provider_with_combos_keyboard(
