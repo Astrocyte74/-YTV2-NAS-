@@ -4312,6 +4312,37 @@ class YouTubeTelegramBot:
             cloud_label = cloud_option.get("button_label") or "Cloud"
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
+            # Add LLM auto-default hint if configured
+            try:
+                llm_delay = int(os.getenv('LLM_AUTO_DEFAULT_SECONDS', '0') or '0')
+            except Exception:
+                llm_delay = 0
+            if summary_type.startswith("audio") and llm_delay > 0:
+                # Prefer local default model; otherwise show cloud default hint
+                default_hint = None
+                try:
+                    default_local = (os.getenv('QUICK_LOCAL_MODEL') or '').strip()
+                except Exception:
+                    default_local = ''
+                if default_local:
+                    default_hint = f"Ollama • {self._short_model_name(default_local)}"
+                else:
+                    try:
+                        from llm_config import get_quick_cloud_env_model as _get_qc
+                        cloud_slug = _get_qc()
+                    except Exception:
+                        cloud_slug = ''
+                    if cloud_slug:
+                        try:
+                            from llm_config import llm_config as _lc
+                            resolved_provider, resolved_model, _ = _lc.get_model_config(None, cloud_slug)
+                            prov_name = self._friendly_llm_provider(resolved_provider)
+                            default_hint = f"{prov_name} • {self._short_model_name(resolved_model)}"
+                        except Exception:
+                            prov_name = 'Cloud'
+                            default_hint = f"{prov_name} • {self._short_model_name(cloud_slug)}"
+                if default_hint:
+                    prompt_text += f"\n\n⏱️ Auto-selecting {default_hint} in {llm_delay}s — tap to change"
             picks = self._quick_pick_candidates(provider_options, user_id)
 
             # Auto-select LLM for audio summaries after a short delay: prefer local QUICK_LOCAL_MODEL

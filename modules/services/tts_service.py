@@ -59,6 +59,34 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
 
     prompt_text = f"🎙️ Choose how to generate audio for **{handler._escape_markdown(title)}**"
+    # Add auto-default hint if configured
+    try:
+        auto_delay = int(os.getenv('TTS_AUTO_DEFAULT_SECONDS', '0') or '0')
+    except Exception:
+        auto_delay = 0
+    if auto_delay > 0:
+        # Try to predict which default will be picked (local favorite preferred)
+        default_provider = 'local'
+        default_label = None
+        try:
+            fav_env = (os.getenv('TTS_QUICK_FAVORITE') or '').strip()
+            fav_first = None
+            if fav_env:
+                favs = [s.strip() for s in fav_env.split(',') if s.strip()]
+                fav_first = favs[0] if favs else None
+            if fav_first and '|' in fav_first:
+                eng, slug = fav_first.split('|', 1)
+                default_label = f"Local • {eng}:{slug}"
+            # If local hub is not configured, hint OpenAI fallback
+            client = handler._resolve_tts_client(session_payload.get('tts_base'))
+            if not (client and client.base_api_url and default_label):
+                default_provider = 'openai'
+                cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+                default_label = f"OpenAI • {cloud_voice}"
+        except Exception:
+            default_label = None
+        if default_label:
+            prompt_text += f"\n\n⏱️ Auto-selecting {default_label} in {auto_delay}s — tap to change"
     # If this is an early preselect (before running summary), replace the current menu
     # to avoid leaving the LLM list visible; otherwise reply as a new message.
     if session_payload.get('preselect_only'):
