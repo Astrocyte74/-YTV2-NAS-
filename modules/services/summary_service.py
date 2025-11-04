@@ -806,11 +806,8 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
             logging.debug("Unable to post TTS status message: %s", exc)
 
         try:
-            # Minimal diagnostic: log provider + summary_text length before TTS
-            try:
-                logging.info("[TTS-START] provider=%s text_len=%d", provider, len(summary or ''))
-            except Exception:
-                pass
+            # Minimal diagnostic: log provider + summary text length before TTS
+            logging.info("[TTS-START] provider=%s text_len=%d", provider, len((summary_text or '')))            
             await handler._execute_tts_job(query, session_payload, provider)
         finally:
             try:
@@ -820,6 +817,10 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
                 pass
             # Do NOT remove content-anchored preselect here; defer until audio delivery succeeds
     else:
+        try:
+            logging.info("[TTS-PREP] No auto-run preselect found; prompting provider/voice")
+        except Exception:
+            pass
         await handler._prompt_tts_provider(query, session_payload, title)
 
 
