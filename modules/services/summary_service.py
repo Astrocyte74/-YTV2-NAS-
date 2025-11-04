@@ -606,6 +606,11 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
         if image_path:
             try:
+                # Status update: illustration phase
+                try:
+                    await _safe_edit_status(query, "🎨 Generating illustration…")
+                except Exception:
+                    pass
                 # Use a separate reply so we don't overwrite the summary message
                 try:
                     await query.message.reply_text("🖼️ Attaching illustration…")
@@ -1056,6 +1061,37 @@ async def process_content_summary(
 
     await _safe_edit_status(query, message)
 
+    # Periodic status updates during summary phase (until export)
+    progress_task = None
+    try:
+        import asyncio as _asyncio
+        start_ts = time.monotonic()
+        try:
+            interval = int(os.getenv('SUMMARY_STATUS_INTERVAL', '10') or '10')
+        except Exception:
+            interval = 10
+        async def _progress_updater():
+            idx = 0
+            symbols = ['🔄', '⏳', '⌛']
+            while True:
+                await _asyncio.sleep(interval)
+                elapsed = int(time.monotonic() - start_ts)
+                sym = symbols[idx % len(symbols)]
+                idx += 1
+                status_lines = [f"{sym} Analyzing content and drafting summary… ({elapsed}s)"]
+                try:
+                    if llm_label:
+                        status_lines.append(f"LLM: {handler._escape_markdown(llm_label)}")
+                except Exception:
+                    pass
+                try:
+                    await _safe_edit_status(query, "\n".join(status_lines))
+                except Exception:
+                    break
+        progress_task = _asyncio.create_task(_progress_updater())
+    except Exception:
+        progress_task = None
+
     try:
         normalized_id = handler._normalize_content_id(content_id)
         video_id = normalized_id
@@ -1174,6 +1210,12 @@ async def process_content_summary(
 
         export_info.update({"html_path": None, "json_path": None})
         try:
+            # Stop periodic spinner once we reach export phase
+            try:
+                if progress_task:
+                    progress_task.cancel()
+            except Exception:
+                pass
             report_dict = create_report_from_youtube_summarizer(result)
             # Apply CJCLDS categorization when applicable (General Conference talks)
             try:
