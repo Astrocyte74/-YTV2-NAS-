@@ -1,5 +1,28 @@
 # Changelog
 
+## 2025-11-04 — Linear audio flow, auto‑defaults, and richer status
+
+Highlights
+- Linear audio summary flow for all sources (YouTube, Reddit, Web): LLM → summary + illustration → TTS.
+- Auto‑defaults with countdown hints:
+  - LLM auto‑default (audio): after `LLM_AUTO_DEFAULT_SECONDS`, prefer `QUICK_LOCAL_MODEL`, else `QUICK_CLOUD_MODEL`.
+  - TTS auto‑default: after `TTS_AUTO_DEFAULT_SECONDS`, prefer first `TTS_QUICK_FAVORITE` (Local), else `TTS_CLOUD_VOICE` (OpenAI).
+- TTS auto‑select now drives the same manual selection code path; fixes cases where hub POST didn’t occur.
+- Richer status during summary (spinner + step cues) and distinct “Generating illustration…” cue before images.
+
+User‑Facing Changes
+- After choosing Audio Summary, you may see an LLM chooser; if no action, the bot auto‑picks your configured default with a visible countdown and starts.
+- After summary/illustration, the TTS chooser appears; if no action, it auto‑selects and the message updates to “Starting text‑to‑speech …” while the keyboard disappears.
+- Clear progress during TTS (preparing → chunk i/N → combining → upload) and during summary (drafting/translate/analyze + spinner).
+
+Environment
+- LLM auto‑default: `LLM_AUTO_DEFAULT_SECONDS`, `QUICK_LOCAL_MODEL`, `QUICK_CLOUD_MODEL`
+- TTS auto‑default: `TTS_AUTO_DEFAULT_SECONDS`, `TTS_QUICK_FAVORITE`, `TTS_CLOUD_VOICE`, optional `TTS_FALLBACK_TO_OPENAI`
+- Status cadence: `SUMMARY_STATUS_INTERVAL` (default 10s)
+
+Reliability
+- TTS auto‑select invokes the same handler as manual selection (no stale callback issues); local synth uses provider‑aware chunking; optional OpenAI fallback on timeout.
+
 ## 2025-11-03 — Robust audio uploads, JSON enrichment, and cleanup tools
 
 Highlights

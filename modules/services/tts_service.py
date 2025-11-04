@@ -59,12 +59,129 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
 
     prompt_text = f"🎙️ Choose how to generate audio for **{handler._escape_markdown(title)}**"
-    prompt_message = await query.message.reply_text(
-        prompt_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-    handler._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
+    # Add auto-default hint if configured
+    try:
+        auto_delay = int(os.getenv('TTS_AUTO_DEFAULT_SECONDS', '0') or '0')
+    except Exception:
+        auto_delay = 0
+    if auto_delay > 0:
+        # Try to predict which default will be picked (local favorite preferred)
+        default_provider = 'local'
+        default_label = None
+        try:
+            fav_env = (os.getenv('TTS_QUICK_FAVORITE') or '').strip()
+            fav_first = None
+            if fav_env:
+                favs = [s.strip() for s in fav_env.split(',') if s.strip()]
+                fav_first = favs[0] if favs else None
+            if fav_first and '|' in fav_first:
+                eng, slug = fav_first.split('|', 1)
+                default_label = f"Local • {eng}:{slug}"
+            # If local hub is not configured, hint OpenAI fallback
+            client = handler._resolve_tts_client(session_payload.get('tts_base'))
+            if not (client and client.base_api_url and default_label):
+                default_provider = 'openai'
+                cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+                default_label = f"OpenAI • {cloud_voice}"
+        except Exception:
+            default_label = None
+        if default_label:
+            prompt_text += f"\n\n⏱️ Auto-selecting {default_label} in {auto_delay}s — tap to change"
+    # If this is an early preselect (before running summary), replace the current menu
+    # to avoid leaving the LLM list visible; otherwise reply as a new message.
+    if session_payload.get('preselect_only'):
+        await query.edit_message_text(
+            prompt_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        chat_id, message_id = query.message.chat_id, query.message.message_id
+        handler._store_tts_session(chat_id, message_id, session_payload)
+    else:
+        prompt_message = await query.message.reply_text(
+            prompt_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        chat_id, message_id = prompt_message.chat_id, prompt_message.message_id
+        handler._store_tts_session(chat_id, message_id, session_payload)
+
+    # Auto-default after a short delay if user does not select a voice/provider.
+    try:
+        import asyncio as _asyncio
+        auto_delay = int(os.getenv('TTS_AUTO_DEFAULT_SECONDS', '5'))
+        async def _auto_default():
+            try:
+                await _asyncio.sleep(auto_delay)
+            except Exception:
+                return
+            sess = handler._get_tts_session(chat_id, message_id)
+            if not isinstance(sess, dict):
+                return
+            # If user already interacted, skip
+            if sess.get('selected_voice') or sess.get('provider') or sess.get('auto_run'):
+                return
+            # Choose defaults: prefer local favorite from TTS_QUICK_FAVORITE, else OpenAI voice
+            default_provider = 'local'
+            selected_voice = None
+            fav_env = (os.getenv('TTS_QUICK_FAVORITE') or '').strip()
+            if fav_env:
+                first = [s.strip() for s in fav_env.split(',') if s.strip()]
+                if first:
+                    token = first[0]
+                    if '|' in token:
+                        eng, slug = token.split('|', 1)
+                        selected_voice = {'favorite_slug': slug.strip(), 'voice_id': None, 'engine': eng.strip()}
+            # If no local base configured, fall back to OpenAI
+            client = handler._resolve_tts_client(sess.get('tts_base'))
+            if not (client and client.base_api_url and selected_voice):
+                default_provider = 'openai'
+                cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+                selected_voice = {'favorite_slug': None, 'voice_id': cloud_voice, 'engine': None}
+            sess['provider'] = default_provider
+            sess['selected_voice'] = selected_voice or {}
+            sess['auto_run'] = True
+            handler._store_tts_session(chat_id, message_id, sess)
+            # Drive the same code path as manual selection to avoid timing pitfalls
+            try:
+                # Build a tts_voice payload matching manual clicks
+                payload = None
+                if default_provider == 'local' and selected_voice and selected_voice.get('favorite_slug') and selected_voice.get('engine'):
+                    payload = f"fav|{selected_voice.get('engine')}|{selected_voice.get('favorite_slug')}"
+                elif selected_voice and selected_voice.get('voice_id'):
+                    payload = f"cat|{selected_voice.get('voice_id')}"
+                if payload:
+                    from modules.services import tts_service as _tts
+                    await _tts.handle_callback(handler, query, f"tts_voice:{payload}")
+                    return
+            except Exception:
+                # Fallback: directly start TTS if callback emulation fails
+                try:
+                    provider_label = 'Local TTS hub' if default_provider == 'local' else 'OpenAI TTS'
+                    voice_label = ''
+                    try:
+                        if selected_voice and selected_voice.get('favorite_slug') and selected_voice.get('engine'):
+                            voice_label = f" • {selected_voice.get('engine')}:{selected_voice.get('favorite_slug')}"
+                        elif selected_voice and selected_voice.get('voice_id'):
+                            voice_label = f" • {selected_voice.get('voice_id')}"
+                    except Exception:
+                        pass
+                    await handler.application.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=f"🎙️ Starting text-to-speech • {provider_label}{voice_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=None,
+                    )
+                except Exception:
+                    pass
+                try:
+                    await handler._execute_tts_job(query, sess, default_provider)
+                except Exception:
+                    pass
+        _asyncio.create_task(_auto_default())
+    except Exception:
+        pass
 
 
 async def handle_local_unavailable(handler, query, session: Dict[str, Any], message: str = "") -> None:
@@ -114,7 +231,12 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
     voice_id = selected_voice.get("voice_id")
     engine_id = selected_voice.get("engine")
 
-    await query.answer(f"Generating audio via {provider_key.title()}…")
+    # Best-effort: answering very old callback queries may raise 400 "query is too old".
+    try:
+        await query.answer(f"Generating audio via {provider_key.title()}…")
+    except Exception:
+        # Non-fatal; continue status via separate messages
+        pass
     provider_label = "Local TTS hub" if provider_key == "local" else "OpenAI TTS"
 
     voice_label = session.get("last_voice") or ""
@@ -131,6 +253,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             voice_label = ""
 
     status_msg = None
+    progress_task = None
     try:
         status_text = (
             f"⏳ Generating TTS"
@@ -149,8 +272,97 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
         except Exception:
             pass
 
+    # Optional: background progress pings while TTS runs (used only if no chunk signals)
+    use_periodic = True
+    # We'll disable periodic if we receive fine-grained progress events.
+    if status_msg and use_periodic:
+        try:
+            import asyncio as _asyncio
+            start_ts = time.monotonic()
+            async def _progress_updater():
+                idx = 0
+                symbols = ['⏳','⌛']
+                while True:
+                    await _asyncio.sleep(10)
+                    elapsed = int(time.monotonic() - start_ts)
+                    sym = symbols[idx % len(symbols)]
+                    idx += 1
+                    try:
+                        await status_msg.edit_text(
+                            f"{sym} Generating TTS ({elapsed}s)"
+                            + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                            + f" • {provider_label}",
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    except Exception:
+                        break
+            progress_task = _asyncio.create_task(_progress_updater())
+        except Exception:
+            progress_task = None
+
     if not handler.summarizer:
         handler.summarizer = YouTubeSummarizer()
+
+    # Progress hook declared before TTS start
+    async def _progress_hook(evt: Dict[str, Any]):
+        nonlocal progress_task
+        nonlocal status_msg
+        try:
+            stage = evt.get('stage')
+            # Disable periodic once we receive a fine-grained signal
+            if progress_task:
+                try:
+                    progress_task.cancel()
+                except Exception:
+                    pass
+                progress_task = None
+            # Ensure we have a status message to update; if not, create one now
+            if not status_msg:
+                try:
+                    bootstrap = "⏳ Generating TTS"
+                    status_msg = await query.message.reply_text(bootstrap, parse_mode=ParseMode.MARKDOWN)
+                except Exception:
+                    return
+            if stage == 'init':
+                await status_msg.edit_text(
+                    f"⏳ Generating TTS (preparing)"
+                    + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            elif stage == 'single_start':
+                await status_msg.edit_text(
+                        f"🎵 Generating TTS (single)"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            elif stage == 'chunk_start':
+                idx = evt.get('index')
+                total = evt.get('total')
+                await status_msg.edit_text(
+                        f"🎵 Generating TTS (chunk {idx}/{total})"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            elif stage == 'combining':
+                parts = evt.get('parts')
+                await status_msg.edit_text(
+                        f"🧩 Combining audio ({parts} part{'s' if parts and parts!=1 else ''})"
+                        + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                        + f" • {provider_label}",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            elif stage == 'error':
+                await status_msg.edit_text(
+                    f"❌ TTS failed"
+                    + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+                    + f" • {provider_label}",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+        except Exception:
+            pass
 
     try:
         logging.info(
@@ -169,7 +381,10 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             )
         except Exception:
             pass
-        audio_filepath = await handler.summarizer.generate_tts_audio(
+        # Enforce a timeout for TTS synthesis to avoid indefinite hangs
+        import asyncio as _asyncio
+        tts_timeout = int(os.getenv('TTS_TIMEOUT_SECONDS', '180'))
+        audio_filepath = await _asyncio.wait_for(handler.summarizer.generate_tts_audio(
             summary_text,
             audio_filename,
             json_placeholder,
@@ -177,7 +392,8 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             voice=voice_id,
             engine=engine_id,
             favorite_slug=favorite_slug,
-        )
+            progress=_progress_hook,
+        ), timeout=tts_timeout)
         try:
             logging.warning("[TTS-AFTER] provider=%s result=%s", provider_key, audio_filepath)
         except Exception:
@@ -193,9 +409,78 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
                 handler._remember_last_tts_voice(query.from_user.id, alias_slug)
         except Exception:
             pass
+    except _asyncio.TimeoutError:
+        logging.error("TTS synthesis timed out after %ss", os.getenv('TTS_TIMEOUT_SECONDS', '180'))
+        # Optional fallback to OpenAI
+        async def _maybe_fallback(reason: str) -> bool:
+            if provider_key != 'local':
+                return False
+            if (os.getenv('TTS_FALLBACK_TO_OPENAI','0').lower() not in ('1','true','yes')):
+                return False
+            cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+            try:
+                await _update_status("⚠️ Local TTS failed; switching to OpenAI…")
+            except Exception:
+                pass
+            try:
+                audio_fp = await _asyncio.wait_for(handler.summarizer.generate_tts_audio(
+                    summary_text,
+                    audio_filename,
+                    json_placeholder,
+                    provider='openai',
+                    voice=cloud_voice,
+                    engine=None,
+                    favorite_slug=None,
+                    progress=_progress_hook,
+                ), timeout=int(os.getenv('TTS_TIMEOUT_SECONDS','180')))
+                if audio_fp and Path(audio_fp).exists():
+                    await finalize_delivery(handler, query, session, Path(audio_fp), 'openai', update_status=_update_status)
+                    return True
+            except Exception as _exc:
+                logging.error("OpenAI TTS fallback failed: %s", _exc)
+            return False
+        if await _maybe_fallback('timeout'):
+            return
+        await query.answer("TTS timed out", show_alert=True)
+        await _update_status(
+            f"❌ TTS timed out"
+            + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
+            + f" • {provider_label}"
+        )
+        return
     except LocalTTSUnavailable as exc:
         logging.warning("Local TTS unavailable during execution: %s", exc)
         await handle_local_unavailable(handler, query, session, message=str(exc))
+        # Optional fallback to OpenAI
+        async def _maybe_fallback(reason: str) -> bool:
+            if provider_key != 'local':
+                return False
+            if (os.getenv('TTS_FALLBACK_TO_OPENAI','0').lower() not in ('1','true','yes')):
+                return False
+            cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+            try:
+                await _update_status("⚠️ Local TTS unavailable; switching to OpenAI…")
+            except Exception:
+                pass
+            try:
+                audio_fp = await handler.summarizer.generate_tts_audio(
+                    summary_text,
+                    audio_filename,
+                    json_placeholder,
+                    provider='openai',
+                    voice=cloud_voice,
+                    engine=None,
+                    favorite_slug=None,
+                    progress=_progress_hook,
+                )
+                if audio_fp and Path(audio_fp).exists():
+                    await finalize_delivery(handler, query, session, Path(audio_fp), 'openai', update_status=_update_status)
+                    return True
+            except Exception as _exc:
+                logging.error("OpenAI TTS fallback failed: %s", _exc)
+            return False
+        if await _maybe_fallback('unavailable'):
+            return
         await _update_status(
             f"⚠️ Local TTS unavailable"
             + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
@@ -204,6 +489,36 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
         return
     except Exception as exc:
         logging.error("TTS synthesis error: %s", exc)
+        # Optional fallback to OpenAI on generic failure
+        async def _maybe_fallback(reason: str) -> bool:
+            if provider_key != 'local':
+                return False
+            if (os.getenv('TTS_FALLBACK_TO_OPENAI','0').lower() not in ('1','true','yes')):
+                return False
+            cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+            try:
+                await _update_status("⚠️ Local TTS failed; switching to OpenAI…")
+            except Exception:
+                pass
+            try:
+                audio_fp = await handler.summarizer.generate_tts_audio(
+                    summary_text,
+                    audio_filename,
+                    json_placeholder,
+                    provider='openai',
+                    voice=cloud_voice,
+                    engine=None,
+                    favorite_slug=None,
+                    progress=_progress_hook,
+                )
+                if audio_fp and Path(audio_fp).exists():
+                    await finalize_delivery(handler, query, session, Path(audio_fp), 'openai', update_status=_update_status)
+                    return True
+            except Exception as _exc:
+                logging.error("OpenAI TTS fallback failed: %s", _exc)
+            return False
+        if await _maybe_fallback('error'):
+            return
         await query.answer("TTS failed", show_alert=True)
         await _update_status(
             f"❌ TTS failed"
@@ -223,7 +538,7 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
         return
 
     logging.info("📦 TTS file ready: %s", audio_filepath)
-    await finalize_delivery(handler, query, session, Path(audio_filepath), provider_key)
+    await finalize_delivery(handler, query, session, Path(audio_filepath), provider_key, update_status=_update_status)
 
     try:
         if status_msg:
@@ -235,6 +550,12 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             await status_msg.edit_text(done_text, parse_mode=ParseMode.MARKDOWN)
     except Exception:
         pass
+    finally:
+        try:
+            if progress_task:
+                progress_task.cancel()
+        except Exception:
+            pass
 
 
 async def handle_callback(handler, query, callback_data: str) -> None:
@@ -538,6 +859,18 @@ async def handle_callback(handler, query, callback_data: str) -> None:
         engine_id,
     )
 
+    # Update the selection message to indicate TTS is starting and remove keyboard
+    try:
+        provider_label = 'Local TTS hub' if provider_choice == 'local' else 'OpenAI TTS'
+        starting_text = (
+            f"🎙️ Starting text-to-speech"
+            + (f" • {handler._escape_markdown(session.get('last_voice',''))}" if session.get('last_voice') else '')
+            + f" • {provider_label}"
+        )
+        await query.edit_message_text(starting_text, parse_mode=ParseMode.MARKDOWN, reply_markup=None)
+    except Exception:
+        pass
+
     if session.get('preselect_only'):
         # Store selection and kick off pending summary; do not synthesize yet
         session['auto_run'] = True
@@ -554,6 +887,27 @@ async def handle_callback(handler, query, callback_data: str) -> None:
                 })
             except Exception:
                 pass
+        # Also anchor by content id so downstream can auto-run without re-prompting
+        try:
+            video_info = session.get('video_info') or {}
+            content_id = video_info.get('content_id') or None
+            vid = video_info.get('video_id') or None
+            normalized = None
+            try:
+                if hasattr(handler, '_normalize_content_id'):
+                    normalized = handler._normalize_content_id(content_id or vid)
+            except Exception:
+                normalized = (vid or content_id)
+            if normalized and hasattr(handler, '_store_content_tts_preselect'):
+                handler._store_content_tts_preselect(normalized, {
+                    'auto_run': True,
+                    'provider': 'local',
+                    'selected_voice': session.get('selected_voice') or {},
+                    'summary_type': session.get('summary_type') or 'audio',
+                    'last_voice': session.get('last_voice'),
+                })
+        except Exception:
+            pass
         pend_sess = pending.get('session') or {}
         pend_provider = pending.get('provider_key') or 'ollama'
         pend_model = pending.get('model_option') or {}
@@ -569,7 +923,7 @@ async def handle_callback(handler, query, callback_data: str) -> None:
             await handle_local_unavailable(handler, query, session, message=str(exc))
             return
 
-async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path: Path, provider: str) -> None:
+async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path: Path, provider: str, update_status=None) -> None:
     provider_label = "Local TTS hub" if provider == 'local' else "OpenAI TTS"
     metrics.record_tts(True)
     video_info = session.get('video_info') or {}
@@ -618,6 +972,12 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
         if content_identifier and ':' not in content_identifier:
             content_identifier = f"yt:{content_identifier}"
 
+        # Update UI before dashboard upload
+        try:
+            if update_status:
+                await update_status("📡 Uploading audio to dashboard…")
+        except Exception:
+            pass
         sync_result = sync_service.sync_audio_variant(
             normalized_id,
             summary_type,
@@ -633,6 +993,11 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
             )
         if content_identifier:
             logging.debug("Audio ready for %s (dashboard upload via Postgres)", content_identifier)
+        try:
+            if update_status and sync_result.get("success"):
+                await update_status("✅ Uploaded audio to dashboard")
+        except Exception:
+            pass
 
         audio_reply_markup = handler._build_audio_inline_keyboard(
             normalized_id,
@@ -666,6 +1031,14 @@ async def finalize_delivery(handler, query, session: Dict[str, Any], audio_path:
             await handler._refresh_tts_catalog(query, session)
         else:
             await query.answer("Audio sent — select another voice")
+    except Exception:
+        pass
+
+    # Once delivery succeeds, clear any content-anchored preselect for this item
+    try:
+        if normalized_video_id and hasattr(handler, '_remove_content_tts_preselect'):
+            handler._remove_content_tts_preselect(normalized_video_id)
+            logging.info("[TTS] Cleared content-anchored preselect for %s after delivery", normalized_video_id)
     except Exception:
         pass
 

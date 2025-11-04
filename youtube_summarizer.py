@@ -110,6 +110,18 @@ class YouTubeSummarizer:
         # Lazy-initialized local TTS hub client
         self._tts_hub_client: Optional[TTSHubClient] = None
 
+        # Optional status callback for UI progress (set by caller)
+        self.status_callback = None  # type: ignore[attr-defined]
+
+    def _notify_status(self, message: str) -> None:
+        """Notify external status callback if configured (non-blocking)."""
+        try:
+            cb = getattr(self, "status_callback", None)
+            if callable(cb) and isinstance(message, str) and message.strip():
+                cb(message.strip())
+        except Exception:
+            pass
+
     def _apply_ytdlp_env(self, ydl_opts: dict) -> None:
         """Apply environment-driven tweaks to yt-dlp options.
 
@@ -323,6 +335,10 @@ class YouTubeSummarizer:
             summary_language = transcript_language
 
         print("Analyzing content...")
+        try:
+            self._notify_status("🔎 Analyzing content & categorizing…")
+        except Exception:
+            pass
         if isinstance(summary_data, dict):
             summary_text = summary_data.get("summary", "") or ""
             if not summary_text:
@@ -1283,6 +1299,10 @@ class YouTubeSummarizer:
         
         # For shorter transcripts, use direct processing
         print(f"📄 Processing transcript directly ({len(transcript):,} chars)")
+        try:
+            self._notify_status("📝 Drafting audio summary text…")
+        except Exception:
+            pass
         
         # Normalize summary_type to canonical keys for robust matching
         TYPE_MAP = {
@@ -1315,6 +1335,10 @@ class YouTubeSummarizer:
             
             # Then translate/adapt with vocabulary support
             target_lang = "French" if normalized_type == "audio_fr" else "Spanish"
+            try:
+                self._notify_status(f"🌐 Translating to {target_lang}…")
+            except Exception:
+                pass
             final_audio_text = await self._create_translated_audio_summary(
                 base_audio_text, target_lang, proficiency_level
             )
@@ -2646,17 +2670,33 @@ Multiple Categories (when content genuinely spans areas):
         voice: Optional[str] = None,
         engine: Optional[str] = None,
         favorite_slug: Optional[str] = None,
+        progress: Optional[object] = None,
     ) -> Optional[str]:
         """Generate TTS for multiple chunks and combine them"""
         import tempfile
         import shutil
         
+        async def _call_progress(event: dict):
+            if not progress:
+                return
+            try:
+                res = progress(event)
+                import asyncio as _asyncio
+                if _asyncio.iscoroutine(res):
+                    await res  # type: ignore
+            except Exception:
+                pass
+
         chunk_files = []
         
         try:
             # Generate TTS for each chunk
             for i, chunk in enumerate(text_chunks):
                 print(f"🎵 Generating TTS for chunk {i+1}/{len(text_chunks)} ({len(chunk)} chars)")
+                try:
+                    await _call_progress({'stage': 'chunk_start', 'index': i+1, 'total': len(text_chunks), 'chars': len(chunk)})
+                except Exception:
+                    pass
                 
                 with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as temp_file:
                     chunk_filename = temp_file.name
@@ -2674,8 +2714,16 @@ Multiple Categories (when content genuinely spans areas):
                 if chunk_result:
                     chunk_files.append(chunk_filename)
                     print(f"✅ Generated chunk {i+1}")
+                    try:
+                        await _call_progress({'stage': 'chunk_done', 'index': i+1, 'total': len(text_chunks)})
+                    except Exception:
+                        pass
                 else:
                     print(f"❌ Failed to generate chunk {i+1}")
+                    try:
+                        await _call_progress({'stage': 'chunk_fail', 'index': i+1, 'total': len(text_chunks)})
+                    except Exception:
+                        pass
                     # Clean up any files created so far
                     for f in chunk_files:
                         try:
@@ -2695,6 +2743,10 @@ Multiple Categories (when content genuinely spans areas):
             exports_dir.mkdir(exist_ok=True)
             final_filename = str(exports_dir / base_filename)
             
+            try:
+                await _call_progress({'stage': 'combining', 'parts': len(chunk_files)})
+            except Exception:
+                pass
             if len(chunk_files) == 1:
                 # Only one chunk, just rename it
                 shutil.move(chunk_files[0], final_filename)
@@ -2706,15 +2758,27 @@ Multiple Categories (when content genuinely spans areas):
                     shutil.move(chunk_files[0], final_filename)
             
             print(f"✅ Combined TTS audio saved: {final_filename}")
+            try:
+                await _call_progress({'stage': 'combined', 'path': final_filename})
+            except Exception:
+                pass
             
             # Update JSON with MP3 metadata if generation succeeded
             if json_filepath:
                 self._update_json_with_mp3_metadata(json_filepath, final_filename)
             
+            try:
+                await _call_progress({'stage': 'done', 'path': final_filename})
+            except Exception:
+                pass
             return final_filename
             
         except Exception as e:
             print(f"❌ Chunked TTS generation failed: {e}")
+            try:
+                await _call_progress({'stage': 'error', 'message': str(e)})
+            except Exception:
+                pass
             return None
         finally:
             # Clean up temporary chunk files
@@ -2735,14 +2799,42 @@ Multiple Categories (when content genuinely spans areas):
         voice: Optional[str] = None,
         engine: Optional[str] = None,
         favorite_slug: Optional[str] = None,
+        progress: Optional[object] = None,
     ) -> Optional[str]:
         """Generate TTS for a single text chunk"""
         provider = (provider or "openai").lower()
+        async def _call_progress(event: dict):
+            if not progress:
+                return
+            try:
+                res = progress(event)
+                import asyncio as _asyncio
+                if _asyncio.iscoroutine(res):
+                    await res  # type: ignore
+            except Exception:
+                pass
+
+        try:
+            await _call_progress({'stage': 'single_start'})
+        except Exception:
+            pass
 
         if provider == "local":
             client = local_client or self._resolve_local_tts_client()
             if not client:
                 raise LocalTTSUnavailable("Local TTS hub is not configured.")
+            try:
+                import logging as _logging
+                _logging.info(
+                    "[TTS] local synth start base=%s engine=%s fav=%s voice=%s text_len=%d",
+                    getattr(client, 'base_api_url', None),
+                    engine,
+                    favorite_slug,
+                    voice,
+                    len(text or ""),
+                )
+            except Exception:
+                pass
             try:
                 result = await client.synthesise(
                     text,
@@ -2760,12 +2852,20 @@ Multiple Categories (when content genuinely spans areas):
                 raise LocalTTSUnavailable("Local TTS hub returned no audio data.")
             with open(output_filename, "wb") as f:
                 f.write(audio_bytes)
+            try:
+                await _call_progress({'stage': 'single_done', 'path': output_filename})
+            except Exception:
+                pass
             return output_filename
 
         # Default to OpenAI provider
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             print("❌ OPENAI_API_KEY not found")
+            try:
+                await _call_progress({'stage': 'error', 'message': 'openai_key_missing'})
+            except Exception:
+                pass
             return None
             
         url = "https://api.openai.com/v1/audio/speech"
@@ -2920,9 +3020,15 @@ Multiple Categories (when content genuinely spans areas):
         voice: Optional[str] = None,
         engine: Optional[str] = None,
         favorite_slug: Optional[str] = None,
+        progress: Optional[object] = None,
     ) -> Optional[str]:
         """Generate TTS audio with support for local hub or OpenAI."""
         provider = (provider or "openai").lower()
+        try:
+            import logging as _logging
+            _logging.info("[TTS] enter generate_tts_audio provider=%s text_len=%d", provider, len(text or ""))
+        except Exception:
+            pass
 
         # Generate filename if not provided
         if not output_filename:
@@ -2934,9 +3040,42 @@ Multiple Categories (when content genuinely spans areas):
         exports_dir.mkdir(exist_ok=True)
         output_path = exports_dir / output_filename
 
-        # Determine whether chunking is required (OpenAI limit ~4096 chars)
-        should_chunk = len(text) > 4090
-        chunks = self._split_text_for_tts(text) if should_chunk else [text]
+        # Determine whether chunking is required (provider-aware)
+        # OpenAI typically needs ~4090 char chunks; local hubs may benefit from smaller chunks.
+        local_chunk_chars = None
+        try:
+            local_chunk_chars = int(os.getenv('TTS_LOCAL_CHUNK_CHARS', '1800'))
+        except Exception:
+            local_chunk_chars = 1800
+        openai_chunk_chars = None
+        try:
+            openai_chunk_chars = int(os.getenv('TTS_OPENAI_CHUNK_CHARS', '4090'))
+        except Exception:
+            openai_chunk_chars = 4090
+
+        if provider == 'local':
+            limit = max(500, local_chunk_chars or 1800)
+        else:
+            limit = max(1000, openai_chunk_chars or 4090)
+
+        should_chunk = len(text) > limit
+        chunks = self._split_text_for_tts(text, max_chunk_chars=limit) if should_chunk else [text]
+        try:
+            import logging as _logging
+            _logging.info("[TTS] chunk decision provider=%s limit=%d chunks=%d", provider, limit, len(chunks))
+        except Exception:
+            pass
+
+        async def _call_progress(event: dict):
+            if not progress:
+                return
+            try:
+                res = progress(event)
+                import asyncio as _asyncio
+                if _asyncio.iscoroutine(res):
+                    await res  # type: ignore
+            except Exception:
+                pass
 
         local_client: Optional[TTSHubClient] = None
         if provider == "local":
@@ -2945,6 +3084,13 @@ Multiple Categories (when content genuinely spans areas):
                 raise LocalTTSUnavailable("Local TTS hub is not configured.")
 
         try:
+            # Initial progress signal
+            await _call_progress({
+                'stage': 'init',
+                'provider': provider,
+                'text_len': len(text),
+                'chunks': len(chunks),
+            })
             if len(chunks) > 1:
                 print(f"📝 Audio summary is {len(text)} characters, generating across {len(chunks)} chunks…")
                 result_path = await self._generate_chunked_tts(
@@ -2956,6 +3102,7 @@ Multiple Categories (when content genuinely spans areas):
                     voice=voice,
                     engine=engine,
                     favorite_slug=favorite_slug,
+                    progress=progress,
                 )
             else:
                 result_path = await self._generate_single_tts(
@@ -2966,6 +3113,7 @@ Multiple Categories (when content genuinely spans areas):
                     voice=voice,
                     engine=engine,
                     favorite_slug=favorite_slug,
+                    progress=progress,
                 )
                 if result_path and json_filepath:
                     self._update_json_with_mp3_metadata(json_filepath, str(output_path))
@@ -2975,6 +3123,10 @@ Multiple Categories (when content genuinely spans areas):
                 return result_path
 
             print("❌ TTS generation returned no audio")
+            try:
+                await _call_progress({'stage': 'error', 'message': 'no_audio'})
+            except Exception:
+                pass
             return None
 
         except LocalTTSUnavailable as exc:
@@ -2982,6 +3134,10 @@ Multiple Categories (when content genuinely spans areas):
             raise
         except Exception as exc:
             print(f"❌ TTS generation failed: {exc}")
+            try:
+                await _call_progress({'stage': 'error', 'message': str(exc)})
+            except Exception:
+                pass
             return None
 
     def _update_json_with_mp3_metadata(self, json_filepath: str, mp3_filepath: str) -> bool:

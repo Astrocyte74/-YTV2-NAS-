@@ -12,6 +12,7 @@ import asyncio
 import os
 import urllib.parse
 from typing import Any, Dict, Iterable, List, Optional, Set
+import logging
 
 try:
     import requests  # type: ignore
@@ -145,6 +146,18 @@ class TTSHubClient:
                 except Exception:
                     to = 20.0
             try:
+                logging.info(
+                    "[HUB] POST /synthesise base=%s fav=%s voice=%s engine=%s text_len=%d timeout=%.1f",
+                    self.base_api_url,
+                    favorite_slug,
+                    voice_id,
+                    engine,
+                    len(text or ""),
+                    to,
+                )
+            except Exception:
+                pass
+            try:
                 resp = requests.post(  # type: ignore
                     f"{self.base_api_url}/synthesise", json=payload, timeout=to
                 )
@@ -158,6 +171,14 @@ class TTSHubClient:
                 audio_resp.raise_for_status()
                 data["audio_bytes"] = audio_resp.content
                 data["audio_url"] = audio_url
+                try:
+                    logging.info(
+                        "[HUB] GET audio bytes ok url=%s size=%d",
+                        audio_url,
+                        len(data["audio_bytes"] or b""),
+                    )
+                except Exception:
+                    pass
                 return data
             except requests.exceptions.RequestException as exc:  # type: ignore
                 raise LocalTTSUnavailable(str(exc))

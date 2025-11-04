@@ -3243,6 +3243,13 @@ class YouTubeTelegramBot:
             await self._show_main_summary_options(query)
             return
 
+        # UX: reflect the chosen LLM/model immediately so the menu "updates"
+        try:
+            chosen_label = provider_label or f"{model_option.get('provider','').title()}"
+            await query.edit_message_text(f"🧠 Using {self._escape_markdown(chosen_label)}… Starting summary…", parse_mode=ParseMode.MARKDOWN)
+        except Exception:
+            pass
+
         await self._process_content_summary(
             query,
             summary_type,
@@ -3272,12 +3279,8 @@ class YouTubeTelegramBot:
             return
 
         selected_model = model_options[index]
-        # For audio variants, prompt TTS preselection before starting summary
-        summary_type = session.get("summary_type") or ""
-        if isinstance(summary_type, str) and summary_type.startswith("audio"):
-            await self._start_tts_preselect_flow(query, session, provider_key, selected_model)
-        else:
-            await self._execute_summary_with_model(query, session, provider_key, selected_model)
+        # Linear flow: run summary first; TTS selection happens after summary
+        await self._execute_summary_with_model(query, session, provider_key, selected_model)
 
     async def _handle_summary_model_back(self, query) -> None:
         chat_id = query.message.chat.id
@@ -4309,8 +4312,136 @@ class YouTubeTelegramBot:
             cloud_label = cloud_option.get("button_label") or "Cloud"
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
+            # Add LLM auto-default hint if configured
+            try:
+                llm_delay = int(os.getenv('LLM_AUTO_DEFAULT_SECONDS', '0') or '0')
+            except Exception:
+                llm_delay = 0
+            if summary_type.startswith("audio") and llm_delay > 0:
+                # Prefer local default model; otherwise show cloud default hint
+                default_hint = None
+                try:
+                    default_local = (os.getenv('QUICK_LOCAL_MODEL') or '').strip()
+                except Exception:
+                    default_local = ''
+                if default_local:
+                    default_hint = f"Ollama • {self._short_model_name(default_local)}"
+                else:
+                    try:
+                        from llm_config import get_quick_cloud_env_model as _get_qc
+                        cloud_slug = _get_qc()
+                    except Exception:
+                        cloud_slug = ''
+                    if cloud_slug:
+                        try:
+                            from llm_config import llm_config as _lc
+                            resolved_provider, resolved_model, _ = _lc.get_model_config(None, cloud_slug)
+                            prov_name = self._friendly_llm_provider(resolved_provider)
+                            default_hint = f"{prov_name} • {self._short_model_name(resolved_model)}"
+                        except Exception:
+                            prov_name = 'Cloud'
+                            default_hint = f"{prov_name} • {self._short_model_name(cloud_slug)}"
+                if default_hint:
+                    prompt_text += f"\n\n⏱️ Auto-selecting {default_hint} in {llm_delay}s — tap to change"
             picks = self._quick_pick_candidates(provider_options, user_id)
-            # For audio variants, surface combo buttons that will auto-run end-to-end
+
+            # Auto-select LLM for audio summaries after a short delay: prefer local QUICK_LOCAL_MODEL
+            if summary_type.startswith("audio"):
+                try:
+                    default_local = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+                    llm_delay = int(os.getenv("LLM_AUTO_DEFAULT_SECONDS", "0") or "0")
+                except Exception:
+                    default_local = ""
+                    llm_delay = 0
+                if default_local and llm_delay > 0:
+                    try:
+                        import asyncio as _asyncio
+                        chat_id = query.message.chat.id
+                        message_id = query.message.message_id
+                        async def _auto_llm_default():
+                            try:
+                                await _asyncio.sleep(llm_delay)
+                            except Exception:
+                                return
+                            sess = self._get_summary_session(chat_id, message_id)
+                            if not isinstance(sess, dict):
+                                return
+                            # If user already picked a provider/model, skip auto-run
+                            if sess.get("selected_provider"):
+                                return
+                            model_option = {
+                                "provider": "ollama",
+                                "model": default_local,
+                                "label": f"Ollama • {self._short_model_name(default_local)}",
+                                "button_label": f"{self._short_label(self._short_model_name(default_local), 24)}",
+                            }
+                            try:
+                                # Update the selection message to indicate summary is starting and clear the keyboard
+                                from telegram.constants import ParseMode as _PM
+                                await self.application.bot.edit_message_text(
+                                    chat_id=chat_id,
+                                    message_id=message_id,
+                                    text=f"🧠 Starting summary • Ollama • {self._short_model_name(default_local)}",
+                                    parse_mode=_PM.MARKDOWN,
+                                    reply_markup=None,
+                                )
+                            except Exception:
+                                pass
+                            await self._execute_summary_with_model(query, sess or session_payload, "ollama", model_option)
+                        _asyncio.create_task(_auto_llm_default())
+                    except Exception:
+                        pass
+                elif llm_delay > 0:
+                    # Try cloud QUICK_CLOUD_MODEL after delay if local default not set
+                    try:
+                        from llm_config import get_quick_cloud_env_model as _get_qc
+                        cloud_slug = _get_qc()
+                    except Exception:
+                        cloud_slug = ""
+                    if cloud_slug:
+                        try:
+                            import asyncio as _asyncio
+                            chat_id = query.message.chat.id
+                            message_id = query.message.message_id
+                            async def _auto_llm_default_cloud():
+                                try:
+                                    await _asyncio.sleep(llm_delay)
+                                except Exception:
+                                    return
+                                sess = self._get_summary_session(chat_id, message_id)
+                                if not isinstance(sess, dict):
+                                    return
+                                if sess.get("selected_provider"):
+                                    return
+                                # Resolve provider/model via llm_config
+                                try:
+                                    from llm_config import llm_config as _lc
+                                    resolved_provider, resolved_model, _ = _lc.get_model_config(None, cloud_slug)
+                                except Exception:
+                                    resolved_provider, resolved_model = ("openrouter", cloud_slug)
+                                model_option = {
+                                    "provider": resolved_provider,
+                                    "model": resolved_model,
+                                    "label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                                    "button_label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
+                                }
+                                try:
+                                    # Update the selection message and remove keyboard
+                                    from telegram.constants import ParseMode as _PM
+                                    await self.application.bot.edit_message_text(
+                                        chat_id=chat_id,
+                                        message_id=message_id,
+                                        text=f"🧠 Starting summary • {self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                                        parse_mode=_PM.MARKDOWN,
+                                        reply_markup=None,
+                                    )
+                                except Exception:
+                                    pass
+                                await self._execute_summary_with_model(query, sess or session_payload, resolved_provider, model_option)
+                            _asyncio.create_task(_auto_llm_default_cloud())
+                        except Exception:
+                            pass
+            # Fallback: show provider keyboard
             if summary_type.startswith("audio"):
                 keyboard = self._build_provider_with_combos_keyboard(
                     cloud_label,
@@ -4420,12 +4551,8 @@ class YouTubeTelegramBot:
                 self._remember_last_model(user_id, provider_key, model_option.get("model"))
             except Exception:
                 pass
-            # Early TTS only for audio variants; otherwise run summary directly
-            summary_type = (session.get("summary_type") or "").strip().lower()
-            if summary_type.startswith("audio"):
-                await self._start_tts_preselect_flow(query, session, provider_key, model_option)
-            else:
-                await self._execute_summary_with_model(query, session, provider_key, model_option)
+            # Linear flow: always run summary first; TTS selection occurs after summary
+            await self._execute_summary_with_model(query, session, provider_key, model_option)
             return
         elif callback_data.startswith("summary_combo:"):
             # One-tap combo: derive model + TTS from env quicks and auto-run end-to-end
@@ -4456,12 +4583,7 @@ class YouTubeTelegramBot:
                     }
                     # Preselect OpenAI TTS voice from env (default: fable)
                     cloud_voice = (os.getenv("TTS_CLOUD_VOICE") or "fable").strip()
-                    preselected = {
-                        'auto_run': True,
-                        'provider': 'openai',
-                        'selected_voice': {'favorite_slug': None, 'voice_id': cloud_voice, 'engine': None},
-                    }
-                    self._store_tts_session(chat_id, message_id, preselected)
+                    # Do not preselect TTS here; keep linear flow
                     await self._execute_summary_with_model(query, session, "cloud", model_option)
                     return
                 elif combo_kind == "local":
@@ -4486,22 +4608,7 @@ class YouTubeTelegramBot:
                             if "|" in token:
                                 eng, slug = token.split("|", 1)
                                 selected_voice = {'favorite_slug': slug.strip(), 'voice_id': None, 'engine': eng.strip()}
-                    preselected = {
-                        'auto_run': True,
-                        'provider': 'local',
-                        'selected_voice': selected_voice or {},
-                    }
-                    self._store_tts_session(chat_id, message_id, preselected)
-                    logging.info("[TTS-COMBO] Stored message-anchored preselect for local combo: chat=%s msg=%s", chat_id, message_id)
-                    # Also anchor by content so downstream can recover preselect if message key changes
-                    try:
-                        content_id = (self.current_item or {}).get('content_id')
-                        normalized_id = self._normalize_content_id(content_id) if content_id else None
-                        if normalized_id:
-                            self._store_content_tts_preselect(normalized_id, preselected)
-                            logging.info("[TTS-COMBO] Stored content-anchored preselect: video_id=%s", normalized_id)
-                    except Exception:
-                        pass
+                    # Do not preselect TTS here; keep linear flow
                     await self._execute_summary_with_model(query, session, "ollama", model_option)
                     return
                 else:

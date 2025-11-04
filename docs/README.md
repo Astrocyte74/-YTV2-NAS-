@@ -6,6 +6,28 @@
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
 - Audio variants are generated on the NAS, flagged in Postgres (`content.has_audio=true`), and then pulled by the dashboard from the synced exports share so Listen chips stream immediately.
 
+### Audio Summary (Linear Flow)
+- Linear sequence for all sources (YouTube, Reddit, Web):
+  1) Choose “Audio Summary”
+  2) LLM selection (auto‑default supported)
+  3) Summary + illustration
+  4) TTS selection (auto‑default supported) → MP3 + dashboard upload
+
+- LLM auto‑default (optional):
+  - If `LLM_AUTO_DEFAULT_SECONDS > 0`, the chooser shows a countdown hint and auto‑selects after the delay:
+    - Prefer `QUICK_LOCAL_MODEL` (e.g., `gemma3:12b`), else fall back to `QUICK_CLOUD_MODEL` (e.g., `google/gemini-2.5-flash-lite`).
+  - When auto‑select triggers, the chooser message updates to “Starting summary …” and the keyboard is removed.
+
+- TTS auto‑default (optional):
+  - If `TTS_AUTO_DEFAULT_SECONDS > 0`, the TTS chooser shows a countdown hint and auto‑selects after the delay:
+    - Prefer Local favorite (first from `TTS_QUICK_FAVORITE`, e.g., `kokoro|favorite--bm-daniel`), else fall back to OpenAI voice `TTS_CLOUD_VOICE` (e.g., `fable`).
+  - When TTS starts (auto or manual), the chooser updates to “Starting text‑to‑speech …” and the keyboard is removed. Status then shows fine‑grained TTS progress (preparing → chunk i/N → combining → upload) before the MP3 posts.
+
+- Summary status updates (before illustration):
+  - Periodic spinner with elapsed time (`SUMMARY_STATUS_INTERVAL`, default 10s): “🔄/⏳/⌛ Analyzing content and drafting summary… (Xs)”
+  - Step‑level cues (lightweight): drafting audio summary text, translating (fr/es), analyzing & categorizing
+  - Illustration cue: “🎨 Generating illustration…” just before the image is attached
+
 ## Draw Things Integration
 - Hub base: set `TTSHUB_API_BASE=http://192.168.7.134:7860/api` (WireGuard IP + hub port). All calls go through the hub proxy; do not hit Draw Things on `127.0.0.1:7861` from the NAS.
 - Convenience endpoint: `POST $TTSHUB_API_BASE/telegram/draw` accepts `{prompt,width,height,steps,seed?,negative?,sampler?,cfgScale?}` and returns a JSON payload with a relative `url` under `/image/drawthings/`.
@@ -57,6 +79,16 @@
   - `TTSHUB_TIMEOUT_FAVORITES` — favorites fetch (default `6`)
   - `TTSHUB_TIMEOUT_SYNTH` — synthesis POST (default `20`)
   - These apply only to TTS requests and can be left at defaults in most setups.
+
+- Linear Audio Flow (auto‑defaults & status):
+  - `LLM_AUTO_DEFAULT_SECONDS` — auto‑select the LLM after N seconds (audio only)
+  - `QUICK_LOCAL_MODEL` — default local model for LLM auto‑select (e.g., `gemma3:12b`)
+  - `QUICK_CLOUD_MODEL` — default cloud model (slug, e.g., `google/gemini-2.5-flash-lite`)
+  - `TTS_AUTO_DEFAULT_SECONDS` — auto‑select TTS after N seconds
+  - `TTS_QUICK_FAVORITE` — comma‑separated local favorites (`engine|slug`) for auto‑default
+  - `TTS_CLOUD_VOICE` — OpenAI voice fallback (e.g., `fable`)
+  - `TTS_FALLBACK_TO_OPENAI` — `1|true|yes` enables auto‑fallback on local failure/timeout
+  - `SUMMARY_STATUS_INTERVAL` — seconds between status spinner updates during summary (default `10`)
 
 ## Admin & Dashboard Health
 

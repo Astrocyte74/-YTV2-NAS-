@@ -606,6 +606,11 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
         if image_path:
             try:
+                # Status update: illustration phase
+                try:
+                    await _safe_edit_status(query, "🎨 Generating illustration…")
+                except Exception:
+                    pass
                 # Use a separate reply so we don't overwrite the summary message
                 try:
                     await query.message.reply_text("🖼️ Attaching illustration…")
@@ -622,8 +627,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             except Exception as exc:
                 logging.debug("Failed to send summary image to Telegram: %s", exc)
 
-        if summary_type.startswith("audio"):
-            await handler._prepare_tts_generation(query, result, summary, summary_type)
+        # TTS handoff occurs after this try/except to avoid duplicate starts if UI raises
 
     except Exception as exc:
         logging.error("Error sending formatted response: %s", exc)
@@ -634,31 +638,14 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
         except Exception as e2:
             logging.debug("Secondary error while reporting formatting error: %s", e2)
 
-        # Even if formatting failed, continue with TTS for audio summaries
-        try:
-            if isinstance(summary_type, str) and summary_type.startswith("audio"):
-                # Decide whether we will auto-run TTS or prompt provider
-                preselected = None
-                try:
-                    chat_id = query.message.chat.id if query.message else None
-                    message_id = query.message.message_id if query.message else None
-                    if chat_id and message_id:
-                        preselected = handler._get_tts_session(chat_id, message_id)
-                except Exception:
-                    preselected = None
-                if isinstance(preselected, dict) and preselected.get('auto_run'):
-                    try:
-                        await query.message.reply_text("⏳ Summary generated. Starting TTS…")
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        await query.message.reply_text("⏳ Summary generated. Preparing TTS options…")
-                    except Exception:
-                        pass
-                await handler._prepare_tts_generation(query, result, summary, summary_type)
-        except Exception as e3:
-            logging.debug("Skipped TTS continuation after formatting error: %s", e3)
+        # (No TTS handoff here; see below)
+
+    # Start TTS once, regardless of UI success/failure
+    try:
+        if isinstance(summary_type, str) and summary_type.startswith("audio"):
+            await handler._prepare_tts_generation(query, result, summary, summary_type)
+    except Exception as e3:
+        logging.debug("TTS handoff error after formatted response: %s", e3)
 
 
 async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary_text: str, summary_type: str) -> None:
@@ -713,14 +700,22 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         # Fallback: find any auto-run TTS session anchored to this chat that matches the summary type
         if not preselected and chat_id is not None:
             try:
+                base_target = (summary_type or '').split(':', 1)[0]
                 for (c_id, m_id), sess in list(getattr(handler, 'tts_sessions', {}).items()):
                     if c_id != chat_id or not isinstance(sess, dict):
                         continue
                     if not sess.get('auto_run'):
                         continue
-                    st = sess.get('summary_type')
-                    if not st or st == summary_type:
+                    st = (sess.get('summary_type') or '')
+                    st_base = st.split(':', 1)[0] if isinstance(st, str) else ''
+                    if not st or st == summary_type or st_base == base_target:
                         preselected = sess
+                        # Also promote to content-anchored for robustness
+                        try:
+                            if normalized_video_id and hasattr(handler, '_store_content_tts_preselect'):
+                                handler._store_content_tts_preselect(normalized_video_id, preselected)
+                        except Exception:
+                            pass
                         break
             except Exception:
                 pass
@@ -762,6 +757,13 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         if last_voice:
             session_payload['last_voice'] = last_voice
 
+    # Force prompt flow (match main's reliable callback path)
+    try:
+        logging.info("[TTS-PREP] Forcing prompt for provider/voice to match main flow")
+    except Exception:
+        pass
+    provider = None
+
     processor_info = result.get('processor_info') or {}
     proc_provider = processor_info.get('llm_provider') or ''
     proc_model = processor_info.get('model') or ''
@@ -798,11 +800,8 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
             logging.debug("Unable to post TTS status message: %s", exc)
 
         try:
-            # Minimal diagnostic: log provider + summary_text length before TTS
-            try:
-                logging.info("[TTS-START] provider=%s text_len=%d", provider, len(summary or ''))
-            except Exception:
-                pass
+            # Minimal diagnostic: log provider + summary text length before TTS
+            logging.info("[TTS-START] provider=%s text_len=%d", provider, len((summary_text or '')))            
             await handler._execute_tts_job(query, session_payload, provider)
         finally:
             try:
@@ -812,6 +811,10 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
                 pass
             # Do NOT remove content-anchored preselect here; defer until audio delivery succeeds
     else:
+        try:
+            logging.info("[TTS-PREP] No auto-run preselect found; prompting provider/voice")
+        except Exception:
+            pass
         await handler._prompt_tts_provider(query, session_payload, title)
 
 
@@ -1026,7 +1029,7 @@ async def process_content_summary(
         default_prefix = prefix_map.get(source, "🔄")
         message = processing_messages.get(base_type, f"{default_prefix} Processing {summary_type}... This may take a moment.")
 
-    # Enrich the status with chosen LLM (always); include TTS if preselected for audio
+    # Enrich the status with chosen LLM; do not pre-announce TTS here to avoid duplicate lines
     try:
         chat_id = query.message.chat.id if query.message else None
         message_id = query.message.message_id if query.message else None
@@ -1042,7 +1045,7 @@ async def process_content_summary(
     extra_lines = []
     if llm_label:
         extra_lines.append(f"LLM: {llm_label}")
-    # TTS line (audio only)
+    # TTS line (audio only) — show only if a preselect exists, but avoid 'Starting…' here
     if base_type.startswith("audio") and isinstance(preselected, dict):
         tts_provider = (preselected.get('provider') or '').lower()
         sel = preselected.get('selected_voice') or {}
@@ -1057,6 +1060,37 @@ async def process_content_summary(
         message = f"{message}\n\n" + " • ".join(extra_lines)
 
     await _safe_edit_status(query, message)
+
+    # Periodic status updates during summary phase (until export)
+    progress_task = None
+    try:
+        import asyncio as _asyncio
+        start_ts = time.monotonic()
+        try:
+            interval = int(os.getenv('SUMMARY_STATUS_INTERVAL', '10') or '10')
+        except Exception:
+            interval = 10
+        async def _progress_updater():
+            idx = 0
+            symbols = ['🔄', '⏳', '⌛']
+            while True:
+                await _asyncio.sleep(interval)
+                elapsed = int(time.monotonic() - start_ts)
+                sym = symbols[idx % len(symbols)]
+                idx += 1
+                status_lines = [f"{sym} Analyzing content and drafting summary… ({elapsed}s)"]
+                try:
+                    if llm_label:
+                        status_lines.append(f"LLM: {handler._escape_markdown(llm_label)}")
+                except Exception:
+                    pass
+                try:
+                    await _safe_edit_status(query, "\n".join(status_lines))
+                except Exception:
+                    break
+        progress_task = _asyncio.create_task(_progress_updater())
+    except Exception:
+        progress_task = None
 
     try:
         normalized_id = handler._normalize_content_id(content_id)
@@ -1075,6 +1109,20 @@ async def process_content_summary(
                 logging.info("🔄 Content exists but not marked synced - processing fresh")
 
         logging.info("🎬 PROCESSING: %s | %s | user: %s | URL: %s", display_id, summary_type, user_name, url)
+        # Hook summarizer status to Telegram status updates
+        try:
+            import asyncio as _asyncio
+            def _cb(msg: str) -> None:
+                try:
+                    _asyncio.get_running_loop().create_task(_safe_edit_status(query, msg))
+                except Exception:
+                    pass
+            try:
+                setattr(summarizer, 'status_callback', _cb)
+            except Exception:
+                pass
+        except Exception:
+            pass
         llm_provider = getattr(summarizer, "llm_provider", "unknown")
         llm_model = getattr(summarizer, "model", "unknown")
         llm_label = provider_label or f"{llm_provider}/{llm_model}"
@@ -1176,6 +1224,12 @@ async def process_content_summary(
 
         export_info.update({"html_path": None, "json_path": None})
         try:
+            # Stop periodic spinner once we reach export phase
+            try:
+                if progress_task:
+                    progress_task.cancel()
+            except Exception:
+                pass
             report_dict = create_report_from_youtube_summarizer(result)
             # Apply CJCLDS categorization when applicable (General Conference talks)
             try:
@@ -1284,6 +1338,12 @@ async def process_content_summary(
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)
         await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
+    finally:
+        # Detach status callback to avoid cross-talk with future runs
+        try:
+            setattr(summarizer, 'status_callback', None)
+        except Exception:
+            pass
 
 
 async def _handle_local_summary_unavailable(
