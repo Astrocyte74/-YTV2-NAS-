@@ -752,6 +752,13 @@ async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary
         if last_voice:
             session_payload['last_voice'] = last_voice
 
+    # Force prompt flow (match main's reliable callback path)
+    try:
+        logging.info("[TTS-PREP] Forcing prompt for provider/voice to match main flow")
+    except Exception:
+        pass
+    provider = None
+
     processor_info = result.get('processor_info') or {}
     proc_provider = processor_info.get('llm_provider') or ''
     proc_model = processor_info.get('model') or ''
