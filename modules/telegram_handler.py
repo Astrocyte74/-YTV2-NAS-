@@ -4360,6 +4360,56 @@ class YouTubeTelegramBot:
                         _asyncio.create_task(_auto_llm_default())
                     except Exception:
                         pass
+                elif llm_delay > 0:
+                    # Try cloud QUICK_CLOUD_MODEL after delay if local default not set
+                    try:
+                        from llm_config import get_quick_cloud_env_model as _get_qc
+                        cloud_slug = _get_qc()
+                    except Exception:
+                        cloud_slug = ""
+                    if cloud_slug:
+                        try:
+                            import asyncio as _asyncio
+                            chat_id = query.message.chat.id
+                            message_id = query.message.message_id
+                            async def _auto_llm_default_cloud():
+                                try:
+                                    await _asyncio.sleep(llm_delay)
+                                except Exception:
+                                    return
+                                sess = self._get_summary_session(chat_id, message_id)
+                                if not isinstance(sess, dict):
+                                    return
+                                if sess.get("selected_provider"):
+                                    return
+                                # Resolve provider/model via llm_config
+                                try:
+                                    from llm_config import llm_config as _lc
+                                    resolved_provider, resolved_model, _ = _lc.get_model_config(None, cloud_slug)
+                                except Exception:
+                                    resolved_provider, resolved_model = ("openrouter", cloud_slug)
+                                model_option = {
+                                    "provider": resolved_provider,
+                                    "model": resolved_model,
+                                    "label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                                    "button_label": f"{self._friendly_llm_provider(resolved_provider)} • {self._short_label(self._short_model_name(resolved_model), 24)}",
+                                }
+                                try:
+                                    # Update the selection message and remove keyboard
+                                    from telegram.constants import ParseMode as _PM
+                                    await self.application.bot.edit_message_text(
+                                        chat_id=chat_id,
+                                        message_id=message_id,
+                                        text=f"🧠 Starting summary • {self._friendly_llm_provider(resolved_provider)} • {self._short_model_name(resolved_model)}",
+                                        parse_mode=_PM.MARKDOWN,
+                                        reply_markup=None,
+                                    )
+                                except Exception:
+                                    pass
+                                await self._execute_summary_with_model(query, sess or session_payload, resolved_provider, model_option)
+                            _asyncio.create_task(_auto_llm_default_cloud())
+                        except Exception:
+                            pass
             # Fallback: show provider keyboard
             if summary_type.startswith("audio"):
                 keyboard = self._build_provider_with_combos_keyboard(
