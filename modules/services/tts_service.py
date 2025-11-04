@@ -59,12 +59,22 @@ async def prompt_provider(handler, query, session_payload: Dict[str, Any], title
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="tts_cancel")])
 
     prompt_text = f"🎙️ Choose how to generate audio for **{handler._escape_markdown(title)}**"
-    prompt_message = await query.message.reply_text(
-        prompt_text,
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
-    handler._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
+    # If this is an early preselect (before running summary), replace the current menu
+    # to avoid leaving the LLM list visible; otherwise reply as a new message.
+    if session_payload.get('preselect_only'):
+        await query.edit_message_text(
+            prompt_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        handler._store_tts_session(query.message.chat_id, query.message.message_id, session_payload)
+    else:
+        prompt_message = await query.message.reply_text(
+            prompt_text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        handler._store_tts_session(prompt_message.chat_id, prompt_message.message_id, session_payload)
 
 
 async def handle_local_unavailable(handler, query, session: Dict[str, Any], message: str = "") -> None:
@@ -554,6 +564,27 @@ async def handle_callback(handler, query, callback_data: str) -> None:
                 })
             except Exception:
                 pass
+        # Also anchor by content id so downstream can auto-run without re-prompting
+        try:
+            video_info = session.get('video_info') or {}
+            content_id = video_info.get('content_id') or None
+            vid = video_info.get('video_id') or None
+            normalized = None
+            try:
+                if hasattr(handler, '_normalize_content_id'):
+                    normalized = handler._normalize_content_id(content_id or vid)
+            except Exception:
+                normalized = (vid or content_id)
+            if normalized and hasattr(handler, '_store_content_tts_preselect'):
+                handler._store_content_tts_preselect(normalized, {
+                    'auto_run': True,
+                    'provider': 'local',
+                    'selected_voice': session.get('selected_voice') or {},
+                    'summary_type': session.get('summary_type') or 'audio',
+                    'last_voice': session.get('last_voice'),
+                })
+        except Exception:
+            pass
         pend_sess = pending.get('session') or {}
         pend_provider = pending.get('provider_key') or 'ollama'
         pend_model = pending.get('model_option') or {}
