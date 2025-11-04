@@ -18,6 +18,10 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+import sys
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from modules.postgres_writer import PostgresWriter
 
 
@@ -38,8 +42,9 @@ def load_report_by_video_id(video_id: str) -> Dict[str, Any]:
             except Exception:
                 continue
     if not candidates:
-        raise FileNotFoundError(f"No report JSON found for video_id: {video_id}
-Checked under {root}")
+        raise FileNotFoundError(
+            f"No report JSON found for video_id: {video_id}. Checked under {root}"
+        )
     # Pick the most recent by mtime
     path = max(candidates, key=lambda p: p.stat().st_mtime)
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -106,4 +111,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
