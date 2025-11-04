@@ -1205,6 +1205,64 @@ class YouTubeTelegramBot:
         except Exception:
             pass
 
+        # Dashboard status (version + storage health if token present)
+        try:
+            base = (os.getenv('RENDER_DASHBOARD_URL') or os.getenv('RENDER_API_URL') or '').strip().rstrip('/')
+            if base and requests:
+                # Version
+                ver_txt = ''
+                try:
+                    vr = requests.get(f"{base}/api/version", timeout=8)
+                    if vr.ok:
+                        vj = vr.json() if vr.headers.get('content-type','').startswith('application/json') else {}
+                        commit = (vj.get('deployment_commit') or '').strip()
+                        branch = (vj.get('branch') or '').strip()
+                        ver_txt = f"commit={commit or 'unknown'} branch={branch or 'unknown'}"
+                    else:
+                        ver_txt = f"HTTP {vr.status_code}"
+                except Exception as exc:
+                    ver_txt = f"error: {exc}"
+
+                # Storage health (gated)
+                health_txt = "unauthorized"
+                tok = (os.getenv('DASHBOARD_DEBUG_TOKEN') or '').strip()
+                if tok:
+                    try:
+                        hr = requests.get(
+                            f"{base}/api/health/storage",
+                            headers={"Authorization": f"Bearer {tok}"},
+                            timeout=8,
+                        )
+                        if hr.ok:
+                            hj = hr.json() if hr.headers.get('content-type','').startswith('application/json') else {}
+                            used_pct = int(hj.get('used_pct') or 0)
+                            free = int(hj.get('free_bytes') or 0)
+                            total = int(hj.get('total_bytes') or 0)
+                            def _fmt_bytes(n: int) -> str:
+                                try:
+                                    for unit in ['B','KB','MB','GB','TB']:
+                                        if n < 1024:
+                                            return f"{n}{unit}"
+                                        n //= 1024
+                                    return f"{n}PB"
+                                except Exception:
+                                    return str(n)
+                            health_txt = f"used={used_pct}% free={_fmt_bytes(free)} total={_fmt_bytes(total)}"
+                        else:
+                            health_txt = f"HTTP {hr.status_code}"
+                    except Exception as exc:
+                        health_txt = f"error: {exc}"
+
+                lines.extend([
+                    "",
+                    "🌐 Dashboard:",
+                    f"• Base: {base}",
+                    f"• Version: {ver_txt}",
+                    f"• Storage: {health_txt}",
+                ])
+        except Exception:
+            pass
+
         # Admin command hints
         lines.extend([
             "",
