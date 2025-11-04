@@ -219,6 +219,7 @@ These Telegram commands are available to admin users (allowed IDs) to help opera
   - Summarizer and LLM config
   - Local LLM (hub/direct) provider, base, reachability, installed models
   - TTS hub favorites/engines, queue status, process uptime, Git SHA
+  - Dashboard version and storage health (requires `DASHBOARD_DEBUG_TOKEN`)
   - Admin shortcuts: Diagnostics, Logs, Restart
 - `/diag` — One-shot diagnostics inside the container:
   - Python/platform, yt-dlp/ffmpeg, disk usage, uptime
@@ -229,6 +230,24 @@ These Telegram commands are available to admin users (allowed IDs) to help opera
 
 Notes
 - Local LLM routing is handled by a unified client that prefers the hub when `TTSHUB_API_BASE` is set and falls back to direct Ollama when `OLLAMA_URL`/`OLLAMA_HOST` is set. Errors are normalized to enable clean cloud fallback.
+
+### Storage Health & Gating (Dashboard)
+
+- Admin endpoints on the dashboard (token‑gated via `DEBUG_TOKEN`):
+  - `GET /api/version` (no auth) → deployment info
+  - `GET /api/health/storage` (Bearer `DASHBOARD_DEBUG_TOKEN`) → `{ total_bytes, used_bytes, free_bytes, used_pct }` and recent files
+  - `GET /api/debug/content?video_id=…` (Bearer token) → raw row preview for ops
+- NAS probes and behavior:
+  - The bot’s `/status` shows dashboard version + storage health when `DASHBOARD_DEBUG_TOKEN` is set.
+  - Before uploads, the NAS client optionally probes `/api/health/storage` and backs off when `used_pct` ≥ `DASHBOARD_STORAGE_BLOCK_PCT` (default 98%).
+  - Upload responses must include `size > 0`; zero‑size is retried.
+  - Early gate in the message handler (when a user pastes a link):
+    - Warn at ≥90% and ≥95% usage; block new processing at ≥99%.
+    - This check is best‑effort and only runs when `DASHBOARD_DEBUG_TOKEN` and `RENDER_DASHBOARD_URL` are set.
+
+Environment (admin probes):
+- `DASHBOARD_DEBUG_TOKEN` – token matching dashboard `DEBUG_TOKEN` (enables probes)
+- `DASHBOARD_STORAGE_BLOCK_PCT` – optional integer (default 98) for pre‑upload backoff threshold
 
 ## 🎨 Draw Things Prompting
 

@@ -58,6 +58,15 @@
   - `TTSHUB_TIMEOUT_SYNTH` — synthesis POST (default `20`)
   - These apply only to TTS requests and can be left at defaults in most setups.
 
+## Admin & Dashboard Health
+
+- Dashboard version: `GET /api/version` (no auth)
+- Storage health (gated): `GET /api/health/storage` with `Authorization: Bearer $DASHBOARD_DEBUG_TOKEN`
+- The `/status` command on NAS shows version + storage when the token is set.
+- Early storage gate in chat:
+  - Warns at ≥90% and ≥95% usage
+  - Blocks new processing at ≥99%
+
 ## Dashboard Notes (Postgres + Uploads)
 - Dashboard reads from Postgres and accepts authenticated uploads for audio/images.
 - JSON endpoints (`/api/reports`, `/<id>.json`) enrich `summary_variants` with `{ kind:'audio', audio_url, duration }` based on `content.media`/`media_metadata`.

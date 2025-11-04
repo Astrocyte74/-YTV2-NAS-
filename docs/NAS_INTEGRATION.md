@@ -71,3 +71,15 @@ Notes
 - Upload responses include `public_url`/`relative_path` and `size`; prefer server‑returned paths.
 - The server sanitizes filenames and keeps DB `video_id` stable.
 - Send consistent `video_id` between content and audio calls.
+
+## Admin & Health (Optional)
+
+Admin endpoints (gated with `DEBUG_TOKEN` on the dashboard; use `DASHBOARD_DEBUG_TOKEN` on NAS):
+- `GET /api/version` (no auth) — deploy metadata
+- `GET /api/health/storage` (`Authorization: Bearer <token>`) — `{ total_bytes, used_bytes, free_bytes, used_pct }`; returns 503 at ≥98% to signal critical
+- `GET /api/debug/content?video_id=<id>` (Bearer token) — raw `content` row for ops
+
+NAS usage:
+- `/status` shows version + storage health when `DASHBOARD_DEBUG_TOKEN` is set
+- Optional pre‑upload backoff when `used_pct ≥ DASHBOARD_STORAGE_BLOCK_PCT` (default 98%)
+- Early chat gate: warn at ≥90/≥95% and block new processing at ≥99%

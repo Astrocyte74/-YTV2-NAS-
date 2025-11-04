@@ -28,3 +28,6 @@ Utility scripts to assist with operations, testing, and migration tasks. Run the
 Notes
 - Modern uploads use `POST /api/upload-audio` (primary) and `POST /api/upload-image` with either `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN: $INGEST_TOKEN`. `POST /ingest/audio` remains as a fallback.
 - After upload success, verify with HEAD on `/exports/audio/<filename>.mp3?v=<audio_version>` and update Postgres fields (`has_audio`, `media.audio_url`, `media_metadata.mp3_duration_seconds`, `audio_version`).
+- Admin/Health:
+  - `tools/dashboard_health.py` prints `/api/version` and (if gated) `/api/health/storage`; exits non‑zero at critical.
+  - Set `DASHBOARD_DEBUG_TOKEN` on NAS to enable storage probes (matches dashboard `DEBUG_TOKEN`).
