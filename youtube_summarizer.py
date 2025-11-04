@@ -2800,6 +2800,18 @@ Multiple Categories (when content genuinely spans areas):
             if not client:
                 raise LocalTTSUnavailable("Local TTS hub is not configured.")
             try:
+                import logging as _logging
+                _logging.info(
+                    "[TTS] local synth start base=%s engine=%s fav=%s voice=%s text_len=%d",
+                    getattr(client, 'base_api_url', None),
+                    engine,
+                    favorite_slug,
+                    voice,
+                    len(text or ""),
+                )
+            except Exception:
+                pass
+            try:
                 result = await client.synthesise(
                     text,
                     voice_id=voice,
