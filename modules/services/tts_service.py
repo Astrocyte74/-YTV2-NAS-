@@ -299,6 +299,36 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
             pass
     except _asyncio.TimeoutError:
         logging.error("TTS synthesis timed out after %ss", os.getenv('TTS_TIMEOUT_SECONDS', '180'))
+        # Optional fallback to OpenAI
+        async def _maybe_fallback(reason: str) -> bool:
+            if provider_key != 'local':
+                return False
+            if (os.getenv('TTS_FALLBACK_TO_OPENAI','0').lower() not in ('1','true','yes')):
+                return False
+            cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+            try:
+                await _update_status("⚠️ Local TTS failed; switching to OpenAI…")
+            except Exception:
+                pass
+            try:
+                audio_fp = await _asyncio.wait_for(handler.summarizer.generate_tts_audio(
+                    summary_text,
+                    audio_filename,
+                    json_placeholder,
+                    provider='openai',
+                    voice=cloud_voice,
+                    engine=None,
+                    favorite_slug=None,
+                    progress=_progress_hook,
+                ), timeout=int(os.getenv('TTS_TIMEOUT_SECONDS','180')))
+                if audio_fp and Path(audio_fp).exists():
+                    await finalize_delivery(handler, query, session, Path(audio_fp), 'openai', update_status=_update_status)
+                    return True
+            except Exception as _exc:
+                logging.error("OpenAI TTS fallback failed: %s", _exc)
+            return False
+        if await _maybe_fallback('timeout'):
+            return
         await query.answer("TTS timed out", show_alert=True)
         await _update_status(
             f"❌ TTS timed out"
@@ -309,6 +339,36 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
     except LocalTTSUnavailable as exc:
         logging.warning("Local TTS unavailable during execution: %s", exc)
         await handle_local_unavailable(handler, query, session, message=str(exc))
+        # Optional fallback to OpenAI
+        async def _maybe_fallback(reason: str) -> bool:
+            if provider_key != 'local':
+                return False
+            if (os.getenv('TTS_FALLBACK_TO_OPENAI','0').lower() not in ('1','true','yes')):
+                return False
+            cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+            try:
+                await _update_status("⚠️ Local TTS unavailable; switching to OpenAI…")
+            except Exception:
+                pass
+            try:
+                audio_fp = await handler.summarizer.generate_tts_audio(
+                    summary_text,
+                    audio_filename,
+                    json_placeholder,
+                    provider='openai',
+                    voice=cloud_voice,
+                    engine=None,
+                    favorite_slug=None,
+                    progress=_progress_hook,
+                )
+                if audio_fp and Path(audio_fp).exists():
+                    await finalize_delivery(handler, query, session, Path(audio_fp), 'openai', update_status=_update_status)
+                    return True
+            except Exception as _exc:
+                logging.error("OpenAI TTS fallback failed: %s", _exc)
+            return False
+        if await _maybe_fallback('unavailable'):
+            return
         await _update_status(
             f"⚠️ Local TTS unavailable"
             + (f" • {handler._escape_markdown(voice_label)}" if voice_label else "")
@@ -317,6 +377,36 @@ async def execute_job(handler, query, session: Dict[str, Any], provider: str) ->
         return
     except Exception as exc:
         logging.error("TTS synthesis error: %s", exc)
+        # Optional fallback to OpenAI on generic failure
+        async def _maybe_fallback(reason: str) -> bool:
+            if provider_key != 'local':
+                return False
+            if (os.getenv('TTS_FALLBACK_TO_OPENAI','0').lower() not in ('1','true','yes')):
+                return False
+            cloud_voice = (os.getenv('TTS_CLOUD_VOICE') or 'fable').strip()
+            try:
+                await _update_status("⚠️ Local TTS failed; switching to OpenAI…")
+            except Exception:
+                pass
+            try:
+                audio_fp = await handler.summarizer.generate_tts_audio(
+                    summary_text,
+                    audio_filename,
+                    json_placeholder,
+                    provider='openai',
+                    voice=cloud_voice,
+                    engine=None,
+                    favorite_slug=None,
+                    progress=_progress_hook,
+                )
+                if audio_fp and Path(audio_fp).exists():
+                    await finalize_delivery(handler, query, session, Path(audio_fp), 'openai', update_status=_update_status)
+                    return True
+            except Exception as _exc:
+                logging.error("OpenAI TTS fallback failed: %s", _exc)
+            return False
+        if await _maybe_fallback('error'):
+            return
         await query.answer("TTS failed", show_alert=True)
         await _update_status(
             f"❌ TTS failed"
