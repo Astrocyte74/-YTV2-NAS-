@@ -4313,7 +4313,24 @@ class YouTubeTelegramBot:
             local_label = (provider_options.get("ollama") or {}).get("button_label")
             prompt_text = f"⚙️ Choose summarization engine for {summary_label}"
             picks = self._quick_pick_candidates(provider_options, user_id)
-            # For audio variants, surface combo buttons that will auto-run end-to-end
+
+            # Auto-select LLM for audio summaries: prefer local QUICK_LOCAL_MODEL
+            if summary_type.startswith("audio"):
+                try:
+                    default_local = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
+                except Exception:
+                    default_local = ""
+                if default_local:
+                    model_option = {
+                        "provider": "ollama",
+                        "model": default_local,
+                        "label": f"Ollama • {self._short_model_name(default_local)}",
+                        "button_label": f"{self._short_label(self._short_model_name(default_local), 24)}",
+                    }
+                    # Linear flow: run summary; TTS selection happens after
+                    await self._execute_summary_with_model(query, session_payload, "ollama", model_option)
+                    return
+            # Fallback: show provider keyboard
             if summary_type.startswith("audio"):
                 keyboard = self._build_provider_with_combos_keyboard(
                     cloud_label,
