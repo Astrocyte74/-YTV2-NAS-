@@ -71,7 +71,14 @@ def variant_kind(variant_id: str) -> str:
 
 
 def format_summary_html(text: str) -> str:
-    """Convert plain text summary into minimalist HTML."""
+    """Convert plain text summary into minimalist HTML.
+
+    Enhancements:
+    - Strip code fence markers (```lang) while keeping content lines
+    - Detect single-line heading blocks ending with ':' → <h3 class="kp-heading">
+    - Detect 'Bottom line:' → <p class="kp-takeaway"><strong>Bottom line:</strong> …</p>
+    - Map bullet lines (•, -, *) → <ul class="kp-list"><li>…</li></ul>
+    """
     if not isinstance(text, str):
         return ""
 
@@ -79,17 +86,36 @@ def format_summary_html(text: str) -> str:
     if not normalized:
         return ""
 
+    # Remove code fence markers to avoid literal ``` blocks in HTML
+    normalized = re.sub(r"^```.*$", "", normalized, flags=re.MULTILINE)
+    normalized = normalized.replace("```", "")
+
     blocks = [block.strip() for block in re.split(r"\n\s*\n", normalized) if block.strip()]
     html_blocks: List[str] = []
 
     for block in blocks:
         lines = [line.strip() for line in block.split("\n") if line.strip()]
+        # Heading block: a single line ending with ':' (short, human heading)
+        if len(lines) == 1 and re.match(r"^[A-Za-z][\w \-/]{1,60}:$", lines[0]):
+            heading = lines[0][:-1].strip()
+            html_blocks.append(f"<h3 class=\"kp-heading\">{html.escape(heading)}</h3>")
+            continue
+
+        # Bottom line detection (case-insensitive)
+        if len(lines) == 1 and re.match(r"^(?i)bottom\s+line:\s*", lines[0]):
+            rest = re.sub(r"^(?i)bottom\s+line:\s*", "", lines[0]).strip()
+            label = "Bottom line:"
+            content = f"<strong>{html.escape(label)}</strong> {html.escape(rest)}" if rest else f"<strong>{html.escape(label)}</strong>"
+            html_blocks.append(f"<p class=\"kp-takeaway\">{content}</p>")
+            continue
+
+        # Bulleted list block
         if lines and all(re.match(r"^[\-*•]", line) for line in lines):
             items = []
             for line in lines:
                 cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
                 items.append(f"<li>{html.escape(cleaned)}</li>")
-            html_blocks.append(f"<ul>{''.join(items)}</ul>")
+            html_blocks.append(f"<ul class=\"kp-list\">{''.join(items)}</ul>")
         else:
             html_blocks.append(f"<p>{html.escape(block)}</p>")
 
