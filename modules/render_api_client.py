@@ -34,6 +34,12 @@ class RenderAPIClient:
             # Allow explicit override while still capturing ingest token for uploads
             self.sync_secret = auth_token
         self.session = requests.Session()
+        # Optional debug/health token for admin probes (storage health, debug content)
+        self.debug_token = (os.getenv('DASHBOARD_DEBUG_TOKEN') or '').strip()
+        try:
+            self.storage_block_pct = int(os.getenv('DASHBOARD_STORAGE_BLOCK_PCT') or 98)
+        except Exception:
+            self.storage_block_pct = 98
 
         if not self.base_url:
             raise ValueError("Set RENDER_API_URL or RENDER_DASHBOARD_URL for Render uploads")
@@ -53,6 +59,24 @@ class RenderAPIClient:
             self.session.headers['Authorization'] = f'Bearer {bearer_token}'
 
         logger.info(f"Initialized Render API client for {self.base_url}")
+
+    # --- optional admin probes ---
+    def _get_storage_health(self) -> dict | None:
+        """Return storage health JSON or None if unavailable/unauthorized."""
+        if not self.debug_token:
+            return None
+        try:
+            import requests as _requests
+            r = _requests.get(
+                f"{self.base_url}/api/health/storage",
+                headers={"Authorization": f"Bearer {self.debug_token}"},
+                timeout=10,
+            )
+            if r.status_code != 200:
+                return None
+            return r.json()  # expected: { total_bytes, used_bytes, free_bytes, used_pct, exports: {...} }
+        except Exception:
+            return None
     
     def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make HTTP request with retry logic.
@@ -197,6 +221,22 @@ class RenderAPIClient:
             last_exc = None
             for attempt in range(1, max_attempts + 1):
                 try:
+                    # Optional: block uploads when storage is critically full
+                    if self.debug_token:
+                        health = self._get_storage_health()
+                        if isinstance(health, dict):
+                            used_pct = int(health.get('used_pct') or 0)
+                            if used_pct >= self.storage_block_pct:
+                                logger.warning(
+                                    "Storage %.0f%% full on dashboard; delaying audio upload for %s",
+                                    used_pct,
+                                    content_id,
+                                )
+                                import time as _t
+                                _t.sleep(backoff)
+                                backoff *= 2
+                                # continue to next retry cycle
+                                raise requests.RequestException("storage critically full")
                     with open(audio_path, 'rb') as audio_file:
                         files = {
                             'audio': (audio_path.name, audio_file, 'audio/mpeg')
@@ -222,6 +262,11 @@ class RenderAPIClient:
 
                     if response.status_code == 200:
                         result = response.json()
+                        # Prefer server-returned paths and validate size > 0
+                        size = int(result.get('size') or 0)
+                        if size <= 0:
+                            logger.warning("Upload returned size=0 for %s; will retry", content_id)
+                            raise requests.RequestException("zero-size upload")
                         logger.info(f"Uploaded audio for content: {content_id}")
                         return result
 
