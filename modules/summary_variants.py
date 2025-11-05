@@ -204,6 +204,21 @@ def format_summary_html(text: str) -> str:
             flush_list()
             out.append(f"<p>{html.escape(pending_heading)}</p>")
             pending_heading = None
+
+        # If a "Bottom line:" label appears inline within the paragraph,
+        # split it into a normal paragraph + emphasized takeaway block.
+        inline_bottom = re.search(r"\bbottom\s+line:\s*(.+)$", line, flags=re.IGNORECASE)
+        if inline_bottom:
+            pre = line[: inline_bottom.start()].strip()
+            rest = inline_bottom.group(1).strip()
+            if pre:
+                flush_list()
+                out.append(f"<p>{html.escape(pre)}</p>")
+            label = "Bottom line:"
+            content = f"<strong>{html.escape(label)}</strong> {html.escape(rest)}" if rest else f"<strong>{html.escape(label)}</strong>"
+            out.append(f"<p class=\"kp-takeaway\">{content}</p>")
+            continue
+
         flush_list()
         out.append(f"<p>{html.escape(line)}</p>")
 
