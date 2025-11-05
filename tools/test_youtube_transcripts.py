@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 try:
-    from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import (  # type: ignore
         TranscriptsDisabled,
         NoTranscriptFound,
@@ -83,8 +83,24 @@ def try_get_transcript(video_id: str, languages: List[str]) -> Tuple[str, int]:
     try:
         # Prefer en; allow auto-generated variants
         # This call raises errors we catch below on failure cases
-        tr = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-        text = " ".join(item.get("text", "") for item in tr)
+        # Support both APIs: get_transcript (some versions) or list()/fetch() pattern
+        if hasattr(YouTubeTranscriptApi, "get_transcript"):
+            tr = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+        else:
+            listing = YouTubeTranscriptApi.list_transcripts(video_id)
+            # Prefer exact language; otherwise auto-generated in preferred set
+            transcript = None
+            try:
+                transcript = listing.find_transcript(languages)
+            except Exception:
+                try:
+                    transcript = listing.find_generated_transcript(languages)
+                except Exception:
+                    transcript = None
+            if not transcript:
+                return "NO_TRANSCRIPT", 0
+            tr = transcript.fetch()
+        text = " ".join(item.get("text", "") for item in (tr or []))
         return "OK", len(text)
     except TranscriptsDisabled:
         return "DISABLED", 0
@@ -155,4 +171,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
