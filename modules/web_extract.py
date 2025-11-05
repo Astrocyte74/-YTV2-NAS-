@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 import os
 from typing import Dict, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, unquote, quote
 
 import requests
 from bs4 import BeautifulSoup, Tag
@@ -141,6 +141,16 @@ class WebPageExtractor:
 
         fetch_start = time.time()
         logger.info("WebExtractor: fetching %s", url)
+
+        # Wikipedia fast-path via official REST APIs (opt-in)
+        with contextlib.suppress(Exception):
+            wiki_mode = (os.getenv("WIKI_API_MODE") or "auto").strip().lower()
+            if wiki_mode not in {"auto", "full", "summary", "off", "disabled"}:
+                wiki_mode = "auto"
+            if wiki_mode not in {"off", "disabled"}:
+                wiki_content = self._maybe_extract_wikipedia(url, mode=wiki_mode)
+                if wiki_content:
+                    return wiki_content
         response, final_url = self._fetch(url)
         logger.debug(
             "WebExtractor: fetch done status=%s len=%s final_url=%s",
@@ -225,6 +235,146 @@ class WebPageExtractor:
             html=html,
             extractor_notes=notes,
         )
+
+    # -- Wikipedia fast-path (REST APIs) ------------------------------- #
+    def _maybe_extract_wikipedia(self, url: str, *, mode: str = "auto") -> Optional[WebPageContent]:
+        """Use official Wikipedia APIs to retrieve sanitized content.
+
+        Modes:
+          - summary: REST page/summary JSON only
+          - full: REST page/mobile-html for full, sectioned HTML
+          - auto: summary first; if long/standard article then mobile-html
+        """
+        parsed = urlparse(url)
+        host = (parsed.netloc or "").lower()
+        if not host.endswith("wikipedia.org"):
+            return None
+
+        # Determine language and title from URL
+        lang = host.split(".")[0] if host.count(".") >= 2 else "en"
+        title = None
+        if parsed.path.startswith("/wiki/"):
+            title = parsed.path[len("/wiki/"):]
+        elif parsed.path.startswith("/w/") and parsed.query:
+            # e.g., /w/index.php?title=...
+            with contextlib.suppress(Exception):
+                from urllib.parse import parse_qs
+                qs = parse_qs(parsed.query)
+                if "title" in qs and qs["title"]:
+                    title = qs["title"][0]
+        if not title:
+            title = parsed.path.lstrip("/") or ""
+        title = unquote(title or "")
+        if not title:
+            return None
+
+        safe_title = quote(title.replace(" ", "_"))
+        api_base = f"https://{lang}.wikipedia.org/api/rest_v1/page"
+        try:
+            cutoff = int(os.getenv("WIKI_SUMMARY_CHAR_CUTOFF", "1500"))
+        except Exception:
+            cutoff = 1500
+
+        def _http_get_json(path: str) -> Optional[dict]:
+            r = self.session.get(
+                f"{api_base}/{path}",
+                headers={"Accept": "application/json"},
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.json()
+
+        def _http_get_text(path: str) -> Optional[str]:
+            r = self.session.get(
+                f"{api_base}/{path}",
+                headers={"Accept": "text/html"},
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=True,
+            )
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.text
+
+        summary: Optional[dict] = None
+        if mode in {"auto", "summary"}:
+            summary = _http_get_json(f"summary/{safe_title}")
+            if not summary and mode == "summary":
+                return None
+
+        def _build_from_summary(data: dict) -> WebPageContent:
+            extract = (data.get("extract") or "").strip()
+            extract_html = (data.get("extract_html") or "").strip()
+            text_plain = extract
+            if not text_plain and extract_html:
+                soup = BeautifulSoup(extract_html, "html.parser")
+                text_plain = soup.get_text("\n", strip=True)
+            canon = (
+                ((data.get("content_urls") or {}).get("desktop") or {}).get("page")
+                or data.get("canonical")
+                or url
+            )
+            title_str = (data.get("title") or title).strip()
+            html_min = extract_html or "\n".join(
+                f"<p>{p}</p>" for p in text_plain.split("\n") if p.strip()
+            )
+            return WebPageContent(
+                source_url=url,
+                canonical_url=canon,
+                title=title_str,
+                text=text_plain,
+                language=(data.get("lang") or lang),
+                site_name="Wikipedia",
+                author=None,
+                published_at=None,
+                top_image=(data.get("thumbnail") or {}).get("source"),
+                html=html_min,
+                extractor_notes={
+                    "initial_method": "wikipedia-rest-summary",
+                    "final_quality": "good" if len(text_plain) >= 200 else "short",
+                },
+            )
+
+        if summary:
+            s_type = (summary.get("type") or "").lower()
+            extract_len = len((summary.get("extract") or "").strip())
+            if mode == "summary" or s_type != "standard" or extract_len < cutoff:
+                return _build_from_summary(summary)
+
+        if mode in {"auto", "full"}:
+            html_text = _http_get_text(f"mobile-html/{safe_title}")
+            if html_text:
+                soup = BeautifulSoup(html_text, "html.parser")
+                for tag in soup(["script", "style", "noscript", "svg", "header", "footer", "aside"]):
+                    tag.decompose()
+                article = soup
+                text = article.get_text("\n", strip=True)
+                canon = summary and (
+                    ((summary.get("content_urls") or {}).get("desktop") or {}).get("page")
+                )
+                canon = canon or url
+                title_str = (summary.get("title") if summary else None) or title
+                return WebPageContent(
+                    source_url=url,
+                    canonical_url=canon,
+                    title=title_str,
+                    text=self._clean_text(text),
+                    language=(summary.get("lang") if summary else None) or lang,
+                    site_name="Wikipedia",
+                    author=None,
+                    published_at=None,
+                    top_image=((summary.get("thumbnail") or {}).get("source") if summary else None),
+                    html=html_text,
+                    extractor_notes={
+                        "initial_method": "wikipedia-rest-mobile-html",
+                        "final_quality": self._assess_quality(text),
+                    },
+                )
+
+        return None
 
     # -- Fetch helpers -------------------------------------------------- #
     def _fetch(self, url: str) -> Tuple[requests.Response, str]:
