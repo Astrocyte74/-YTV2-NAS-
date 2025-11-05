@@ -14,8 +14,13 @@ import os
 from typing import Optional
 
 import psycopg
-
+import sys
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from modules.summary_variants import format_summary_html
+import json
 
 
 def fetch_latest_text(conn: psycopg.Connection, video_id: str, variant: str) -> Optional[str]:
@@ -56,6 +61,24 @@ def insert_revision(conn: psycopg.Connection, video_id: str, variant: str, text:
     conn.commit()
 
 
+def load_text_from_report(video_id: str) -> Optional[str]:
+    root = Path("data/reports")
+    if not root.is_dir():
+        return None
+    hint = video_id.split(":")[-1]
+    cands = [p for p in root.glob("*.json") if hint in p.name]
+    for p in sorted(cands, key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            summ = data.get("summary") or {}
+            txt = summ.get("summary")
+            if isinstance(txt, str) and txt.strip():
+                return txt.strip()
+        except Exception:
+            continue
+    return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Reformat and insert a new HTML revision for one summary")
     ap.add_argument("--video-id", required=True)
@@ -70,6 +93,8 @@ def main() -> int:
     with psycopg.connect(dsn) as conn:
         text = fetch_latest_text(conn, args.video_id, args.variant)
         if not text:
+            text = load_text_from_report(args.video_id)
+        if not text:
             print("No text found for", args.video_id, args.variant)
             return 1
         html = format_summary_html(text)
@@ -81,4 +106,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

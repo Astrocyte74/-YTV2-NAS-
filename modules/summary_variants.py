@@ -103,6 +103,31 @@ def format_summary_html(text: str) -> str:
     heading_re = re.compile(r"^[A-Za-z][\w \-/]{1,60}:$")
     bottom_re = re.compile(r"^bottom\s+line:\s*(.*)$", flags=re.IGNORECASE)
 
+    def clean_heading(text: str) -> str:
+        s = text.strip()
+        if s.endswith(":"):
+            s = s[:-1].strip()
+        # Remove common markdown heading/bold/italic wrappers
+        s = re.sub(r"^#{1,6}\s+", "", s)  # strip leading markdown '#'
+        s = re.sub(r"\s+#{1,6}$", "", s)  # strip trailing markdown '#'
+        # Bold/italic
+        # Extract bold label in numbered patterns like "1) **Title**"
+        m = re.match(r"^\d+\)\s+(\*\*|__)(.+?)(\*\*|__)", s)
+        if m:
+            return m.group(2).strip()
+        m = re.match(r"^(\*\*|__)(.+?)(\*\*|__)$", s)
+        if m:
+            s = m.group(2).strip()
+        else:
+            m = re.match(r"^\*(.+)\*$", s)
+            if m:
+                s = m.group(1).strip()
+            else:
+                m = re.match(r"^_(.+)_$", s)
+                if m:
+                    s = m.group(1).strip()
+        return s
+
     for raw in normalized.splitlines():
         line = raw.strip()
         if not line:
@@ -113,7 +138,7 @@ def format_summary_html(text: str) -> str:
         # Heading line with colon
         if heading_re.match(line):
             flush_list()
-            heading = line[:-1].strip()
+            heading = clean_heading(line)
             out.append(f"<h3 class=\"kp-heading\">{html.escape(heading)}</h3>")
             pending_heading = None
             continue
@@ -128,10 +153,17 @@ def format_summary_html(text: str) -> str:
             out.append(f"<p class=\"kp-takeaway\">{content}</p>")
             continue
 
+        # Markdown-style bold/italic heading line (e.g., **Title** or _Title_)
+        if re.match(r"^(\*\*|__).+(\*\*|__)$", line) or re.match(r"^(\*|_).+(\*|_)$", line):
+            flush_list()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(line))}</h3>")
+            pending_heading = None
+            continue
+
         # If we have a pending heading and now see bullets, emit heading
         if pending_heading and re.match(r"^[\-*•]", line):
             flush_list()
-            out.append(f"<h3 class=\"kp-heading\">{html.escape(pending_heading)}</h3>")
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(pending_heading))}</h3>")
             pending_heading = None
 
         # Bullet line
