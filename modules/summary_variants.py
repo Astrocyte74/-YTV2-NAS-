@@ -377,3 +377,79 @@ __all__ = [
     "normalize_variant_id",
     "variant_kind",
 ]
+
+
+# --- HTML normalization helpers (legacy to minimal semantic HTML) ---
+
+import html as _htmlmod
+
+
+def _normalize_html_to_text(html: str) -> str:
+    """Convert legacy HTML into plain text headings + bullets for reformatting.
+
+    - Promote <div class="kp-heading"> and paragraphs starting with '##'/'###' to heading lines
+    - Convert <li> to '- ' lines
+    - Paragraphs to blank lines; strip tags; unescape; strip markdown wrappers
+    """
+    s = html or ""
+    # Normalize line breaks
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+
+    def _emit_heading(m):
+        t = _htmlmod.unescape(m.group(1))
+        # strip leading/trailing hashes
+        t = re.sub(r"^#{1,6}\s+", "", t)
+        t = re.sub(r"\s+#{1,6}$", "", t)
+        # strip markdown bold wrappers
+        t = re.sub(r"^(\*\*|__)(.+?)(\*\*|__)\s*:?$", r"\2", t)
+        return f"{t.strip()}:\n"
+
+    # Promote known heading containers
+    s = re.sub(r"<div[^>]*class=\"kp-heading\"[^>]*>(.*?)</div>", _emit_heading, s, flags=re.IGNORECASE|re.DOTALL)
+    # ATX-style heading inside paragraphs
+    s = re.sub(r"<p[^>]*>\s*(###+\s+[^<]+)\s*</p>", _emit_heading, s, flags=re.IGNORECASE)
+    s = re.sub(r"<p[^>]*>\s*(##\s+[^<]+)\s*</p>", _emit_heading, s, flags=re.IGNORECASE)
+
+    # Convert list items to '- ' lines
+    s = re.sub(r"<li[^>]*>\s*", "- ", s, flags=re.IGNORECASE)
+    s = re.sub(r"</li>", "\n", s, flags=re.IGNORECASE)
+
+    # Paragraphs → blanks
+    s = re.sub(r"</p>", "\n\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"<p[^>]*>", "", s, flags=re.IGNORECASE)
+
+    # Strip remaining tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Unescape entities
+    s = _htmlmod.unescape(s)
+    # Strip markdown bold/italic wrappers in residual text
+    s = re.sub(r"(\*\*|__)(.+?)(\*\*|__)", r"\2", s)
+    s = re.sub(r"(\*|_)(.+?)(\*|_)", r"\2", s)
+    # Collapse whitespace
+    s = re.sub(r"\r", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def needs_html_normalize(html: str) -> bool:
+    """Heuristics indicating legacy HTML that should be normalized."""
+    if not isinstance(html, str) or not html.strip():
+        return False
+    s = html
+    # Bulleted 'headings' with markdown wrappers
+    if re.search(r"<li[^>]*>\s*(\*\*|_).+(\*\*|_)\s*</li>", s, flags=re.IGNORECASE):
+        return True
+    # ATX headings inside paragraphs
+    if re.search(r"<p[^>]*>\s*##+\s+", s, flags=re.IGNORECASE):
+        return True
+    # Non-semantic heading container div
+    if re.search(r"<div[^>]*class=\"kp-heading\"", s, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def normalize_existing_html_to_minimal(html: str) -> Tuple[str, str]:
+    """Return (derived_text, minimal_html) from legacy HTML using our formatter."""
+    text = _normalize_html_to_text(html)
+    minimal_html = format_summary_html(text)
+    return text, minimal_html

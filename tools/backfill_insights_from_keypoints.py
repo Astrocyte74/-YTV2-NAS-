@@ -181,7 +181,7 @@ def main() -> int:
             if not kp_text:
                 continue
             # Optionally skip if key-insights already exists
-            if args.only-missing and latest.get("key-insights", (None, None, 0))[0]:
+            if getattr(args, "only_missing", False) and latest.get("key-insights", (None, None, 0))[0]:
                 continue
 
             prompt = build_prompt_from_bullets(kp_text)
@@ -235,4 +235,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
