@@ -41,16 +41,16 @@ from modules.summary_variants import format_summary_html  # noqa: E402
 TEXT_VARIANTS = ("comprehensive", "key-insights", "bullet-points", "executive")
 
 
-def fetch_recent_video_ids(conn: psycopg.Connection, *, limit: int) -> List[str]:
+def fetch_recent_video_ids(conn: psycopg.Connection, *, limit: int, offset: int = 0) -> List[str]:
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT video_id
             FROM content
             ORDER BY indexed_at DESC
-            LIMIT %s
+            LIMIT %s OFFSET %s
             """,
-            (limit,),
+            (limit, offset),
         )
         return [row[0] for row in cur.fetchall()]
 
@@ -96,6 +96,9 @@ def needs_reformat(text: Optional[str], html: Optional[str]) -> bool:
         "•" in text or re.search(r"(?m)^[\-*]\s", text) or re.search(r"(?m)^(?:#{1,6}|\*\*).+", text)
     ):
         return True
+    # Additional cue: text has markdown-style headings but HTML has no <h3>
+    if re.search(r"(?m)^(?:#{1,6}\s+|\*\*).+", text) and "<h3" not in shtml:
+        return True
     return False
 
 
@@ -103,8 +106,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Backfill minimal HTML for text variants")
     ap.add_argument("--video-id", help="Single video_id to process")
     ap.add_argument("--limit", type=int, default=10, help="Recent items to scan when no video-id")
+    ap.add_argument("--offset", type=int, default=0, help="Offset into recent items when no video-id (for pagination)")
     ap.add_argument("--variants", default="all", help="Comma list or 'all' (comprehensive,key-insights,bullet-points,executive)")
     ap.add_argument("--apply", action="store_true", help="Write new revisions; otherwise dry-run")
+    ap.add_argument("--dry-run", action="store_true", help="Alias for default dry-run; if both set, --apply wins")
+    ap.add_argument("--force", action="store_true", help="Force reformat even if heuristics consider HTML acceptable")
     args = ap.parse_args()
 
     dsn = os.getenv("DATABASE_URL")
@@ -122,7 +128,7 @@ def main() -> int:
         if args.video_id:
             video_ids = [args.video_id]
         else:
-            video_ids = fetch_recent_video_ids(conn, limit=args.limit)
+            video_ids = fetch_recent_video_ids(conn, limit=args.limit, offset=args.offset)
 
         changed = 0
         scanned = 0
@@ -139,17 +145,16 @@ def main() -> int:
                 if not new_html or (html and str(html).strip() == new_html.strip()):
                     continue
                 changed += 1
-                if args.apply:
+                if args.apply and not args.dry_run:
                     rev = next_revision(conn, vid, var)
                     insert_revision(conn, vid, var, text or "", new_html, rev)
                     print(f"APPLIED {vid} {var} -> revision {rev} ({len(new_html)} chars)")
                 else:
                     print(f"DRYRUN {vid} {var} -> would insert new html ({len(new_html)} chars)")
 
-        print(f"Done. scanned={scanned} changed={changed} apply={args.apply}")
+        print(f"Done. scanned={scanned} changed={changed} apply={bool(args.apply and not args.dry_run)}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

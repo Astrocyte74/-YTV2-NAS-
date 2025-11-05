@@ -153,6 +153,13 @@ def format_summary_html(text: str) -> str:
             out.append(f"<p class=\"kp-takeaway\">{content}</p>")
             continue
 
+        # Markdown-style ATX heading line (e.g., ### Title)
+        if re.match(r"^#{1,6}\s+", line):
+            flush_list()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(line))}</h3>")
+            pending_heading = None
+            continue
+
         # Markdown-style bold/italic heading line (e.g., **Title** or _Title_)
         if re.match(r"^(\*\*|__).+(\*\*|__)$", line) or re.match(r"^(\*|_).+(\*|_)$", line):
             flush_list()
@@ -166,12 +173,18 @@ def format_summary_html(text: str) -> str:
             out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(pending_heading))}</h3>")
             pending_heading = None
 
-        # Bullet line
+        # Bullet line (supports first bullet-as-heading pattern)
         if re.match(r"^[\-*•]", line):
+            cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
+            # If this bullet looks like a heading label, emit a heading and do not start a list yet
+            if re.match(r"^(\d+\)\s+)?(\*\*|__|\*)(.+?)(\*\*|__|\*)\s*:?$", cleaned) or re.match(r"^#{1,6}\s+.+$", cleaned):
+                flush_list()
+                out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(cleaned))}</h3>")
+                pending_heading = None
+                continue
             if not in_list:
                 out.append("<ul class=\"kp-list\">")
                 in_list = True
-            cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
             out.append(f"<li>{html.escape(cleaned)}</li>")
             continue
 
