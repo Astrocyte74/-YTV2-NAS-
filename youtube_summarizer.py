@@ -595,6 +595,25 @@ class YouTubeSummarizer:
             "extractor_notes": content.extractor_notes,
         }
 
+        # Wikipedia fast-path: sectioned Insights/consolidation when enabled
+        try:
+            wiki_mode = (os.getenv("WIKI_API_MODE") or "auto").strip().lower()
+        except Exception:
+            wiki_mode = "auto"
+        is_wikipedia = (site_label.lower() == "wikipedia" or hostname.endswith("wikipedia.org"))
+        normalized_type = (summary_type or "").strip().lower()
+        if is_wikipedia and wiki_mode not in {"off", "disabled"} and normalized_type in {"key-insights", "insights"}:
+            try:
+                result = await self._process_wikipedia_insights(
+                    content=content,
+                    raw_text=text,
+                    metadata=metadata,
+                    source_metadata=source_metadata,
+                )
+                return result
+            except Exception as exc:
+                print(f"⚠️ Wikipedia fast-path failed, falling back to generic pipeline: {exc}")
+
         return await self.process_text_content(
             content_id=content_id,
             text=text,
@@ -605,6 +624,235 @@ class YouTubeSummarizer:
             source_metadata=source_metadata,
             assume_has_audio=False,
         )
+
+    # --- Wikipedia sectioned Insights pipeline ------------------------ #
+    def _wiki_parse_sections(self, html: str) -> List[Dict[str, str]]:
+        """Return a list of {title, text} sections from Wikipedia mobile-html or summary html.
+
+        - Includes the lead section as title 'Overview' if present
+        - Skips boilerplate sections like 'References', 'See also', 'Notes'
+        """
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html or "", "html.parser")
+        sections: List[Dict[str, str]] = []
+        SKIP_TITLES = {"references", "see also", "notes", "external links", "further reading", "bibliography"}
+
+        # Lead (data-mw-section-id="0")
+        for lead in soup.find_all("section", attrs={"data-mw-section-id": "0"}):
+            # Strip references/superscripts in lead
+            for sup in lead.find_all("sup"):
+                sup.decompose()
+            lead_text = lead.get_text("\n", strip=True)
+            if lead_text and len(lead_text) > 120:
+                sections.append({"title": "Overview", "text": lead_text})
+
+        # Subsequent sections
+        for sec in soup.find_all("section"):
+            sid = sec.get("data-mw-section-id")
+            if not sid or sid == "0":
+                continue
+            h = sec.find(["h2", "h3"]) or None
+            title = (h.get_text(" ", strip=True) if h else "").strip()
+            if not title:
+                continue
+            if title.lower() in SKIP_TITLES:
+                continue
+            # Clean references
+            for sup in sec.find_all("sup"):
+                sup.decompose()
+            body_text = sec.get_text("\n", strip=True)
+            # Remove the heading from body if duplicated at start
+            if body_text.startswith(title):
+                body_text = body_text[len(title):].lstrip(" \n\t:-")
+            if len(body_text) < 60:
+                continue
+            sections.append({"title": title, "text": body_text})
+        return sections
+
+    def _wiki_trim_sections(self, sections: List[Dict[str, str]], limit: int = 8, per_len: int = 2200) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        for sec in sections:
+            if len(out) >= max(1, limit):
+                break
+            text = sec.get("text", "")
+            if len(text) > per_len:
+                # Trim at sentence boundary if possible
+                snippet = text[:per_len]
+                cut = max(snippet.rfind("."), snippet.rfind("!"), snippet.rfind("?"))
+                if cut > per_len * 0.6:
+                    text = snippet[: cut + 1]
+                else:
+                    text = snippet + "…"
+            out.append({"title": sec.get("title", ""), "text": text})
+        return out
+
+    async def _wiki_section_bullets(self, title: str, body: str, language: str) -> str:
+        prompt = f"""
+Summarize only the following Wikipedia section.
+
+Article: {title}
+
+Section text:
+{self._sanitize_content(body, max_length=4000)}
+
+Output:
+- 3–6 “• ” bullets with concrete facts, names, dates, figures.
+
+Rules:
+- Use only information explicitly present; no speculation.
+- Keep each bullet ≤ 18 words.
+- Use the article's language ({language}).
+- No headings, no code fences, no emojis.
+"""
+        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki section bullets")) or ""
+
+    async def _wiki_consolidate_insights(self, article_title: str, section_bullets: List[Dict[str, str]], language: str) -> str:
+        parts = []
+        for sb in section_bullets:
+            if sb.get("bullets"):
+                parts.append(f"## {sb['title']}\n{sb['bullets']}")
+        joined = "\n\n".join(parts)
+        prompt = f"""
+You are consolidating a set of per‑section bullet summaries from a Wikipedia article.
+
+Article: {article_title}
+
+Section summaries:
+{joined}
+
+Task: Organize into 3–5 content‑derived categories with concise headings. Under each heading, include 3–5 “• ” bullets capturing concrete facts, names, or metrics. Do not add a final “Bottom line”.
+
+Rules:
+- Use only given bullets; merge duplicates; no speculation.
+- Keep each bullet ≤ 18 words.
+- Use {language}.
+- No code fences or emojis.
+"""
+        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki insights consolidation")) or ""
+
+    async def _process_wikipedia_insights(
+        self,
+        *,
+        content,
+        raw_text: str,
+        metadata: Dict[str, Any],
+        source_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Sectioned two‑pass Insights specifically for Wikipedia articles."""
+        html = getattr(content, "html", None) or ""
+        language = (content.language or metadata.get("language") or "en")
+        all_sections = self._wiki_parse_sections(html)
+        # Limits
+        try:
+            sec_limit = int(os.getenv("WIKI_SECTION_LIMIT", "8"))
+        except Exception:
+            sec_limit = 8
+        try:
+            per_len = int(os.getenv("WIKI_SECTION_MAX_CHARS", "2200"))
+        except Exception:
+            per_len = 2200
+        sections = self._wiki_trim_sections(all_sections, limit=sec_limit, per_len=per_len)
+
+        # Fallback: if we failed to split, fall back to generic pipeline
+        if not sections:
+            return await self.process_text_content(
+                content_id=content.id,
+                text=raw_text,
+                metadata=metadata,
+                summary_type="key-insights",
+                proficiency_level=None,
+                source="web",
+                source_metadata=source_metadata,
+                assume_has_audio=False,
+            )
+
+        # First pass: bullets per section (parallel-ish but sequential here)
+        section_bullets: List[Dict[str, str]] = []
+        for sec in sections:
+            bullets = await self._wiki_section_bullets(sec["title"], sec["text"], language)
+            section_bullets.append({"title": sec["title"], "bullets": bullets})
+
+        # Second pass: consolidate into Insights
+        insights_text = await self._wiki_consolidate_insights(metadata.get("title", "Wikipedia Article"), section_bullets, language)
+        if not insights_text.strip():
+            # Fallback: join section bullets as a single list under generic heading
+            merged = "\n\n".join(sb.get("bullets", "") for sb in section_bullets if sb.get("bullets"))
+            insights_text = merged or raw_text[:2000]
+
+        # Headline
+        title_prompt = f"""
+Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
+IMPORTANT: Respond in {language}.
+Source title: {metadata.get('title','')}
+Preview:
+{insights_text[:1000]}
+"""
+        headline_text = await self._robust_llm_call([HumanMessage(content=title_prompt)], operation_name="wiki headline")
+        headline_text = headline_text or metadata.get("title", "Generated Summary")
+
+        # Build result in the same shape as process_text_content
+        summary_data = {
+            "summary": insights_text,
+            "headline": headline_text,
+            "summary_type": "key-insights",
+            "generated_at": datetime.now().isoformat(),
+            "language": language,
+        }
+
+        # Analyze content (reusing the same analyzer)
+        summary_text_for_analysis = insights_text
+        analysis_data = await self.analyze_content(summary_text_for_analysis, metadata)
+
+        media = {
+            "has_audio": False,
+            "audio_duration_seconds": 0,
+            "has_transcript": bool(raw_text),
+            "transcript_chars": len(raw_text or ""),
+        }
+
+        result = {
+            "id": content.id,
+            "content_source": "web",
+            "title": metadata.get("title", ""),
+            "canonical_url": metadata.get("url", ""),
+            "thumbnail_url": metadata.get("thumbnail", ""),
+            "published_at": metadata.get("published_at"),
+            "duration_seconds": metadata.get("duration", 0),
+            "word_count": len((raw_text or "").split()) if raw_text else 0,
+            "media": media,
+            "source_metadata": {"web": source_metadata or {}},
+            "analysis": analysis_data,
+            "original_language": language,
+            "summary_language": language,
+            "audio_language": None,
+            "url": metadata.get("url", ""),
+            "metadata": metadata,
+            "transcript": raw_text,
+            "summary": summary_data,
+            "processed_at": datetime.now().isoformat(),
+            "processor_info": {
+                "llm_provider": self.llm_provider,
+                "model": getattr(self.llm, "model_name", getattr(self.llm, "model", self.model)),
+            },
+        }
+
+        # Optional: image generation remains as in process_text_content
+        summary_for_image = insights_text
+        allow_image = bool(summary_for_image and not summary_for_image.lower().startswith("unable to "))
+        if summary_image_service.SUMMARY_IMAGE_ENABLED and allow_image:
+            try:
+                image_meta = await summary_image_service.maybe_generate_summary_image(result)
+                if image_meta:
+                    result["summary_image"] = image_meta
+                    result["summary_image_url"] = (
+                        image_meta.get("public_url")
+                        or image_meta.get("relative_path")
+                        or image_meta.get("path")
+                    )
+            except Exception as exc:
+                logging.debug("summary image generation skipped: %s", exc)
+
+        return result
     
     def _extract_with_robust_ytdlp(self, youtube_url: str, ydl_opts: dict, attempt: int = 1) -> Optional[dict]:
         """Extract info using yt-dlp with robust error handling and retries"""
