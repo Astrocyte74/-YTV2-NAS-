@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 try:
-from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api import YouTubeTranscriptApi
     from youtube_transcript_api._errors import (  # type: ignore
         TranscriptsDisabled,
         NoTranscriptFound,
@@ -78,17 +78,23 @@ def load_ids_from_file(path: Path) -> List[str]:
     return parse_ids(",".join(raw))
 
 
+_API_INSTANCE = None
+try:
+    _API_INSTANCE = YouTubeTranscriptApi()
+except Exception:
+    _API_INSTANCE = None
+
+
 def try_get_transcript(video_id: str, languages: List[str]) -> Tuple[str, int]:
     """Return (status, length) where status in {OK, NO_TRANSCRIPT, DISABLED, UNAVAILABLE, RETRIEVE_ERROR, ERR_429, ERROR}."""
     try:
         # Prefer en; allow auto-generated variants
         # This call raises errors we catch below on failure cases
-        # Support both APIs: get_transcript (some versions) or list()/fetch() pattern
-        if hasattr(YouTubeTranscriptApi, "get_transcript"):
-            tr = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-        else:
-            listing = YouTubeTranscriptApi.list_transcripts(video_id)
-            # Prefer exact language; otherwise auto-generated in preferred set
+        # Support multiple variants across versions
+        api = _API_INSTANCE
+        tr_items = []
+        if api and hasattr(api, "list"):
+            listing = api.list(video_id)
             transcript = None
             try:
                 transcript = listing.find_transcript(languages)
@@ -99,8 +105,29 @@ def try_get_transcript(video_id: str, languages: List[str]) -> Tuple[str, int]:
                     transcript = None
             if not transcript:
                 return "NO_TRANSCRIPT", 0
-            tr = transcript.fetch()
-        text = " ".join(item.get("text", "") for item in (tr or []))
+            tr_items = transcript.fetch()
+        elif hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            listing = YouTubeTranscriptApi.list_transcripts(video_id)  # type: ignore[attr-defined]
+            transcript = None
+            try:
+                transcript = listing.find_transcript(languages)
+            except Exception:
+                try:
+                    transcript = listing.find_generated_transcript(languages)
+                except Exception:
+                    transcript = None
+            if not transcript:
+                return "NO_TRANSCRIPT", 0
+            tr_items = transcript.fetch()
+        elif hasattr(YouTubeTranscriptApi, "get_transcript"):
+            tr_items = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)  # type: ignore[attr-defined]
+        elif api and hasattr(api, "fetch"):
+            fetched = api.fetch(video_id, languages)
+            tr_items = list(fetched)
+        else:
+            return "RETRIEVE_ERROR", 0
+
+        text = " ".join(item.get("text", "") for item in (tr_items or []))
         return "OK", len(text)
     except TranscriptsDisabled:
         return "DISABLED", 0
