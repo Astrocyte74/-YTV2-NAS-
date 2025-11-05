@@ -1377,7 +1377,14 @@ class YouTubeSummarizer:
                • Avoid meta (don’t say “the host says/this video covers”).
             3) Bottom line — one sentence starting “Bottom line: …”.
 
+            Section titles must summarize the key phase or theme (not full sentences). Each bullet must be factual and non‑redundant.
+
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Include [mm:ss] timestamps only if explicitly present in transcript text; otherwise omit.
             - If a needed fact isn’t available, write “Unknown”.
@@ -1396,12 +1403,18 @@ class YouTubeSummarizer:
 
             Structure:
             - Opening: 2–3 sentences that jump straight to the substance and high‑level conclusion.
-            - Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”.
+            - Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”. Use smooth spoken transitions (“First…”, “Next…”, “However…”, “Finally…”) and vary sentence length for natural rhythm.
             - Closing: One sentence starting “Bottom line: …”.
 
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Keep numbers and names accurate; include specific values where present.
+            - Avoid list‑like phrasing or enumeration; use implicit transitions instead.
             - No headings, no bullets, no code fences, no emojis.
             - Length: ~180–380 words for most videos; shorter for very short clips.
             """,
@@ -1417,10 +1430,16 @@ class YouTubeSummarizer:
             - End with “Bottom line: …”.
 
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Each bullet ≤ 18 words; lead with the fact/action.
-            - Prefer specifics (metrics, model names, versions, dates).
+            - Prefer named entities, figures, and actions over general statements (metrics, model names, versions, dates).
             - Avoid duplication; merge near‑identical points.
+            - If the transcript contains comparisons, include at least one bullet explicitly stating the contrast.
             - Timestamps only if explicitly present; else omit.
             - No code fences/emojis/headings.
             """,
@@ -1435,9 +1454,15 @@ class YouTubeSummarizer:
             - Under each heading, provide 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
 
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
             - No speculation beyond the transcript; use “Unknown” only when details are missing.
+            - Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension (e.g., Strategy / Technology / Outcome).
             - No code fences or emojis.
             - Do not add a final “Bottom line”.
             """,
@@ -1488,12 +1513,20 @@ class YouTubeSummarizer:
             • Actionable next step or key takeaway
             • Actionable next step or key takeaway
 
+            Write for senior readers scanning quickly. Front‑load major outcomes and implications before elaborating.
+
             **Guidelines:**
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Divide content into 2-4 logical parts (not artificial divisions)
             - Use professional, analytical language
             - Include timestamps where helpful
             - Focus on insights and implications, not just facts
             - Keep each section balanced and substantive
+            - Ensure each PART ends with a concise synthesis sentence (1–2 clauses).
             - If content doesn't fit this structure well, adapt the format accordingly
             - British/Canadian spelling; no speculation
             """,
@@ -1510,11 +1543,18 @@ class YouTubeSummarizer:
             Output only the chosen format. No meta‑explanation.
 
             Global rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
+            - If multiple patterns could apply, select the one maximizing clarity for non‑expert readers.
             - Respond in the transcript’s language.
             - Timestamps only if explicitly present; else omit.
             - “Unknown” when information is missing.
             - No code fences/emojis.
             - For Key Points/Insights, use “• ” bullets. For step‑wise, use numbered steps.
+            - When choosing step‑wise form, begin with a one‑sentence context statement before numbering.
             - Length guidance: short 120–180 words; dense 250–500 words; step‑wise concise.
             """,
         }
@@ -1535,6 +1575,7 @@ class YouTubeSummarizer:
         # Also generate a quick title/headline (using summary for token efficiency)
         title_prompt = f"""
         Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
+        Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
         **IMPORTANT: Respond in the same language as the content.**
         Source title: {metadata.get('title', '')}
         Summary:

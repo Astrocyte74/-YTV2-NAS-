@@ -1,0 +1,19 @@
+<h3 class="kp-heading">Origins and Heritage</h3>
+<ul class="kp-list">
+<li>Born José Gabriel Condorcanqui Noguera around 1742 in Cusco.</li>
+<li>Descended from an elite Quechua kuraka family.</li>
+</ul>
+<h3 class="kp-heading">The Andean Rebellion</h3>
+<ul class="kp-list">
+<li>Initiated on November 4, 1780, by capturing Governor Arriaga.</li>
+<li>Aimed to overthrow European rule and restore the Inca Empire.</li>
+</ul>
+<h3 class="kp-heading">Execution and Suppression</h3>
+<ul class="kp-list">
+<li>Brutal suppression after capture.</li>
+</ul>
+<h3 class="kp-heading">Enduring Legacy and Inspiration</h3>
+<ul class="kp-list">
+<li>Inspired subsequent indigenous revolts across the Americas.</li>
+</ul>
+<p class="kp-takeaway"><strong>Bottom line:</strong> Symbol of indigenous resistance.</p>

@@ -1,0 +1,8 @@
+VARIANTS: 1
+<h3 class="kp-heading">Main topic</h3>
+<h3 class="kp-heading">Key points</h3>
+<ul class="kp-list">
+<li>First item</li>
+<li>Second item</li>
+</ul>
+<p class="kp-takeaway"><strong>Bottom line:</strong> Final line here</p>

@@ -28,7 +28,13 @@ try:
 except Exception:
     psycopg = None  # type: ignore
 
-from .summary_variants import normalize_variant_id, variant_kind, format_summary_html
+from .summary_variants import (
+    normalize_variant_id,
+    variant_kind,
+    format_summary_html,
+    needs_html_normalize,
+    normalize_existing_html_to_minimal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -249,10 +255,21 @@ class PostgresWriter:
                 text_value = entry.get("text") or entry.get("summary") or entry.get("content")
                 if not isinstance(text_value, str) or not text_value.strip():
                     continue
+                # Sanitize provided HTML when present; otherwise format from text
+                provided_html = entry.get("html")
+                html_value = None
+                if isinstance(provided_html, str) and provided_html.strip():
+                    if needs_html_normalize(provided_html):
+                        _, html_value = normalize_existing_html_to_minimal(provided_html)
+                    else:
+                        html_value = provided_html
+                else:
+                    html_value = format_summary_html(text_value)
+
                 variant_payload = {
                     "variant": variant_id,
                     "text": text_value.strip(),
-                    "html": entry.get("html") or format_summary_html(text_value),
+                    "html": html_value,
                     "language": entry.get("language") or summary_section.get("language") or language,
                     "headline": entry.get("headline") or summary_section.get("headline"),
                     "proficiency": entry.get("proficiency") or entry.get("proficiency_level"),
