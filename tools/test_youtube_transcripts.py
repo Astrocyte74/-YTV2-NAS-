@@ -127,7 +127,11 @@ def try_get_transcript(video_id: str, languages: List[str]) -> Tuple[str, int]:
         else:
             return "RETRIEVE_ERROR", 0
 
-        text = " ".join(item.get("text", "") for item in (tr_items or []))
+        def _extract_text(item):
+            if isinstance(item, dict):
+                return item.get("text", "")
+            return getattr(item, "text", "")
+        text = " ".join(_extract_text(it) for it in (tr_items or []))
         return "OK", len(text)
     except TranscriptsDisabled:
         return "DISABLED", 0
