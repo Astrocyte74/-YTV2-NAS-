@@ -3145,7 +3145,20 @@ class YouTubeTelegramBot:
                 "models": cloud_models,
             }
 
-        local_models = self._ollama_model_options()
+        # Quick reachability probe before offering local models to avoid slow timeouts when WG/i9 is down
+        def _ollama_reachable(timeout: float = 0.8) -> bool:
+            try:
+                import os, requests
+                base = (os.getenv('TTSHUB_API_BASE') or os.getenv('OLLAMA_URL') or os.getenv('OLLAMA_HOST') or '').rstrip('/')
+                if not base:
+                    return False
+                url = f"{base}/health" if '/api' in base else f"{base}/api/health"
+                r = requests.get(url, timeout=timeout)
+                return 200 <= r.status_code < 500
+            except Exception:
+                return False
+
+        local_models = self._ollama_model_options() if _ollama_reachable() else []
         if local_models:
             default_option = local_models[0]
             default_label = "Local"
