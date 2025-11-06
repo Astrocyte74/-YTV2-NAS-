@@ -5,6 +5,8 @@ Extracts transcripts from YouTube videos and generates intelligent summaries
 """
 
 import asyncio
+import contextlib
+import os
 import json
 import logging
 import os
@@ -46,6 +48,51 @@ from modules import ollama_client as oc
 import requests
 
 from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
+
+# --- Transcript rate limiter / circuit breaker ---
+import time
+
+class TranscriptLimiter:
+    def __init__(self, min_interval: float, threshold: int, cooldown_secs: float):
+        self.min_interval = float(min_interval)
+        self.threshold = int(threshold)
+        self.cooldown_secs = float(cooldown_secs)
+        self._next_allowed = 0.0
+        self._fail_count = 0
+        self._cooldown_until = 0.0
+
+    def update(self, min_interval: float, threshold: int, cooldown_secs: float) -> None:
+        self.min_interval = float(min_interval)
+        self.threshold = int(threshold)
+        self.cooldown_secs = float(cooldown_secs)
+
+    def before_request(self) -> bool:
+        now = time.monotonic()
+        # If in cooldown, block
+        if now < self._cooldown_until:
+            return False
+        # Enforce min interval
+        sleep_for = max(0.0, self._next_allowed - now)
+        if sleep_for > 0:
+            try:
+                time.sleep(min(sleep_for, 5.0))
+            except Exception:
+                pass
+        return True
+
+    def on_success(self) -> None:
+        now = time.monotonic()
+        self._fail_count = 0
+        self._next_allowed = now + max(0.0, self.min_interval)
+
+    def on_429(self) -> None:
+        self._fail_count += 1
+        if self._fail_count >= max(1, self.threshold):
+            self._cooldown_until = time.monotonic() + max(0.0, self.cooldown_secs)
+            self._fail_count = 0
+
+
+_TRANSCRIPT_LIMITER: TranscriptLimiter | None = None
 
 # Import LLM configuration manager
 from llm_config import llm_config
@@ -1048,84 +1095,239 @@ Preview:
         transcript_text = None
         transcript_language = None
         
+        @contextlib.contextmanager
+        def _transcript_proxy_context():
+            """Temporarily route only transcript HTTP calls via a proxy.
+
+            If YT_TRANSCRIPT_PROXY is set, this context sets HTTPS_PROXY/HTTP_PROXY
+            (and lowercase variants) during the transcript fetch, then restores them.
+            """
+            proxy = os.getenv("YT_TRANSCRIPT_PROXY")
+            if not proxy:
+                yield
+                return
+            keys = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+            old = {k: os.environ.get(k) for k in keys}
+            try:
+                for k in keys:
+                    os.environ[k] = proxy
+                yield
+            finally:
+                for k in keys:
+                    val = old.get(k)
+                    if val is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = val
+        
         # Get transcript via youtube-transcript-api with multiple language support
         if TRANSCRIPT_API_AVAILABLE:
             try:
-                api = YouTubeTranscriptApi()
-                
-                # Try multiple language codes in order of preference
-                language_codes = [
-                    'en',           # English (US)
-                    'en-GB',        # English (UK)
-                    'en-US',        # English (US explicit)
-                    'en-AU',        # English (Australia)
-                    'en-CA',        # English (Canada)
-                    'es',           # Spanish
-                    'es-ES',        # Spanish (Spain)
-                    'es-MX',        # Spanish (Mexico)
-                    'fr',           # French
-                    'fr-FR',        # French (France)
-                    'fr-CA'         # French (Canada)
-                ]
-                
-                transcript_data = None
-                
-                for lang_code in language_codes:
-                    try:
-                        transcript_data = api.fetch(video_id, [lang_code])
-                        transcript_language = lang_code
-                        break
-                    except Exception:
-                        continue
-                
-                if transcript_data:
-                    text_parts = [snippet.text for snippet in transcript_data]
-                    transcript_text = ' '.join(text_parts)
-                    print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
-                else:
-                    print(f"⚠️ YouTube Transcript API: No supported language found")
+                with _transcript_proxy_context():
+                    api = YouTubeTranscriptApi()
                     
+                    # Try multiple language codes in order of preference
+                    language_codes = [
+                        'en',           # English (US)
+                        'en-GB',        # English (UK)
+                        'en-US',        # English (US explicit)
+                        'en-AU',        # English (Australia)
+                        'en-CA',        # English (Canada)
+                        'es',           # Spanish
+                        'es-ES',        # Spanish (Spain)
+                        'es-MX',        # Spanish (Mexico)
+                        'fr',           # French
+                        'fr-FR',        # French (France)
+                        'fr-CA'         # French (Canada)
+                    ]
+                    
+                    # --- Global transcript rate limiter / circuit breaker ---
+                    transcript_data = None
+                    try:
+                        min_interval = float(os.getenv('YT_TRANSCRIPT_MIN_INTERVAL', '20') or '20')
+                    except Exception:
+                        min_interval = 20.0
+                    try:
+                        threshold = int(os.getenv('YT_TRANSCRIPT_CIRCUIT_THRESHOLD', '3') or '3')
+                    except Exception:
+                        threshold = 3
+                    try:
+                        cooldown = float(os.getenv('YT_TRANSCRIPT_COOLDOWN', '600') or '600')
+                    except Exception:
+                        cooldown = 600.0
+
+                    global _TRANSCRIPT_LIMITER
+                    if _TRANSCRIPT_LIMITER is None:
+                        _TRANSCRIPT_LIMITER = TranscriptLimiter(min_interval, threshold, cooldown)
+                    else:
+                        _TRANSCRIPT_LIMITER.update(min_interval, threshold, cooldown)
+
+                    if not _TRANSCRIPT_LIMITER.before_request():
+                        print("⏸️ Transcript fetch paused by circuit breaker (cooldown active)")
+                    else:
+                        for lang_code in language_codes:
+                            try:
+                                transcript_data = api.fetch(video_id, [lang_code])
+                                transcript_language = lang_code
+                                _TRANSCRIPT_LIMITER.on_success()
+                                break
+                            except Exception as e_lang:
+                                # Detect 429-style throttling
+                                emsg = str(e_lang).lower()
+                                if '429' in emsg or 'too many requests' in emsg:
+                                    _TRANSCRIPT_LIMITER.on_429()
+                                continue
+                    
+                    if transcript_data:
+                        text_parts = [snippet.text for snippet in transcript_data]
+                        transcript_text = ' '.join(text_parts)
+                        print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
+                    else:
+                        print(f"⚠️ YouTube Transcript API: No supported language found")
             except Exception as e:
                 print(f"⚠️ YouTube Transcript API failed: {e}")
         
-        # Always try to get metadata from yt-dlp (more reliable than web scraping)
-        try:
-            # Enhanced robustness for metadata-only extraction
-            ydl_opts = {
-                'skip_download': True,
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'ignoreconfig': True,  # Ignore any system/user config that might force incompatible formats
-                'noplaylist': True,
-                'simulate': True,
-                'format': 'best',
-                
-                # Robustness from OpenAI suggestions
-                'extractor_args': {
-                    'youtube': {
-                        'player-client': ['android', 'web']  # Allow fallback to multiple official clients
-                    }
-                },
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-                },
-                'geo_bypass': True,
-                'geo_bypass_country': 'US',
-                'retries': 3,
-                'socket_timeout': 20,
-            }
-            # Apply environment-driven adjustments (safe mode, retries, cookies, IP stack)
-            self._apply_ytdlp_env(ydl_opts)
-            # Use robust extraction with retry logic
-            info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
-            if not info:
-                logging.warning("⚠️ yt-dlp metadata extraction failed after retries; continuing with fallback metadata")
-                info = None
-            
-            if info:
-                thumb_id = info.get('id', video_id)
-                metadata = {
+        # --- Metadata: prefer official Data API when configured; else fallback to yt-dlp, else scrape ---
+        metadata = None
+        source_pref = (os.getenv('YT_METADATA_SOURCE') or 'auto').strip().lower()
+        api_key = os.getenv('YT_API_KEY')
+
+        # Helper: YouTube Data API v3 (videos.list)
+        def _metadata_via_data_api() -> Optional[dict]:
+            import requests
+            try:
+                if not api_key:
+                    return None
+                parts = 'snippet,contentDetails,statistics'
+                url = (
+                    'https://www.googleapis.com/youtube/v3/videos?'
+                    f'part={parts}&id={video_id}&key={api_key}'
+                )
+                r = requests.get(url, timeout=12)
+                if r.status_code != 200:
+                    return None
+                data = r.json() or {}
+                items = data.get('items') or []
+                if not items:
+                    return None
+                it = items[0]
+                sn = it.get('snippet') or {}
+                cd = it.get('contentDetails') or {}
+                st = it.get('statistics') or {}
+                title = (sn.get('title') or '').strip()
+                desc = sn.get('description') or ''
+                channel = (sn.get('channelTitle') or 'Unknown').strip()
+                channel_id = sn.get('channelId') or ''
+                published = (sn.get('publishedAt') or '')
+                # Convert ISO8601 duration to seconds
+                import re
+                dur_iso = cd.get('duration') or ''
+                m = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', dur_iso)
+                secs = 0
+                if m:
+                    h = int(m.group(1) or 0); m_ = int(m.group(2) or 0); s = int(m.group(3) or 0)
+                    secs = h*3600 + m_*60 + s
+                # Views as int if present
+                try:
+                    views = int(st.get('viewCount', 0))
+                except Exception:
+                    views = 0
+                # Best thumbnail
+                thumbs = (sn.get('thumbnails') or {})
+                thumb_url = ''
+                for k in ('maxres','standard','high','medium','default'):
+                    if k in thumbs and 'url' in thumbs[k]:
+                        thumb_url = thumbs[k]['url']
+                        break
+                # YYYYMMDD
+                upload_date = ''
+                if published:
+                    try:
+                        from datetime import datetime
+                        upload_date = datetime.fromisoformat(published.replace('Z','+00:00')).strftime('%Y%m%d')
+                    except Exception:
+                        upload_date = ''
+                result = {
+                    'title': title or f'Video {video_id}',
+                    'description': desc,
+                    'uploader': channel or 'Unknown',
+                    'upload_date': upload_date,
+                    'duration': secs,
+                    'duration_string': 'Unknown',
+                    'view_count': views,
+                    'url': youtube_url,
+                    'video_id': video_id,
+                    'id': video_id,
+                    'channel_url': f'https://www.youtube.com/channel/{channel_id}' if channel_id else '',
+                    'tags': sn.get('tags', []),
+                    'thumbnail': thumb_url or (f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else ''),
+                    # Fields not available via Data API (leave empty/defaults)
+                    'like_count': 0,
+                    'comment_count': 0,
+                    'channel_follower_count': 0,
+                    'uploader_id': '',
+                    'uploader_url': f'https://www.youtube.com/channel/{channel_id}' if channel_id else '',
+                    'categories': [],
+                    'availability': 'public',
+                    'live_status': 'not_live',
+                    'age_limit': 0,
+                    'resolution': '',
+                    'fps': 0,
+                    'aspect_ratio': 0.0,
+                    'vcodec': '',
+                    'acodec': '',
+                    'automatic_captions': [],
+                    'subtitles': [],
+                    'release_timestamp': 0,
+                    'chapters': [],
+                }
+                return result
+            except Exception:
+                return None
+
+        used_api = False
+        if source_pref in ('data_api','api') or (source_pref == 'auto' and api_key):
+            metadata = _metadata_via_data_api()
+            used_api = metadata is not None
+
+        # Fallback to yt-dlp when requested or when Data API not used/failed
+        if not used_api and (source_pref in ('yt_dlp','ytdlp','dlp','auto','') or source_pref not in ('data_api','api')):
+            try:
+                # Enhanced robustness for metadata-only extraction
+                ydl_opts = {
+                    'skip_download': True,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': False,
+                    'ignoreconfig': True,  # Ignore any system/user config that might force incompatible formats
+                    'noplaylist': True,
+                    'simulate': True,
+                    'format': 'best',
+                    # Robustness from OpenAI suggestions
+                    'extractor_args': {
+                        'youtube': {
+                            'player-client': ['android', 'web']  # Allow fallback to multiple official clients
+                        }
+                    },
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                    },
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'US',
+                    'retries': 3,
+                    'socket_timeout': 20,
+                }
+                # Apply environment-driven adjustments (safe mode, retries, cookies, IP stack)
+                self._apply_ytdlp_env(ydl_opts)
+                # Use robust extraction with retry logic
+                info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
+                if not info:
+                    logging.warning("⚠️ yt-dlp metadata extraction failed after retries; continuing with fallback metadata")
+                    info = None
+
+                if info:
+                    thumb_id = info.get('id', video_id)
+                    metadata = {
                         'title': info.get('title', 'Unknown'),
                         'description': info.get('description', ''),
                         'uploader': info.get('uploader', 'Unknown'), 
@@ -1139,8 +1341,7 @@ Preview:
                         'channel_url': info.get('channel_url', ''),
                         'tags': info.get('tags', []),
                         'thumbnail': info.get('thumbnail') or (f'https://img.youtube.com/vi/{thumb_id}/mqdefault.jpg' if thumb_id else ''),
-                        
-                        # NEW ENHANCED METADATA FIELDS
+                        # Enhanced fields from yt-dlp
                         'like_count': info.get('like_count', 0),
                         'comment_count': info.get('comment_count', 0),
                         'channel_follower_count': info.get('channel_follower_count', 0),
@@ -1155,18 +1356,17 @@ Preview:
                         'aspect_ratio': info.get('aspect_ratio', 0.0),
                         'vcodec': info.get('vcodec', ''),
                         'acodec': info.get('acodec', ''),
-                    'automatic_captions': list(info.get('automatic_captions', {}).keys()),
-                    'subtitles': list(info.get('subtitles', {}).keys()),
-                    'release_timestamp': info.get('release_timestamp', 0),
-                    'chapters': info.get('chapters') or [],
-                }
-            else:
+                        'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+                        'subtitles': list(info.get('subtitles', {}).keys()),
+                        'release_timestamp': info.get('release_timestamp', 0),
+                        'chapters': info.get('chapters') or [],
+                    }
+                else:
+                    metadata = None
+            except Exception as e:
+                print(f"⚠️ yt-dlp metadata extraction failed: {e}")
                 metadata = None
-        except Exception as e:
-            print(f"⚠️ yt-dlp metadata extraction failed: {e}")
-            # Fallback to web scraping
-            metadata = self._get_fallback_metadata(youtube_url, video_id)
-        
+
         if metadata is None:
             logging.warning("⚠️ Falling back to HTML scraping for metadata")
             metadata = self._get_fallback_metadata(youtube_url, video_id)
