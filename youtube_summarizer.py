@@ -7,6 +7,7 @@ Extracts transcripts from YouTube videos and generates intelligent summaries
 import asyncio
 import contextlib
 import os
+import logging
 import json
 import logging
 import os
@@ -70,11 +71,17 @@ class TranscriptLimiter:
         now = time.monotonic()
         # If in cooldown, block
         if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            try:
+                logging.info("Transcript breaker active: cooldown %.0fs left", remaining)
+            except Exception:
+                pass
             return False
         # Enforce min interval
         sleep_for = max(0.0, self._next_allowed - now)
         if sleep_for > 0:
             try:
+                logging.info("Transcript rate limit: sleeping %.1fs", sleep_for)
                 time.sleep(min(sleep_for, 5.0))
             except Exception:
                 pass
@@ -89,10 +96,50 @@ class TranscriptLimiter:
         self._fail_count += 1
         if self._fail_count >= max(1, self.threshold):
             self._cooldown_until = time.monotonic() + max(0.0, self.cooldown_secs)
+            try:
+                logging.warning("Transcript breaker entering cooldown for %.0fs after repeated 429s", self.cooldown_secs)
+            except Exception:
+                pass
             self._fail_count = 0
 
 
 _TRANSCRIPT_LIMITER: TranscriptLimiter | None = None
+
+# --- Simple in-memory transcript cache ---
+from typing import Tuple
+_TRANSCRIPT_CACHE: dict[str, Tuple[str, str, float]] = {}
+
+def _transcript_cache_ttl() -> float:
+    try:
+        return float(os.getenv('YT_TRANSCRIPT_CACHE_TTL', '86400') or '86400')
+    except Exception:
+        return 86400.0
+
+def _transcript_cache_get(video_id: str) -> Tuple[Optional[str], Optional[str]]:
+    ttl = _transcript_cache_ttl()
+    rec = _TRANSCRIPT_CACHE.get(video_id)
+    if not rec:
+        return None, None
+    text, lang, ts = rec
+    if (time.time() - ts) > ttl:
+        # Expired
+        try:
+            del _TRANSCRIPT_CACHE[video_id]
+        except Exception:
+            pass
+        return None, None
+    try:
+        logging.info("Transcript cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
+    except Exception:
+        pass
+    return text, lang
+
+def _transcript_cache_put(video_id: str, text: str, lang: str) -> None:
+    try:
+        _TRANSCRIPT_CACHE[video_id] = (text, lang or '', time.time())
+        logging.info("Transcript cached for %s (len=%d)", video_id, len(text or ''))
+    except Exception:
+        pass
 
 # Import LLM configuration manager
 from llm_config import llm_config
@@ -1124,6 +1171,13 @@ Preview:
         if TRANSCRIPT_API_AVAILABLE:
             try:
                 with _transcript_proxy_context():
+                    # Cache check first
+                    cached_text, cached_lang = _transcript_cache_get(video_id)
+                    if cached_text:
+                        transcript_text = cached_text
+                        transcript_language = cached_lang
+                        raise StopIteration  # Skip fetching
+
                     api = YouTubeTranscriptApi()
                     
                     # Try multiple language codes in order of preference
@@ -1181,11 +1235,14 @@ Preview:
                     if transcript_data:
                         text_parts = [snippet.text for snippet in transcript_data]
                         transcript_text = ' '.join(text_parts)
+                        _transcript_cache_put(video_id, transcript_text, transcript_language or '')
                         print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
                     else:
                         print(f"⚠️ YouTube Transcript API: No supported language found")
             except Exception as e:
-                print(f"⚠️ YouTube Transcript API failed: {e}")
+                # Swallow StopIteration from cache hit
+                if not isinstance(e, StopIteration):
+                    print(f"⚠️ YouTube Transcript API failed: {e}")
         
         # --- Metadata: prefer official Data API when configured; else fallback to yt-dlp, else scrape ---
         metadata = None
@@ -1289,6 +1346,8 @@ Preview:
         if source_pref in ('data_api','api') or (source_pref == 'auto' and api_key):
             metadata = _metadata_via_data_api()
             used_api = metadata is not None
+            if used_api:
+                logging.info("YouTube metadata: using Data API (videos.list)")
 
         # Fallback to yt-dlp when requested or when Data API not used/failed
         if not used_api and (source_pref in ('yt_dlp','ytdlp','dlp','auto','') or source_pref not in ('data_api','api')):
@@ -1361,6 +1420,7 @@ Preview:
                         'release_timestamp': info.get('release_timestamp', 0),
                         'chapters': info.get('chapters') or [],
                     }
+                    logging.info("YouTube metadata: using yt-dlp fallback")
                 else:
                     metadata = None
             except Exception as e:
