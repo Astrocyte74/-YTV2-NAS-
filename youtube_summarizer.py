@@ -833,7 +833,8 @@ Rules:
 - Use the article's language ({language}).
 - No headings, no code fences, no emojis.
 """
-        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki section bullets")) or ""
+        # For wiki per‑section calls, keep retries minimal; the local hub has its own backoff.
+        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki section bullets", max_retries=1)) or ""
 
     async def _wiki_consolidate_insights(self, article_title: str, section_bullets: List[Dict[str, str]], language: str) -> str:
         parts = []
@@ -857,7 +858,8 @@ Rules:
 - Use {language}.
 - No code fences or emojis.
 """
-        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki insights consolidation")) or ""
+        # Consolidation is lightweight; avoid noisy retry logs.
+        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki insights consolidation", max_retries=1)) or ""
 
     async def _process_wikipedia_insights(
         self,
@@ -881,6 +883,18 @@ Rules:
         except Exception:
             per_len = 2200
         sections = self._wiki_trim_sections(all_sections, limit=sec_limit, per_len=per_len)
+        try:
+            logging.info(
+                "Wikipedia pipeline: '%s' -> %d sections (limit=%d, per_len=%d); provider=%s model=%s",
+                metadata.get("title", "Article"),
+                len(sections),
+                sec_limit,
+                per_len,
+                self.llm_provider,
+                self.model,
+            )
+        except Exception:
+            pass
 
         # Fallback: if we failed to split, fall back to generic pipeline
         if not sections:
@@ -916,7 +930,7 @@ Source title: {metadata.get('title','')}
 Preview:
 {insights_text[:1000]}
 """
-        headline_text = await self._robust_llm_call([HumanMessage(content=title_prompt)], operation_name="wiki headline")
+        headline_text = await self._robust_llm_call([HumanMessage(content=title_prompt)], operation_name="wiki headline", max_retries=1)
         headline_text = headline_text or metadata.get("title", "Generated Summary")
 
         # Build result in the same shape as process_text_content
