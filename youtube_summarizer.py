@@ -132,6 +132,40 @@ def _transcript_cache_get(video_id: str) -> Tuple[Optional[str], Optional[str]]:
         logging.info("Transcript cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
     except Exception:
         pass
+
+# --- Simple in-memory metadata cache ---
+_METADATA_CACHE: dict[str, Tuple[dict, float]] = {}
+
+def _metadata_cache_ttl() -> float:
+    try:
+        return float(os.getenv('YT_METADATA_CACHE_TTL', '86400') or '86400')
+    except Exception:
+        return 86400.0
+
+def _metadata_cache_get(video_id: str) -> Optional[dict]:
+    ttl = _metadata_cache_ttl()
+    rec = _METADATA_CACHE.get(video_id)
+    if not rec:
+        return None
+    data, ts = rec
+    if (time.time() - ts) > ttl:
+        try:
+            del _METADATA_CACHE[video_id]
+        except Exception:
+            pass
+        return None
+    try:
+        logging.info("Metadata cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
+    except Exception:
+        pass
+    return data
+
+def _metadata_cache_put(video_id: str, data: dict) -> None:
+    try:
+        _METADATA_CACHE[video_id] = (data, time.time())
+        logging.info("Metadata cached for %s", video_id)
+    except Exception:
+        pass
     return text, lang
 
 def _transcript_cache_put(video_id: str, text: str, lang: str) -> None:
@@ -1141,6 +1175,7 @@ Preview:
         """Extract transcript and attempt basic metadata using youtube-transcript-api + web scraping"""
         transcript_text = None
         transcript_language = None
+        transcript_source = 'none'
         
         @contextlib.contextmanager
         def _transcript_proxy_context():
@@ -1176,6 +1211,7 @@ Preview:
                     if cached_text:
                         transcript_text = cached_text
                         transcript_language = cached_lang
+                        transcript_source = 'cache'
                         raise StopIteration  # Skip fetching
 
                     api = YouTubeTranscriptApi()
@@ -1216,14 +1252,17 @@ Preview:
                     else:
                         _TRANSCRIPT_LIMITER.update(min_interval, threshold, cooldown)
 
+                    paused = False
                     if not _TRANSCRIPT_LIMITER.before_request():
                         print("⏸️ Transcript fetch paused by circuit breaker (cooldown active)")
+                        paused = True
                     else:
                         for lang_code in language_codes:
                             try:
                                 transcript_data = api.fetch(video_id, [lang_code])
                                 transcript_language = lang_code
                                 _TRANSCRIPT_LIMITER.on_success()
+                                transcript_source = 'fetched'
                                 break
                             except Exception as e_lang:
                                 # Detect 429-style throttling
@@ -1238,6 +1277,8 @@ Preview:
                         _transcript_cache_put(video_id, transcript_text, transcript_language or '')
                         print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
                     else:
+                        if paused:
+                            transcript_source = 'paused'
                         print(f"⚠️ YouTube Transcript API: No supported language found")
             except Exception as e:
                 # Swallow StopIteration from cache hit
@@ -1248,6 +1289,7 @@ Preview:
         metadata = None
         source_pref = (os.getenv('YT_METADATA_SOURCE') or 'auto').strip().lower()
         api_key = os.getenv('YT_API_KEY')
+        metadata_source = 'none'
 
         # Helper: YouTube Data API v3 (videos.list)
         def _metadata_via_data_api() -> Optional[dict]:
@@ -1342,15 +1384,25 @@ Preview:
             except Exception:
                 return None
 
+        # Check metadata cache first (applies regardless of chosen source)
+        cached_meta = _metadata_cache_get(video_id)
         used_api = False
-        if source_pref in ('data_api','api') or (source_pref == 'auto' and api_key):
-            metadata = _metadata_via_data_api()
-            used_api = metadata is not None
-            if used_api:
-                logging.info("YouTube metadata: using Data API (videos.list)")
+        if cached_meta is not None:
+            metadata = cached_meta
+            metadata_source = 'cache'
+        
+        if metadata is None:
+            used_api = False
+            if source_pref in ('data_api','api') or (source_pref == 'auto' and api_key):
+                metadata = _metadata_via_data_api()
+                used_api = metadata is not None
+                if used_api:
+                    logging.info("YouTube metadata: using Data API (videos.list)")
+                    metadata_source = 'data_api'
+                    _metadata_cache_put(video_id, metadata)
 
         # Fallback to yt-dlp when requested or when Data API not used/failed
-        if not used_api and (source_pref in ('yt_dlp','ytdlp','dlp','auto','') or source_pref not in ('data_api','api')):
+        if metadata is None and (source_pref in ('yt_dlp','ytdlp','dlp','auto','') or source_pref not in ('data_api','api')):
             try:
                 # Enhanced robustness for metadata-only extraction
                 ydl_opts = {
@@ -1421,6 +1473,8 @@ Preview:
                         'chapters': info.get('chapters') or [],
                     }
                     logging.info("YouTube metadata: using yt-dlp fallback")
+                    metadata_source = 'yt_dlp'
+                    _metadata_cache_put(video_id, metadata)
                 else:
                     metadata = None
             except Exception as e:
@@ -1430,7 +1484,19 @@ Preview:
         if metadata is None:
             logging.warning("⚠️ Falling back to HTML scraping for metadata")
             metadata = self._get_fallback_metadata(youtube_url, video_id)
+            metadata_source = 'scrape'
+            _metadata_cache_put(video_id, metadata)
         
+        try:
+            logging.info(
+                "YouTube audit: transcript=%s (%d chars) metadata=%s",
+                transcript_source,
+                len(transcript_text or ''),
+                metadata_source,
+            )
+        except Exception:
+            pass
+
         return {
             'transcript': transcript_text,
             'transcript_language': transcript_language,
