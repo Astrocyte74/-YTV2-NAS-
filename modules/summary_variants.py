@@ -71,7 +71,14 @@ def variant_kind(variant_id: str) -> str:
 
 
 def format_summary_html(text: str) -> str:
-    """Convert plain text summary into minimalist HTML."""
+    """Convert plain text summary into minimalist HTML.
+
+    Enhancements:
+    - Strip code fence markers (```lang) while keeping content lines
+    - Detect single-line heading blocks ending with ':' → <h3 class="kp-heading">
+    - Detect 'Bottom line:' → <p class="kp-takeaway"><strong>Bottom line:</strong> …</p>
+    - Map bullet lines (•, -, *) → <ul class="kp-list"><li>…</li></ul>
+    """
     if not isinstance(text, str):
         return ""
 
@@ -79,21 +86,147 @@ def format_summary_html(text: str) -> str:
     if not normalized:
         return ""
 
-    blocks = [block.strip() for block in re.split(r"\n\s*\n", normalized) if block.strip()]
-    html_blocks: List[str] = []
+    # Remove code fence markers to avoid literal ``` blocks in HTML
+    normalized = re.sub(r"^```.*$", "", normalized, flags=re.MULTILINE)
+    normalized = normalized.replace("```", "")
 
-    for block in blocks:
-        lines = [line.strip() for line in block.split("\n") if line.strip()]
-        if lines and all(re.match(r"^[\-*•]", line) for line in lines):
-            items = []
-            for line in lines:
-                cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
-                items.append(f"<li>{html.escape(cleaned)}</li>")
-            html_blocks.append(f"<ul>{''.join(items)}</ul>")
+    out: List[str] = []
+    in_list = False
+    pending_heading: Optional[str] = None
+
+    def flush_list():
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    heading_re = re.compile(r"^[A-Za-z][\w \-/]{1,60}:$")
+    bottom_re = re.compile(r"^bottom\s+line:\s*(.*)$", flags=re.IGNORECASE)
+
+    def clean_heading(text: str) -> str:
+        s = text.strip()
+        if s.endswith(":"):
+            s = s[:-1].strip()
+        # Remove common markdown heading/bold/italic wrappers
+        s = re.sub(r"^#{1,6}\s+", "", s)  # strip leading markdown '#'
+        s = re.sub(r"\s+#{1,6}$", "", s)  # strip trailing markdown '#'
+        # Bold/italic
+        # Extract bold label in numbered patterns like "1) **Title**"
+        m = re.match(r"^\d+\)\s+(\*\*|__)(.+?)(\*\*|__)", s)
+        if m:
+            return m.group(2).strip()
+        m = re.match(r"^(\*\*|__)(.+?)(\*\*|__)$", s)
+        if m:
+            s = m.group(2).strip()
         else:
-            html_blocks.append(f"<p>{html.escape(block)}</p>")
+            m = re.match(r"^\*(.+)\*$", s)
+            if m:
+                s = m.group(1).strip()
+            else:
+                m = re.match(r"^_(.+)_$", s)
+                if m:
+                    s = m.group(1).strip()
+        return s
 
-    return "\n".join(html_blocks)
+    for raw in normalized.splitlines():
+        line = raw.strip()
+        if not line:
+            flush_list()
+            # Keep pending_heading across blank lines
+            continue
+
+        # Heading line with colon
+        if heading_re.match(line):
+            flush_list()
+            heading = clean_heading(line)
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(heading)}</h3>")
+            pending_heading = None
+            continue
+
+        # Bottom line
+        m = bottom_re.match(line)
+        if m:
+            flush_list()
+            rest = (m.group(1) or "").strip()
+            label = "Bottom line:"
+            content = f"<strong>{html.escape(label)}</strong> {html.escape(rest)}" if rest else f"<strong>{html.escape(label)}</strong>"
+            out.append(f"<p class=\"kp-takeaway\">{content}</p>")
+            continue
+
+        # Markdown-style ATX heading line (e.g., ### Title)
+        if re.match(r"^#{1,6}\s+", line):
+            flush_list()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(line))}</h3>")
+            pending_heading = None
+            continue
+
+        # Markdown-style bold/italic heading line (e.g., **Title** or _Title_)
+        if re.match(r"^(\*\*|__).+(\*\*|__)$", line) or re.match(r"^(\*|_).+(\*|_)$", line):
+            flush_list()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(line))}</h3>")
+            pending_heading = None
+            continue
+
+        # If we have a pending heading and now see bullets, emit heading
+        if pending_heading and re.match(r"^[\-*•]", line):
+            flush_list()
+            out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(pending_heading))}</h3>")
+            pending_heading = None
+
+        # Bullet line (supports first bullet-as-heading pattern)
+        if re.match(r"^[\-*•]", line):
+            cleaned = re.sub(r"^[\-*•]\s*", "", line).strip()
+            # If this bullet looks like a heading label, emit a heading and do not start a list yet
+            if re.match(r"^(\d+\)\s+)?(\*\*|__|\*)(.+?)(\*\*|__|\*)\s*:?$", cleaned) or re.match(r"^#{1,6}\s+.+$", cleaned):
+                flush_list()
+                out.append(f"<h3 class=\"kp-heading\">{html.escape(clean_heading(cleaned))}</h3>")
+                pending_heading = None
+                continue
+            if not in_list:
+                out.append("<ul class=\"kp-list\">")
+                in_list = True
+            out.append(f"<li>{html.escape(cleaned)}</li>")
+            continue
+
+        # Potential heading without colon: short line, next block is a list (handled above)
+        if len(line) <= 60 and not re.search(r"[.!?]$", line) and not re.match(r"^[a-z]", line):
+            # Defer decision until we know what follows
+            # If another non-bullet line comes next, we'll emit as paragraph then
+            if pending_heading:
+                # Previous pending wasn't followed by bullets; emit as paragraph
+                flush_list()
+                out.append(f"<p>{html.escape(pending_heading)}</p>")
+            pending_heading = line
+            continue
+
+        # Paragraph (and flush any pending heading as paragraph)
+        if pending_heading:
+            flush_list()
+            out.append(f"<p>{html.escape(pending_heading)}</p>")
+            pending_heading = None
+
+        # If a "Bottom line:" label appears inline within the paragraph,
+        # split it into a normal paragraph + emphasized takeaway block.
+        inline_bottom = re.search(r"\bbottom\s+line:\s*(.+)$", line, flags=re.IGNORECASE)
+        if inline_bottom:
+            pre = line[: inline_bottom.start()].strip()
+            rest = inline_bottom.group(1).strip()
+            if pre:
+                flush_list()
+                out.append(f"<p>{html.escape(pre)}</p>")
+            label = "Bottom line:"
+            content = f"<strong>{html.escape(label)}</strong> {html.escape(rest)}" if rest else f"<strong>{html.escape(label)}</strong>"
+            out.append(f"<p class=\"kp-takeaway\">{content}</p>")
+            continue
+
+        flush_list()
+        out.append(f"<p>{html.escape(line)}</p>")
+
+    flush_list()
+    # If file ended with a pending non-bullet heading, emit as paragraph
+    if pending_heading:
+        out.append(f"<p>{html.escape(pending_heading)}</p>")
+    return "\n".join(out)
 
 
 def _clone_variant_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -259,3 +392,79 @@ __all__ = [
     "normalize_variant_id",
     "variant_kind",
 ]
+
+
+# --- HTML normalization helpers (legacy to minimal semantic HTML) ---
+
+import html as _htmlmod
+
+
+def _normalize_html_to_text(html: str) -> str:
+    """Convert legacy HTML into plain text headings + bullets for reformatting.
+
+    - Promote <div class="kp-heading"> and paragraphs starting with '##'/'###' to heading lines
+    - Convert <li> to '- ' lines
+    - Paragraphs to blank lines; strip tags; unescape; strip markdown wrappers
+    """
+    s = html or ""
+    # Normalize line breaks
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+
+    def _emit_heading(m):
+        t = _htmlmod.unescape(m.group(1))
+        # strip leading/trailing hashes
+        t = re.sub(r"^#{1,6}\s+", "", t)
+        t = re.sub(r"\s+#{1,6}$", "", t)
+        # strip markdown bold wrappers
+        t = re.sub(r"^(\*\*|__)(.+?)(\*\*|__)\s*:?$", r"\2", t)
+        return f"{t.strip()}:\n"
+
+    # Promote known heading containers
+    s = re.sub(r"<div[^>]*class=\"kp-heading\"[^>]*>(.*?)</div>", _emit_heading, s, flags=re.IGNORECASE|re.DOTALL)
+    # ATX-style heading inside paragraphs
+    s = re.sub(r"<p[^>]*>\s*(###+\s+[^<]+)\s*</p>", _emit_heading, s, flags=re.IGNORECASE)
+    s = re.sub(r"<p[^>]*>\s*(##\s+[^<]+)\s*</p>", _emit_heading, s, flags=re.IGNORECASE)
+
+    # Convert list items to '- ' lines
+    s = re.sub(r"<li[^>]*>\s*", "- ", s, flags=re.IGNORECASE)
+    s = re.sub(r"</li>", "\n", s, flags=re.IGNORECASE)
+
+    # Paragraphs → blanks
+    s = re.sub(r"</p>", "\n\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"<p[^>]*>", "", s, flags=re.IGNORECASE)
+
+    # Strip remaining tags
+    s = re.sub(r"<[^>]+>", "", s)
+    # Unescape entities
+    s = _htmlmod.unescape(s)
+    # Strip markdown bold/italic wrappers in residual text
+    s = re.sub(r"(\*\*|__)(.+?)(\*\*|__)", r"\2", s)
+    s = re.sub(r"(\*|_)(.+?)(\*|_)", r"\2", s)
+    # Collapse whitespace
+    s = re.sub(r"\r", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def needs_html_normalize(html: str) -> bool:
+    """Heuristics indicating legacy HTML that should be normalized."""
+    if not isinstance(html, str) or not html.strip():
+        return False
+    s = html
+    # Bulleted 'headings' with markdown wrappers
+    if re.search(r"<li[^>]*>\s*(\*\*|_).+(\*\*|_)\s*</li>", s, flags=re.IGNORECASE):
+        return True
+    # ATX headings inside paragraphs
+    if re.search(r"<p[^>]*>\s*##+\s+", s, flags=re.IGNORECASE):
+        return True
+    # Non-semantic heading container div
+    if re.search(r"<div[^>]*class=\"kp-heading\"", s, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def normalize_existing_html_to_minimal(html: str) -> Tuple[str, str]:
+    """Return (derived_text, minimal_html) from legacy HTML using our formatter."""
+    text = _normalize_html_to_text(html)
+    minimal_html = format_summary_html(text)
+    return text, minimal_html

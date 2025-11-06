@@ -1,0 +1,3 @@
+CWD= /app
+PATH= ['', '/usr/local/lib/python311.zip', '/usr/local/lib/python3.11', '/usr/local/lib/python3.11/lib-dynload', '/usr/local/lib/python3.11/site-packages']
+SPEC= ModuleSpec(name='youtube_summarizer', loader=<_frozen_importlib_external.SourceFileLoader object at 0x7f63061a1d90>, origin='/app/youtube_summarizer.py')

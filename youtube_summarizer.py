@@ -5,6 +5,9 @@ Extracts transcripts from YouTube videos and generates intelligent summaries
 """
 
 import asyncio
+import contextlib
+import os
+import logging
 import json
 import logging
 import os
@@ -46,6 +49,132 @@ from modules import ollama_client as oc
 import requests
 
 from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
+
+# --- Transcript rate limiter / circuit breaker ---
+import time
+
+class TranscriptLimiter:
+    def __init__(self, min_interval: float, threshold: int, cooldown_secs: float):
+        self.min_interval = float(min_interval)
+        self.threshold = int(threshold)
+        self.cooldown_secs = float(cooldown_secs)
+        self._next_allowed = 0.0
+        self._fail_count = 0
+        self._cooldown_until = 0.0
+
+    def update(self, min_interval: float, threshold: int, cooldown_secs: float) -> None:
+        self.min_interval = float(min_interval)
+        self.threshold = int(threshold)
+        self.cooldown_secs = float(cooldown_secs)
+
+    def before_request(self) -> bool:
+        now = time.monotonic()
+        # If in cooldown, block
+        if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            try:
+                logging.info("Transcript breaker active: cooldown %.0fs left", remaining)
+            except Exception:
+                pass
+            return False
+        # Enforce min interval
+        sleep_for = max(0.0, self._next_allowed - now)
+        if sleep_for > 0:
+            try:
+                logging.info("Transcript rate limit: sleeping %.1fs", sleep_for)
+                time.sleep(min(sleep_for, 5.0))
+            except Exception:
+                pass
+        return True
+
+    def on_success(self) -> None:
+        now = time.monotonic()
+        self._fail_count = 0
+        self._next_allowed = now + max(0.0, self.min_interval)
+
+    def on_429(self) -> None:
+        self._fail_count += 1
+        if self._fail_count >= max(1, self.threshold):
+            self._cooldown_until = time.monotonic() + max(0.0, self.cooldown_secs)
+            try:
+                logging.warning("Transcript breaker entering cooldown for %.0fs after repeated 429s", self.cooldown_secs)
+            except Exception:
+                pass
+            self._fail_count = 0
+
+
+_TRANSCRIPT_LIMITER: TranscriptLimiter | None = None
+
+# --- Simple in-memory transcript cache ---
+from typing import Tuple
+_TRANSCRIPT_CACHE: dict[str, Tuple[str, str, float]] = {}
+
+def _transcript_cache_ttl() -> float:
+    try:
+        return float(os.getenv('YT_TRANSCRIPT_CACHE_TTL', '86400') or '86400')
+    except Exception:
+        return 86400.0
+
+def _transcript_cache_get(video_id: str) -> Tuple[Optional[str], Optional[str]]:
+    ttl = _transcript_cache_ttl()
+    rec = _TRANSCRIPT_CACHE.get(video_id)
+    if not rec:
+        return None, None
+    text, lang, ts = rec
+    if (time.time() - ts) > ttl:
+        # Expired
+        try:
+            del _TRANSCRIPT_CACHE[video_id]
+        except Exception:
+            pass
+        return None, None
+    try:
+        logging.info("Transcript cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
+    except Exception:
+        pass
+    return text, lang
+
+# --- Simple in-memory metadata cache ---
+_METADATA_CACHE: dict[str, Tuple[dict, float]] = {}
+
+def _metadata_cache_ttl() -> float:
+    try:
+        return float(os.getenv('YT_METADATA_CACHE_TTL', '86400') or '86400')
+    except Exception:
+        return 86400.0
+
+def _metadata_cache_get(video_id: str) -> Optional[dict]:
+    ttl = _metadata_cache_ttl()
+    rec = _METADATA_CACHE.get(video_id)
+    if not rec:
+        return None
+    data, ts = rec
+    if (time.time() - ts) > ttl:
+        try:
+            del _METADATA_CACHE[video_id]
+        except Exception:
+            pass
+        return None
+    try:
+        logging.info("Metadata cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
+    except Exception:
+        pass
+    return data
+
+def _metadata_cache_put(video_id: str, data: dict) -> None:
+    try:
+        _METADATA_CACHE[video_id] = (data, time.time())
+        logging.info("Metadata cached for %s", video_id)
+    except Exception:
+        pass
+    
+
+def _transcript_cache_put(video_id: str, text: str, lang: str) -> None:
+    try:
+        _TRANSCRIPT_CACHE[video_id] = (text, lang or '', time.time())
+        logging.info("Transcript cached for %s (len=%d)", video_id, len(text or ''))
+    except Exception:
+        pass
 
 # Import LLM configuration manager
 from llm_config import llm_config
@@ -595,6 +724,25 @@ class YouTubeSummarizer:
             "extractor_notes": content.extractor_notes,
         }
 
+        # Wikipedia fast-path: sectioned Insights/consolidation when enabled
+        try:
+            wiki_mode = (os.getenv("WIKI_API_MODE") or "auto").strip().lower()
+        except Exception:
+            wiki_mode = "auto"
+        is_wikipedia = (site_label.lower() == "wikipedia" or hostname.endswith("wikipedia.org"))
+        normalized_type = (summary_type or "").strip().lower()
+        if is_wikipedia and wiki_mode not in {"off", "disabled"} and normalized_type in {"key-insights", "insights"}:
+            try:
+                result = await self._process_wikipedia_insights(
+                    content=content,
+                    raw_text=text,
+                    metadata=metadata,
+                    source_metadata=source_metadata,
+                )
+                return result
+            except Exception as exc:
+                print(f"⚠️ Wikipedia fast-path failed, falling back to generic pipeline: {exc}")
+
         return await self.process_text_content(
             content_id=content_id,
             text=text,
@@ -605,6 +753,235 @@ class YouTubeSummarizer:
             source_metadata=source_metadata,
             assume_has_audio=False,
         )
+
+    # --- Wikipedia sectioned Insights pipeline ------------------------ #
+    def _wiki_parse_sections(self, html: str) -> List[Dict[str, str]]:
+        """Return a list of {title, text} sections from Wikipedia mobile-html or summary html.
+
+        - Includes the lead section as title 'Overview' if present
+        - Skips boilerplate sections like 'References', 'See also', 'Notes'
+        """
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html or "", "html.parser")
+        sections: List[Dict[str, str]] = []
+        SKIP_TITLES = {"references", "see also", "notes", "external links", "further reading", "bibliography"}
+
+        # Lead (data-mw-section-id="0")
+        for lead in soup.find_all("section", attrs={"data-mw-section-id": "0"}):
+            # Strip references/superscripts in lead
+            for sup in lead.find_all("sup"):
+                sup.decompose()
+            lead_text = lead.get_text("\n", strip=True)
+            if lead_text and len(lead_text) > 120:
+                sections.append({"title": "Overview", "text": lead_text})
+
+        # Subsequent sections
+        for sec in soup.find_all("section"):
+            sid = sec.get("data-mw-section-id")
+            if not sid or sid == "0":
+                continue
+            h = sec.find(["h2", "h3"]) or None
+            title = (h.get_text(" ", strip=True) if h else "").strip()
+            if not title:
+                continue
+            if title.lower() in SKIP_TITLES:
+                continue
+            # Clean references
+            for sup in sec.find_all("sup"):
+                sup.decompose()
+            body_text = sec.get_text("\n", strip=True)
+            # Remove the heading from body if duplicated at start
+            if body_text.startswith(title):
+                body_text = body_text[len(title):].lstrip(" \n\t:-")
+            if len(body_text) < 60:
+                continue
+            sections.append({"title": title, "text": body_text})
+        return sections
+
+    def _wiki_trim_sections(self, sections: List[Dict[str, str]], limit: int = 8, per_len: int = 2200) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        for sec in sections:
+            if len(out) >= max(1, limit):
+                break
+            text = sec.get("text", "")
+            if len(text) > per_len:
+                # Trim at sentence boundary if possible
+                snippet = text[:per_len]
+                cut = max(snippet.rfind("."), snippet.rfind("!"), snippet.rfind("?"))
+                if cut > per_len * 0.6:
+                    text = snippet[: cut + 1]
+                else:
+                    text = snippet + "…"
+            out.append({"title": sec.get("title", ""), "text": text})
+        return out
+
+    async def _wiki_section_bullets(self, title: str, body: str, language: str) -> str:
+        prompt = f"""
+Summarize only the following Wikipedia section.
+
+Article: {title}
+
+Section text:
+{self._sanitize_content(body, max_length=4000)}
+
+Output:
+- 3–6 “• ” bullets with concrete facts, names, dates, figures.
+
+Rules:
+- Use only information explicitly present; no speculation.
+- Keep each bullet ≤ 18 words.
+- Use the article's language ({language}).
+- No headings, no code fences, no emojis.
+"""
+        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki section bullets")) or ""
+
+    async def _wiki_consolidate_insights(self, article_title: str, section_bullets: List[Dict[str, str]], language: str) -> str:
+        parts = []
+        for sb in section_bullets:
+            if sb.get("bullets"):
+                parts.append(f"## {sb['title']}\n{sb['bullets']}")
+        joined = "\n\n".join(parts)
+        prompt = f"""
+You are consolidating a set of per‑section bullet summaries from a Wikipedia article.
+
+Article: {article_title}
+
+Section summaries:
+{joined}
+
+Task: Organize into 3–5 content‑derived categories with concise headings. Under each heading, include 3–5 “• ” bullets capturing concrete facts, names, or metrics. Do not add a final “Bottom line”.
+
+Rules:
+- Use only given bullets; merge duplicates; no speculation.
+- Keep each bullet ≤ 18 words.
+- Use {language}.
+- No code fences or emojis.
+"""
+        return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki insights consolidation")) or ""
+
+    async def _process_wikipedia_insights(
+        self,
+        *,
+        content,
+        raw_text: str,
+        metadata: Dict[str, Any],
+        source_metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Sectioned two‑pass Insights specifically for Wikipedia articles."""
+        html = getattr(content, "html", None) or ""
+        language = (content.language or metadata.get("language") or "en")
+        all_sections = self._wiki_parse_sections(html)
+        # Limits
+        try:
+            sec_limit = int(os.getenv("WIKI_SECTION_LIMIT", "8"))
+        except Exception:
+            sec_limit = 8
+        try:
+            per_len = int(os.getenv("WIKI_SECTION_MAX_CHARS", "2200"))
+        except Exception:
+            per_len = 2200
+        sections = self._wiki_trim_sections(all_sections, limit=sec_limit, per_len=per_len)
+
+        # Fallback: if we failed to split, fall back to generic pipeline
+        if not sections:
+            return await self.process_text_content(
+                content_id=content.id,
+                text=raw_text,
+                metadata=metadata,
+                summary_type="key-insights",
+                proficiency_level=None,
+                source="web",
+                source_metadata=source_metadata,
+                assume_has_audio=False,
+            )
+
+        # First pass: bullets per section (parallel-ish but sequential here)
+        section_bullets: List[Dict[str, str]] = []
+        for sec in sections:
+            bullets = await self._wiki_section_bullets(sec["title"], sec["text"], language)
+            section_bullets.append({"title": sec["title"], "bullets": bullets})
+
+        # Second pass: consolidate into Insights
+        insights_text = await self._wiki_consolidate_insights(metadata.get("title", "Wikipedia Article"), section_bullets, language)
+        if not insights_text.strip():
+            # Fallback: join section bullets as a single list under generic heading
+            merged = "\n\n".join(sb.get("bullets", "") for sb in section_bullets if sb.get("bullets"))
+            insights_text = merged or raw_text[:2000]
+
+        # Headline
+        title_prompt = f"""
+Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
+IMPORTANT: Respond in {language}.
+Source title: {metadata.get('title','')}
+Preview:
+{insights_text[:1000]}
+"""
+        headline_text = await self._robust_llm_call([HumanMessage(content=title_prompt)], operation_name="wiki headline")
+        headline_text = headline_text or metadata.get("title", "Generated Summary")
+
+        # Build result in the same shape as process_text_content
+        summary_data = {
+            "summary": insights_text,
+            "headline": headline_text,
+            "summary_type": "key-insights",
+            "generated_at": datetime.now().isoformat(),
+            "language": language,
+        }
+
+        # Analyze content (reusing the same analyzer)
+        summary_text_for_analysis = insights_text
+        analysis_data = await self.analyze_content(summary_text_for_analysis, metadata)
+
+        media = {
+            "has_audio": False,
+            "audio_duration_seconds": 0,
+            "has_transcript": bool(raw_text),
+            "transcript_chars": len(raw_text or ""),
+        }
+
+        result = {
+            "id": content.id,
+            "content_source": "web",
+            "title": metadata.get("title", ""),
+            "canonical_url": metadata.get("url", ""),
+            "thumbnail_url": metadata.get("thumbnail", ""),
+            "published_at": metadata.get("published_at"),
+            "duration_seconds": metadata.get("duration", 0),
+            "word_count": len((raw_text or "").split()) if raw_text else 0,
+            "media": media,
+            "source_metadata": {"web": source_metadata or {}},
+            "analysis": analysis_data,
+            "original_language": language,
+            "summary_language": language,
+            "audio_language": None,
+            "url": metadata.get("url", ""),
+            "metadata": metadata,
+            "transcript": raw_text,
+            "summary": summary_data,
+            "processed_at": datetime.now().isoformat(),
+            "processor_info": {
+                "llm_provider": self.llm_provider,
+                "model": getattr(self.llm, "model_name", getattr(self.llm, "model", self.model)),
+            },
+        }
+
+        # Optional: image generation remains as in process_text_content
+        summary_for_image = insights_text
+        allow_image = bool(summary_for_image and not summary_for_image.lower().startswith("unable to "))
+        if summary_image_service.SUMMARY_IMAGE_ENABLED and allow_image:
+            try:
+                image_meta = await summary_image_service.maybe_generate_summary_image(result)
+                if image_meta:
+                    result["summary_image"] = image_meta
+                    result["summary_image_url"] = (
+                        image_meta.get("public_url")
+                        or image_meta.get("relative_path")
+                        or image_meta.get("path")
+                    )
+            except Exception as exc:
+                logging.debug("summary image generation skipped: %s", exc)
+
+        return result
     
     def _extract_with_robust_ytdlp(self, youtube_url: str, ydl_opts: dict, attempt: int = 1) -> Optional[dict]:
         """Extract info using yt-dlp with robust error handling and retries"""
@@ -799,85 +1176,274 @@ class YouTubeSummarizer:
         """Extract transcript and attempt basic metadata using youtube-transcript-api + web scraping"""
         transcript_text = None
         transcript_language = None
+        transcript_source = 'none'
+        
+        @contextlib.contextmanager
+        def _transcript_proxy_context():
+            """Temporarily route only transcript HTTP calls via a proxy.
+
+            If YT_TRANSCRIPT_PROXY is set, this context sets HTTPS_PROXY/HTTP_PROXY
+            (and lowercase variants) during the transcript fetch, then restores them.
+            """
+            proxy = os.getenv("YT_TRANSCRIPT_PROXY")
+            if not proxy:
+                yield
+                return
+            try:
+                logging.info("Transcript proxy active: %s", proxy)
+            except Exception:
+                pass
+            keys = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+            old = {k: os.environ.get(k) for k in keys}
+            try:
+                for k in keys:
+                    os.environ[k] = proxy
+                yield
+            finally:
+                for k in keys:
+                    val = old.get(k)
+                    if val is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = val
         
         # Get transcript via youtube-transcript-api with multiple language support
         if TRANSCRIPT_API_AVAILABLE:
             try:
-                api = YouTubeTranscriptApi()
-                
-                # Try multiple language codes in order of preference
-                language_codes = [
-                    'en',           # English (US)
-                    'en-GB',        # English (UK)
-                    'en-US',        # English (US explicit)
-                    'en-AU',        # English (Australia)
-                    'en-CA',        # English (Canada)
-                    'es',           # Spanish
-                    'es-ES',        # Spanish (Spain)
-                    'es-MX',        # Spanish (Mexico)
-                    'fr',           # French
-                    'fr-FR',        # French (France)
-                    'fr-CA'         # French (Canada)
-                ]
-                
-                transcript_data = None
-                
-                for lang_code in language_codes:
-                    try:
-                        transcript_data = api.fetch(video_id, [lang_code])
-                        transcript_language = lang_code
-                        break
-                    except Exception:
-                        continue
-                
-                if transcript_data:
-                    text_parts = [snippet.text for snippet in transcript_data]
-                    transcript_text = ' '.join(text_parts)
-                    print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
-                else:
-                    print(f"⚠️ YouTube Transcript API: No supported language found")
+                with _transcript_proxy_context():
+                    # Cache check first
+                    cached_text, cached_lang = _transcript_cache_get(video_id)
+                    if cached_text:
+                        transcript_text = cached_text
+                        transcript_language = cached_lang
+                        transcript_source = 'cache'
+                        raise StopIteration  # Skip fetching
+
+                    api = YouTubeTranscriptApi()
                     
+                    # Try multiple language codes in order of preference
+                    language_codes = [
+                        'en',           # English (US)
+                        'en-GB',        # English (UK)
+                        'en-US',        # English (US explicit)
+                        'en-AU',        # English (Australia)
+                        'en-CA',        # English (Canada)
+                        'es',           # Spanish
+                        'es-ES',        # Spanish (Spain)
+                        'es-MX',        # Spanish (Mexico)
+                        'fr',           # French
+                        'fr-FR',        # French (France)
+                        'fr-CA'         # French (Canada)
+                    ]
+                    
+                    # --- Global transcript rate limiter / circuit breaker ---
+                    transcript_data = None
+                    try:
+                        min_interval = float(os.getenv('YT_TRANSCRIPT_MIN_INTERVAL', '20') or '20')
+                    except Exception:
+                        min_interval = 20.0
+                    try:
+                        threshold = int(os.getenv('YT_TRANSCRIPT_CIRCUIT_THRESHOLD', '3') or '3')
+                    except Exception:
+                        threshold = 3
+                    try:
+                        cooldown = float(os.getenv('YT_TRANSCRIPT_COOLDOWN', '600') or '600')
+                    except Exception:
+                        cooldown = 600.0
+
+                    global _TRANSCRIPT_LIMITER
+                    if _TRANSCRIPT_LIMITER is None:
+                        _TRANSCRIPT_LIMITER = TranscriptLimiter(min_interval, threshold, cooldown)
+                    else:
+                        _TRANSCRIPT_LIMITER.update(min_interval, threshold, cooldown)
+
+                    paused = False
+                    if not _TRANSCRIPT_LIMITER.before_request():
+                        print("⏸️ Transcript fetch paused by circuit breaker (cooldown active)")
+                        paused = True
+                    else:
+                        for lang_code in language_codes:
+                            try:
+                                transcript_data = api.fetch(video_id, [lang_code])
+                                transcript_language = lang_code
+                                _TRANSCRIPT_LIMITER.on_success()
+                                transcript_source = 'fetched'
+                                break
+                            except Exception as e_lang:
+                                # Detect 429-style throttling
+                                emsg = str(e_lang).lower()
+                                if '429' in emsg or 'too many requests' in emsg:
+                                    _TRANSCRIPT_LIMITER.on_429()
+                                continue
+                    
+                    if transcript_data:
+                        text_parts = [snippet.text for snippet in transcript_data]
+                        transcript_text = ' '.join(text_parts)
+                        _transcript_cache_put(video_id, transcript_text, transcript_language or '')
+                        print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
+                    else:
+                        if paused:
+                            transcript_source = 'paused'
+                        print(f"⚠️ YouTube Transcript API: No supported language found")
             except Exception as e:
-                print(f"⚠️ YouTube Transcript API failed: {e}")
+                # Swallow StopIteration from cache hit
+                if not isinstance(e, StopIteration):
+                    print(f"⚠️ YouTube Transcript API failed: {e}")
         
-        # Always try to get metadata from yt-dlp (more reliable than web scraping)
-        try:
-            # Enhanced robustness for metadata-only extraction
-            ydl_opts = {
-                'skip_download': True,
-                'quiet': True,
-                'no_warnings': True,
-                'extract_flat': False,
-                'ignoreconfig': True,  # Ignore any system/user config that might force incompatible formats
-                'noplaylist': True,
-                'simulate': True,
-                'format': 'best',
-                
-                # Robustness from OpenAI suggestions
-                'extractor_args': {
-                    'youtube': {
-                        'player-client': ['android', 'web']  # Allow fallback to multiple official clients
-                    }
-                },
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-                },
-                'geo_bypass': True,
-                'geo_bypass_country': 'US',
-                'retries': 3,
-                'socket_timeout': 20,
-            }
-            # Apply environment-driven adjustments (safe mode, retries, cookies, IP stack)
-            self._apply_ytdlp_env(ydl_opts)
-            # Use robust extraction with retry logic
-            info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
-            if not info:
-                logging.warning("⚠️ yt-dlp metadata extraction failed after retries; continuing with fallback metadata")
-                info = None
-            
-            if info:
-                thumb_id = info.get('id', video_id)
-                metadata = {
+        # --- Metadata: prefer official Data API when configured; else fallback to yt-dlp, else scrape ---
+        metadata = None
+        source_pref = (os.getenv('YT_METADATA_SOURCE') or 'auto').strip().lower()
+        api_key = os.getenv('YT_API_KEY')
+        metadata_source = 'none'
+
+        # Helper: YouTube Data API v3 (videos.list)
+        def _metadata_via_data_api() -> Optional[dict]:
+            import requests
+            try:
+                if not api_key:
+                    return None
+                parts = 'snippet,contentDetails,statistics'
+                url = (
+                    'https://www.googleapis.com/youtube/v3/videos?'
+                    f'part={parts}&id={video_id}&key={api_key}'
+                )
+                r = requests.get(url, timeout=12)
+                if r.status_code != 200:
+                    return None
+                data = r.json() or {}
+                items = data.get('items') or []
+                if not items:
+                    return None
+                it = items[0]
+                sn = it.get('snippet') or {}
+                cd = it.get('contentDetails') or {}
+                st = it.get('statistics') or {}
+                title = (sn.get('title') or '').strip()
+                desc = sn.get('description') or ''
+                channel = (sn.get('channelTitle') or 'Unknown').strip()
+                channel_id = sn.get('channelId') or ''
+                published = (sn.get('publishedAt') or '')
+                # Convert ISO8601 duration to seconds
+                import re
+                dur_iso = cd.get('duration') or ''
+                m = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', dur_iso)
+                secs = 0
+                if m:
+                    h = int(m.group(1) or 0); m_ = int(m.group(2) or 0); s = int(m.group(3) or 0)
+                    secs = h*3600 + m_*60 + s
+                # Views as int if present
+                try:
+                    views = int(st.get('viewCount', 0))
+                except Exception:
+                    views = 0
+                # Best thumbnail
+                thumbs = (sn.get('thumbnails') or {})
+                thumb_url = ''
+                for k in ('maxres','standard','high','medium','default'):
+                    if k in thumbs and 'url' in thumbs[k]:
+                        thumb_url = thumbs[k]['url']
+                        break
+                # YYYYMMDD
+                upload_date = ''
+                if published:
+                    try:
+                        from datetime import datetime
+                        upload_date = datetime.fromisoformat(published.replace('Z','+00:00')).strftime('%Y%m%d')
+                    except Exception:
+                        upload_date = ''
+                result = {
+                    'title': title or f'Video {video_id}',
+                    'description': desc,
+                    'uploader': channel or 'Unknown',
+                    'upload_date': upload_date,
+                    'duration': secs,
+                    'duration_string': 'Unknown',
+                    'view_count': views,
+                    'url': youtube_url,
+                    'video_id': video_id,
+                    'id': video_id,
+                    'channel_url': f'https://www.youtube.com/channel/{channel_id}' if channel_id else '',
+                    'tags': sn.get('tags', []),
+                    'thumbnail': thumb_url or (f'https://img.youtube.com/vi/{video_id}/mqdefault.jpg' if video_id else ''),
+                    # Fields not available via Data API (leave empty/defaults)
+                    'like_count': 0,
+                    'comment_count': 0,
+                    'channel_follower_count': 0,
+                    'uploader_id': '',
+                    'uploader_url': f'https://www.youtube.com/channel/{channel_id}' if channel_id else '',
+                    'categories': [],
+                    'availability': 'public',
+                    'live_status': 'not_live',
+                    'age_limit': 0,
+                    'resolution': '',
+                    'fps': 0,
+                    'aspect_ratio': 0.0,
+                    'vcodec': '',
+                    'acodec': '',
+                    'automatic_captions': [],
+                    'subtitles': [],
+                    'release_timestamp': 0,
+                    'chapters': [],
+                }
+                return result
+            except Exception:
+                return None
+
+        # Check metadata cache first (applies regardless of chosen source)
+        cached_meta = _metadata_cache_get(video_id)
+        used_api = False
+        if cached_meta is not None:
+            metadata = cached_meta
+            metadata_source = 'cache'
+        
+        if metadata is None:
+            used_api = False
+            if source_pref in ('data_api','api') or (source_pref == 'auto' and api_key):
+                metadata = _metadata_via_data_api()
+                used_api = metadata is not None
+                if used_api:
+                    logging.info("YouTube metadata: using Data API (videos.list)")
+                    metadata_source = 'data_api'
+                    _metadata_cache_put(video_id, metadata)
+
+        # Fallback to yt-dlp when requested or when Data API not used/failed
+        if metadata is None and (source_pref in ('yt_dlp','ytdlp','dlp','auto','') or source_pref not in ('data_api','api')):
+            try:
+                # Enhanced robustness for metadata-only extraction
+                ydl_opts = {
+                    'skip_download': True,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': False,
+                    'ignoreconfig': True,  # Ignore any system/user config that might force incompatible formats
+                    'noplaylist': True,
+                    'simulate': True,
+                    'format': 'best',
+                    # Robustness from OpenAI suggestions
+                    'extractor_args': {
+                        'youtube': {
+                            'player-client': ['android', 'web']  # Allow fallback to multiple official clients
+                        }
+                    },
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                    },
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'US',
+                    'retries': 3,
+                    'socket_timeout': 20,
+                }
+                # Apply environment-driven adjustments (safe mode, retries, cookies, IP stack)
+                self._apply_ytdlp_env(ydl_opts)
+                # Use robust extraction with retry logic
+                info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
+                if not info:
+                    logging.warning("⚠️ yt-dlp metadata extraction failed after retries; continuing with fallback metadata")
+                    info = None
+
+                if info:
+                    thumb_id = info.get('id', video_id)
+                    metadata = {
                         'title': info.get('title', 'Unknown'),
                         'description': info.get('description', ''),
                         'uploader': info.get('uploader', 'Unknown'), 
@@ -891,8 +1457,7 @@ class YouTubeSummarizer:
                         'channel_url': info.get('channel_url', ''),
                         'tags': info.get('tags', []),
                         'thumbnail': info.get('thumbnail') or (f'https://img.youtube.com/vi/{thumb_id}/mqdefault.jpg' if thumb_id else ''),
-                        
-                        # NEW ENHANCED METADATA FIELDS
+                        # Enhanced fields from yt-dlp
                         'like_count': info.get('like_count', 0),
                         'comment_count': info.get('comment_count', 0),
                         'channel_follower_count': info.get('channel_follower_count', 0),
@@ -907,22 +1472,36 @@ class YouTubeSummarizer:
                         'aspect_ratio': info.get('aspect_ratio', 0.0),
                         'vcodec': info.get('vcodec', ''),
                         'acodec': info.get('acodec', ''),
-                    'automatic_captions': list(info.get('automatic_captions', {}).keys()),
-                    'subtitles': list(info.get('subtitles', {}).keys()),
-                    'release_timestamp': info.get('release_timestamp', 0),
-                    'chapters': info.get('chapters') or [],
-                }
-            else:
+                        'automatic_captions': list(info.get('automatic_captions', {}).keys()),
+                        'subtitles': list(info.get('subtitles', {}).keys()),
+                        'release_timestamp': info.get('release_timestamp', 0),
+                        'chapters': info.get('chapters') or [],
+                    }
+                    logging.info("YouTube metadata: using yt-dlp fallback")
+                    metadata_source = 'yt_dlp'
+                    _metadata_cache_put(video_id, metadata)
+                else:
+                    metadata = None
+            except Exception as e:
+                print(f"⚠️ yt-dlp metadata extraction failed: {e}")
                 metadata = None
-        except Exception as e:
-            print(f"⚠️ yt-dlp metadata extraction failed: {e}")
-            # Fallback to web scraping
-            metadata = self._get_fallback_metadata(youtube_url, video_id)
-        
+
         if metadata is None:
             logging.warning("⚠️ Falling back to HTML scraping for metadata")
             metadata = self._get_fallback_metadata(youtube_url, video_id)
+            metadata_source = 'scrape'
+            _metadata_cache_put(video_id, metadata)
         
+        try:
+            logging.info(
+                "YouTube audit: transcript=%s (%d chars) metadata=%s",
+                transcript_source,
+                len(transcript_text or ''),
+                metadata_source,
+            )
+        except Exception:
+            pass
+
         return {
             'transcript': transcript_text,
             'transcript_language': transcript_language,
@@ -1377,7 +1956,14 @@ class YouTubeSummarizer:
                • Avoid meta (don’t say “the host says/this video covers”).
             3) Bottom line — one sentence starting “Bottom line: …”.
 
+            Section titles must summarize the key phase or theme (not full sentences). Each bullet must be factual and non‑redundant.
+
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Include [mm:ss] timestamps only if explicitly present in transcript text; otherwise omit.
             - If a needed fact isn’t available, write “Unknown”.
@@ -1396,12 +1982,18 @@ class YouTubeSummarizer:
 
             Structure:
             - Opening: 2–3 sentences that jump straight to the substance and high‑level conclusion.
-            - Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”.
+            - Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”. Use smooth spoken transitions (“First…”, “Next…”, “However…”, “Finally…”) and vary sentence length for natural rhythm.
             - Closing: One sentence starting “Bottom line: …”.
 
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Keep numbers and names accurate; include specific values where present.
+            - Avoid list‑like phrasing or enumeration; use implicit transitions instead.
             - No headings, no bullets, no code fences, no emojis.
             - Length: ~180–380 words for most videos; shorter for very short clips.
             """,
@@ -1417,10 +2009,16 @@ class YouTubeSummarizer:
             - End with “Bottom line: …”.
 
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Each bullet ≤ 18 words; lead with the fact/action.
-            - Prefer specifics (metrics, model names, versions, dates).
+            - Prefer named entities, figures, and actions over general statements (metrics, model names, versions, dates).
             - Avoid duplication; merge near‑identical points.
+            - If the transcript contains comparisons, include at least one bullet explicitly stating the contrast.
             - Timestamps only if explicitly present; else omit.
             - No code fences/emojis/headings.
             """,
@@ -1435,9 +2033,15 @@ class YouTubeSummarizer:
             - Under each heading, provide 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
 
             Rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Respond in the transcript’s language.
             - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
             - No speculation beyond the transcript; use “Unknown” only when details are missing.
+            - Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension (e.g., Strategy / Technology / Outcome).
             - No code fences or emojis.
             - Do not add a final “Bottom line”.
             """,
@@ -1488,12 +2092,20 @@ class YouTubeSummarizer:
             • Actionable next step or key takeaway
             • Actionable next step or key takeaway
 
+            Write for senior readers scanning quickly. Front‑load major outcomes and implications before elaborating.
+
             **Guidelines:**
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - Divide content into 2-4 logical parts (not artificial divisions)
             - Use professional, analytical language
             - Include timestamps where helpful
             - Focus on insights and implications, not just facts
             - Keep each section balanced and substantive
+            - Ensure each PART ends with a concise synthesis sentence (1–2 clauses).
             - If content doesn't fit this structure well, adapt the format accordingly
             - British/Canadian spelling; no speculation
             """,
@@ -1510,11 +2122,18 @@ class YouTubeSummarizer:
             Output only the chosen format. No meta‑explanation.
 
             Global rules:
+            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
+            - Prefer short paraphrases of full ideas rather than skipping them entirely.
+            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
+            - Keep events in the original chronological order unless a thematic grouping is requested.
+            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
+            - If multiple patterns could apply, select the one maximizing clarity for non‑expert readers.
             - Respond in the transcript’s language.
             - Timestamps only if explicitly present; else omit.
             - “Unknown” when information is missing.
             - No code fences/emojis.
             - For Key Points/Insights, use “• ” bullets. For step‑wise, use numbered steps.
+            - When choosing step‑wise form, begin with a one‑sentence context statement before numbering.
             - Length guidance: short 120–180 words; dense 250–500 words; step‑wise concise.
             """,
         }
@@ -1535,6 +2154,7 @@ class YouTubeSummarizer:
         # Also generate a quick title/headline (using summary for token efficiency)
         title_prompt = f"""
         Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
+        Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
         **IMPORTANT: Respond in the same language as the content.**
         Source title: {metadata.get('title', '')}
         Summary:

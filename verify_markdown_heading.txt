@@ -1,0 +1,11 @@
+<ul class="kp-list">
+<li>*OCR Evolution &amp; Capabilities**</li>
+<li>Modern systems read PDFs.</li>
+<li>Detect tables in one pass.</li>
+</ul>
+<ul class="kp-list">
+<li>Comparison Methodology*</li>
+<li>Avoid single metric ranking.</li>
+<li>Consider volume and deployment model.</li>
+</ul>
+<p class="kp-takeaway"><strong>Bottom line:</strong> Normalize headings from markdown bold.</p>
