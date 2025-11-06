@@ -398,6 +398,43 @@ class YouTubeSummarizer:
 
         raise OllamaClientError(str(last_err) if last_err else "ollama hub call failed")
 
+    _OLLAMA_PRECHECK_CACHE: dict = {"ok_until": 0.0, "fail_until": 0.0}
+
+    def _ollama_precheck(self, timeout: float = 0.8) -> bool:
+        """Quick connectivity probe to local Ollama hub/direct before attempting a long LLM call.
+
+        Uses a tiny HTTP GET to the base API. Caches outcome briefly to avoid spamming checks.
+        Returns True if reachable, False if not.
+        """
+        import time as _time
+        now = _time.time()
+        cache = self._OLLAMA_PRECHECK_CACHE
+        if now < cache.get("ok_until", 0.0):
+            return True
+        if now < cache.get("fail_until", 0.0):
+            return False
+        base = (os.getenv("TTSHUB_API_BASE") or os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_HOST") or "").rstrip("/")
+        if not base:
+            cache["fail_until"] = now + 10.0
+            return False
+        # Try a cheap endpoint
+        import requests as _req
+        url = f"{base}/health" if "/api" in base else f"{base}/api/health"
+        try:
+            r = _req.get(url, timeout=timeout)
+            if r.status_code >= 200 and r.status_code < 500:
+                cache["ok_until"] = now + 15.0
+                return True
+        except Exception:
+            pass
+        cache["fail_until"] = now + 5.0
+        try:
+            import logging as _logging
+            _logging.info("Ollama precheck failed for %s", base)
+        except Exception:
+            pass
+        return False
+
     def _get_reddit_fetcher(self):
         """Lazily construct and memoize the Reddit fetcher."""
         if RedditFetcher is None:
@@ -3605,8 +3642,11 @@ Multiple Categories (when content genuinely spans areas):
             try:
                 print(f"🔄 {operation_name} attempt {attempt + 1}/{max_retries}")
                 if use_local_client:
+                    # Fast-fail if local hub/direct is not reachable
+                    if not self._ollama_precheck(timeout=0.8):
+                        raise OllamaClientError("ollama precheck failed (unreachable)")
                     # Route through our unified local client (hub or direct)
-                    txt = await asyncio.wait_for(self._ollama_hub_call(messages, max_retries=1), timeout=120.0)
+                    txt = await asyncio.wait_for(self._ollama_hub_call(messages, max_retries=1), timeout=30.0)
                     return txt
                 else:
                     # Use asyncio.wait_for to implement timeout
