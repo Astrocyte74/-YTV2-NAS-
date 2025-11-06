@@ -541,13 +541,18 @@ class YouTubeTelegramBot:
             or os.getenv('RENDER_DASHBOARD_URL')
         )
         if dash_url and requests is not None:
+            # Keep this probe snappy to avoid UI lag
             try:
+                try:
+                    probe_timeout = float(os.getenv('DASHBOARD_PROBE_TIMEOUT', '1.5') or '1.5')
+                except Exception:
+                    probe_timeout = 1.5
                 url = f"{dash_url.rstrip('/')}/api/reports/{video_id}"
                 headers = {}
                 token = os.getenv('DASHBOARD_TOKEN')
                 if token:
                     headers['Authorization'] = f"Bearer {token}"
-                r = requests.get(url, headers=headers, timeout=6)
+                r = requests.get(url, headers=headers, timeout=probe_timeout)
                 if r.status_code == 200:
                     payload = r.json() or {}
                     # New Postgres payload shape
@@ -573,7 +578,11 @@ class YouTubeTelegramBot:
                             summary_types.add(st)
             except Exception:
                 # Network or parsing errors should not block local detection
-                pass
+                try:
+                    import logging
+                    logging.debug("Dashboard probe skipped/timed-out for %s", video_id)
+                except Exception:
+                    pass
 
         return sorted(summary_types)
 
