@@ -28,13 +28,14 @@ def build_summary_keyboard(
         label = variant_labels.get(variant_key, variant_key.replace('-', ' ').title())
         return f"{label} ✅" if variant_key in existing_bases else label
 
+    # Retire "Key Points" (bullet-points) from the UI, but keep support internally.
+    # Arrange primary options compactly: Comprehensive + Insights on row 1, Audio on row 2.
     keyboard: List[List[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(label_for('comprehensive'), callback_data="summarize_comprehensive"),
-            InlineKeyboardButton(label_for('bullet-points'), callback_data="summarize_bullet-points"),
+            InlineKeyboardButton(label_for('key-insights'), callback_data="summarize_key-insights"),
         ],
         [
-            InlineKeyboardButton(label_for('key-insights'), callback_data="summarize_key-insights"),
             InlineKeyboardButton(label_for('audio'), callback_data="summarize_audio"),
         ],
         [
