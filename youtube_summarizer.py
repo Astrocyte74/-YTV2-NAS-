@@ -132,6 +132,7 @@ def _transcript_cache_get(video_id: str) -> Tuple[Optional[str], Optional[str]]:
         logging.info("Transcript cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
     except Exception:
         pass
+    return text, lang
 
 # --- Simple in-memory metadata cache ---
 _METADATA_CACHE: dict[str, Tuple[dict, float]] = {}
@@ -166,7 +167,7 @@ def _metadata_cache_put(video_id: str, data: dict) -> None:
         logging.info("Metadata cached for %s", video_id)
     except Exception:
         pass
-    return text, lang
+    
 
 def _transcript_cache_put(video_id: str, text: str, lang: str) -> None:
     try:
@@ -1188,6 +1189,10 @@ Preview:
             if not proxy:
                 yield
                 return
+            try:
+                logging.info("Transcript proxy active: %s", proxy)
+            except Exception:
+                pass
             keys = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
             old = {k: os.environ.get(k) for k in keys}
             try:
