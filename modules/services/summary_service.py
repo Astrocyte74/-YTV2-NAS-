@@ -1279,21 +1279,68 @@ async def process_content_summary(
             ledger.upsert(ledger_id, summary_type, ledger_entry)
             logging.info("📊 Added to ledger: %s:%s", display_id, summary_type)
 
-            # Notify when summary image is auto-queued due to hub offline/not reachable
+            # Ensure an image job exists when hub is offline: enqueue here if needed and notify.
             try:
-                from modules.services import draw_service as _ds
                 tts_base = os.getenv('TTSHUB_API_BASE') or ''
-                if tts_base and os.getenv('SUMMARY_IMAGE_ENABLED','false').lower() in ('1','true','yes','on'):
-                    # Use lightweight health; if not reachable, we likely queued an image earlier
-                    health = await _ds.fetch_drawthings_health(tts_base, ttl=0, force_refresh=True)
-                    if not bool((health or {}).get('reachable', False)):
+                img_enabled = os.getenv('SUMMARY_IMAGE_ENABLED','false').lower() in ('1','true','yes','on')
+                if tts_base and img_enabled:
+                    from modules.services import draw_service as _ds
+                    # For this one-time check, prefer the standard health path to verify DT image backend
+                    # (overrides meta) so we don't get false "reachable" signals.
+                    prev_mode = os.getenv('TTSHUB_HEALTH_MODE')
+                    os.environ['TTSHUB_HEALTH_MODE'] = 'standard'
+                    try:
+                        health = await _ds.fetch_drawthings_health(tts_base, ttl=0, force_refresh=True)
+                    finally:
+                        if prev_mode is None:
+                            os.environ.pop('TTSHUB_HEALTH_MODE', None)
+                        else:
+                            os.environ['TTSHUB_HEALTH_MODE'] = prev_mode
+
+                    reachable = bool((health or {}).get('reachable', False))
+                    # Detect if report already has an image URL
+                    has_image = False
+                    try:
+                        s = report_dict.get('summary') or {}
+                        if isinstance(s, dict) and (s.get('summary_image') or s.get('summary_image_url')):
+                            has_image = True
+                        if report_dict.get('summary_image') or report_dict.get('summary_image_url'):
+                            has_image = True
+                    except Exception:
+                        pass
+
+                    if not reachable and not has_image:
+                        # Build minimal content payload and enqueue if missing
                         try:
-                            queued_id = result.get('id') or ledger_id
-                            await _safe_edit_status(query, f"🖼️ Queued image: {handler._escape_markdown(str(queued_id))} (hub offline)")
+                            from modules import image_queue as _iq
+                            import json as _json
+                            content_id_for_job = result.get('id') or ledger_id
+                            # Check if a pending job already exists for this id
+                            pending_exists = False
+                            qdir = Path('data/image_queue')
+                            qdir.mkdir(parents=True, exist_ok=True)
+                            for p in qdir.glob('*.json'):
+                                try:
+                                    d = _json.loads(p.read_text())
+                                except Exception:
+                                    continue
+                                cid = str((d.get('content') or {}).get('id') or (d.get('content') or {}).get('video_id') or '')
+                                if cid == content_id_for_job:
+                                    pending_exists = True
+                                    break
+                            if not pending_exists:
+                                payload = {
+                                    'id': content_id_for_job,
+                                    'title': report_dict.get('title') or (report_dict.get('metadata') or {}).get('title') or '',
+                                    'summary': report_dict.get('summary') or {},
+                                    'analysis': report_dict.get('analysis') or {},
+                                }
+                                _iq.enqueue({'mode':'summary_image','content':payload,'reason':'summary_offline_enqueue'})
+                                await _safe_edit_status(query, f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))} (hub offline)")
                         except Exception:
                             pass
-            except Exception:
-                pass
+            except Exception as _exc:
+                logging.debug("image enqueue/notify skipped: %s", _exc)
 
             is_audio_summary = summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es")
 

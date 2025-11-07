@@ -552,6 +552,28 @@ def _should_enqueue(cid: str, ttl: float = 300.0) -> bool:
     except Exception:
         return True
 
+def _pending_job_exists(cid: str) -> bool:
+    if not cid:
+        return False
+    try:
+        from pathlib import Path
+        import json
+        qdir = Path('data/image_queue')
+        if not qdir.exists():
+            return False
+        for p in qdir.glob('*.json'):
+            try:
+                d = json.loads(p.read_text())
+            except Exception:
+                continue
+            content = d.get('content') or {}
+            existing = str(content.get('id') or content.get('video_id') or '')
+            if existing == cid:
+                return True
+    except Exception:
+        return False
+    return False
+
 async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Attempt to generate a summary illustration. Returns metadata about the image
@@ -609,7 +631,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                     "reason": "hub_not_reachable",
                 }
                 cid = str(content.get("id") or content.get("video_id") or "")
-                if _should_enqueue(cid):
+                if not _pending_job_exists(cid) and _should_enqueue(cid):
                     path = image_queue.enqueue(job)
                     logger.info("summary image queued (hub not reachable): %s", path.name)
                 else:
@@ -629,7 +651,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                 "reason": f"hub_offline:{str(exc)[:80]}",
             }
             cid = str(content.get("id") or content.get("video_id") or "")
-            if _should_enqueue(cid):
+            if not _pending_job_exists(cid) and _should_enqueue(cid):
                 path = image_queue.enqueue(job)
                 logger.info("summary image queued (hub offline): %s", path.name)
             else:
@@ -708,7 +730,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                     "reason": "no_image_url",
                 }
                 cid = str(content.get("id") or content.get("video_id") or "")
-                if _should_enqueue(cid):
+                if not _pending_job_exists(cid) and _should_enqueue(cid):
                     image_queue.enqueue(job)
                     logger.info("summary image queued (no URL returned)")
             except Exception:
