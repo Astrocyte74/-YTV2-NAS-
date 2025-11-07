@@ -1287,6 +1287,7 @@ class YouTubeTelegramBot:
                     InlineKeyboardButton("Logs (120)", callback_data="status:logs:120"),
                 ],
                 [
+                    InlineKeyboardButton("🎨 Image Catch-up (10)", callback_data="status:image_catchup:10"),
                     InlineKeyboardButton("Restart", callback_data="status:restart"),
                 ],
             ])
@@ -4270,6 +4271,23 @@ class YouTubeTelegramBot:
         
         callback_data = query.data
         logging.info(f"🔔 Callback received: user={user_id} data={callback_data}")
+
+        # Status quick actions
+        if callback_data.startswith("status:image_catchup:"):
+            try:
+                parts = callback_data.split(":")
+                limit = int(parts[-1]) if parts and parts[-1].isdigit() else 10
+            except Exception:
+                limit = 10
+            await query.edit_message_text(f"🎨 Running image catch-up for {limit} item(s)…")
+            # Run drain_image_queue once with limit
+            try:
+                from tools import drain_image_queue as _imgq
+                count = _imgq.drain_once(limit)
+                await query.edit_message_text(f"✅ Image catch-up processed {count} job(s)")
+            except Exception as exc:
+                await query.edit_message_text(f"⚠️ Image catch-up failed: {str(exc)[:200]}")
+            return
         
         # Handle summary requests
         if callback_data.startswith("summarize_"):

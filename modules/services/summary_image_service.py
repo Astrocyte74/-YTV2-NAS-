@@ -542,6 +542,25 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         logger.debug("summary image skipped: TTSHUB_API_BASE not configured")
         return None
 
+    # Quick health probe; if offline, enqueue a job and return gracefully
+    try:
+        health = await draw_service.fetch_drawthings_health(tts_base, ttl=10)
+        if not isinstance(health, dict) or not health:
+            raise RuntimeError("empty health")
+    except Exception as exc:
+        try:
+            from modules import image_queue
+            job = {
+                "mode": "summary_image",
+                "content": content,
+                "reason": f"hub_offline:{str(exc)[:80]}",
+            }
+            path = image_queue.enqueue(job)
+            logger.info("summary image queued (hub offline): %s", path.name)
+        except Exception as qexc:
+            logger.warning("summary image could not be queued: %s", qexc)
+        return None
+
     summary_data = content.get("summary") or {}
     analysis = content.get("analysis") or {}
     summary_text = ""
@@ -585,7 +604,18 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
             style_preset=template.style_preset,
         )
     except Exception as exc:
-        logger.warning("summary image generation failed: %s", exc)
+        # Enqueue for later if generation path failed (likely offline)
+        try:
+            from modules import image_queue
+            job = {
+                "mode": "summary_image",
+                "content": content,
+                "reason": f"gen_failed:{str(exc)[:120]}",
+            }
+            image_queue.enqueue(job)
+            logger.info("summary image queued after failure: %s", exc)
+        except Exception:
+            logger.warning("summary image generation failed and queueing also failed: %s", exc)
         return None
 
     absolute_url = generation.get("absolute_url") or generation.get("url")
