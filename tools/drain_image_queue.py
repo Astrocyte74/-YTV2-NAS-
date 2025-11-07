@@ -80,8 +80,37 @@ async def process_job(path: Path) -> bool:
             # Normalize to the same namespace used elsewhere (e.g., yt:<video_id>)
             if len(cid) == 11 and ":" not in cid:
                 cid = f"yt:{cid}"
-            client.upload_image_file(image_path, cid)
-            logging.info("Uploaded image for %s", content_id)
+            upload_info = client.upload_image_file(image_path, cid)
+            logging.info("Uploaded image for %s", cid)
+
+            # Prefer URL from upload_info; fallback to metadata/public_url
+            summary_image_url = (
+                (upload_info or {}).get("public_url")
+                or (upload_info or {}).get("relative_url")
+                or meta.get("public_url")
+                or meta.get("relative_path")
+            )
+
+            # Best-effort DB update so the dashboard shows the image
+            if summary_image_url:
+                try:
+                    import os as _os
+                    dsn = _os.getenv("DATABASE_URL_POSTGRES_NEW") or _os.getenv("DATABASE_URL")
+                    if dsn:
+                        import psycopg
+                        vid = str(content_id)
+                        if vid.startswith("yt:") and len(vid) == 14:
+                            vid = vid.split(":", 1)[-1]
+                        with psycopg.connect(dsn) as _conn:
+                            with _conn.cursor() as _cur:
+                                _cur.execute(
+                                    "UPDATE content SET summary_image_url=%s, updated_at=now() WHERE video_id=%s",
+                                    (summary_image_url, vid),
+                                )
+                                _conn.commit()
+                        logging.info("Updated DB summary_image_url for %s", vid)
+                except Exception as db_exc:
+                    logging.warning("DB update for summary_image_url failed: %s", db_exc)
         except Exception as exc:
             logging.warning("Render upload failed for %s: %s", content_id, exc)
 

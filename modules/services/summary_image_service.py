@@ -529,6 +529,8 @@ def _derive_public_url(path: Path) -> Optional[str]:
     return f"{base.rstrip('/')}/{str(relative).replace(os.sep, '/')}"
 
 
+_LAST_IMAGE_GEN: Dict[str, float] = {}
+
 async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Attempt to generate a summary illustration. Returns metadata about the image
@@ -543,6 +545,19 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         title = (content.get("title") or content.get("metadata", {}).get("title") or "").strip()
         if cid.upper().startswith("TEST") or title.lower() == "test":
             logger.debug("summary image skipped: test content (%s / %s)", cid, title)
+            return None
+    except Exception:
+        pass
+
+    # Cooldown to avoid repeated generations for the same content id
+    try:
+        import time as _t
+        cid = str(content.get("id") or content.get("video_id") or "")
+        now = _t.time()
+        last = _LAST_IMAGE_GEN.get(cid, 0.0)
+        cooldown = float(os.getenv("SUMMARY_IMAGE_COOLDOWN_SECONDS", "900") or "900")  # 15 min default
+        if cid and (now - last) < cooldown:
+            logger.info("summary image skipped: cooldown active for %s (%.0fs remaining)", cid, cooldown - (now - last))
             return None
     except Exception:
         pass
@@ -661,6 +676,11 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         "source_url": absolute_url,
     }
     logger.info("summary image saved to %s (template=%s)", output_path, template.key)
+    try:
+        if cid:
+            _LAST_IMAGE_GEN[cid] = __import__('time').time()
+    except Exception:
+        pass
     return metadata
 
 

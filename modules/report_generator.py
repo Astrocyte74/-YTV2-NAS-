@@ -480,7 +480,14 @@ class JSONReportGenerator:
                     image_path = Path.cwd() / image_path
                 if image_path.exists():
                     print("🖼️ Uploading summary image...")
-                    self.api_client.upload_image_file(image_path, content_id)
+                    # Normalize content_id for Render (prefix yt: for 11-char YouTube IDs)
+                    target_id = content_id
+                    try:
+                        if isinstance(target_id, str) and len(target_id) == 11 and ":" not in target_id:
+                            target_id = f"yt:{target_id}"
+                    except Exception:
+                        pass
+                    self.api_client.upload_image_file(image_path, target_id)
                     print("✅ Summary image uploaded successfully")
             
             return True
