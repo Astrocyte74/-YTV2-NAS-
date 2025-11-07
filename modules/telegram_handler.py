@@ -1294,6 +1294,13 @@ class YouTubeTelegramBot:
         except Exception:
             kb = None
 
+        # Append image queue status
+        try:
+            iqc = self._image_queue_count()
+            lines.extend(["", "🖼️ Images:", f"• Queue: {iqc} pending"])
+        except Exception:
+            pass
+
         await update.message.reply_text("\n".join(lines), reply_markup=kb)
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4279,7 +4286,15 @@ class YouTubeTelegramBot:
                 limit = int(parts[-1]) if parts and parts[-1].isdigit() else 10
             except Exception:
                 limit = 10
-            await query.edit_message_text(f"🎨 Running image catch-up for {limit} item(s)…")
+            # If queue is empty, seed from recent reports first
+            seeded = 0
+            try:
+                if self._image_queue_count() == 0:
+                    seeded = self._seed_image_queue(limit)
+            except Exception:
+                seeded = 0
+            prefix = f"(seeded {seeded}) " if seeded else ""
+            await query.edit_message_text(f"🎨 {prefix}Running image catch-up for {limit} item(s)…")
             # Run drain_image_queue once with limit
             try:
                 from tools import drain_image_queue as _imgq
