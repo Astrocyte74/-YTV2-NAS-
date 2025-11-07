@@ -8,8 +8,9 @@ be processed (hub offline) are left for the next run; hard failures are moved
 to data/image_queue/failed.
 
 Usage:
-  python tools/drain_image_queue.py            # process all pending jobs once
-  python tools/drain_image_queue.py --limit 10 # process up to 10
+  python tools/drain_image_queue.py                     # process all pending jobs once
+  python tools/drain_image_queue.py --limit 10          # process up to 10
+  python tools/drain_image_queue.py --watch --interval 30
 """
 
 from __future__ import annotations
@@ -107,13 +108,24 @@ def drain_once(limit: Optional[int] = None) -> int:
 def main() -> int:
     setup_logging()
     ap = argparse.ArgumentParser(description="Drain queued summary image jobs")
-    ap.add_argument("--limit", type=int, default=None, help="Max jobs to process this run")
+    ap.add_argument("--limit", type=int, default=None, help="Max jobs to process per run")
+    ap.add_argument("--watch", action="store_true", help="Keep watching and draining the queue")
+    ap.add_argument("--interval", type=int, default=30, help="Polling interval seconds when --watch is set")
     args = ap.parse_args()
-    count = drain_once(args.limit)
-    logging.info("Processed %d image job(s)", count)
-    return 0
+    if not args.watch:
+        count = drain_once(args.limit)
+        logging.info("Processed %d image job(s)", count)
+        return 0
+    logging.info("Watching image queue at %s (interval=%ss)", QUEUE_DIR, args.interval)
+    try:
+        import time
+        while True:
+            drain_once(args.limit)
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        logging.info("Stopped by user")
+        return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
