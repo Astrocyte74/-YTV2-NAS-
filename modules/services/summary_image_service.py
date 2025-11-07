@@ -703,18 +703,25 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
             style_preset=template.style_preset,
         )
     except Exception as exc:
-        # Enqueue for later if generation path failed (likely offline)
-        try:
-            from modules import image_queue
-            job = {
-                "mode": "summary_image",
-                "content": content,
-                "reason": f"gen_failed:{str(exc)[:120]}",
-            }
-            image_queue.enqueue(job)
-            logger.info("summary image queued after failure: %s", exc)
-        except Exception:
-            logger.warning("summary image generation failed and queueing also failed: %s", exc)
+        # Enqueue for later if generation path failed (likely offline), unless suppressed
+        if _suppress_enqueue():
+            logger.info("summary image: generation failed; enqueue suppressed (drain context)")
+        else:
+            try:
+                from modules import image_queue
+                job = {
+                    "mode": "summary_image",
+                    "content": content,
+                    "reason": f"gen_failed:{str(exc)[:120]}",
+                }
+                cid = str(content.get("id") or content.get("video_id") or "")
+                if not _pending_job_exists(cid) and _should_enqueue(cid):
+                    image_queue.enqueue(job)
+                    logger.info("summary image queued after failure: %s", exc)
+                else:
+                    logger.info("summary image enqueue suppressed (recent enqueue) for %s", cid)
+            except Exception:
+                logger.warning("summary image generation failed and queueing also failed: %s", exc)
         return None
 
     absolute_url = generation.get("absolute_url") or generation.get("url")

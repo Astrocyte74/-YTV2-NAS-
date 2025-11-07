@@ -6,6 +6,7 @@ It handles all Telegram bot interactions without embedded HTML generation.
 """
 
 import asyncio
+import asyncio.subprocess as aio_subprocess
 import json
 import io
 import logging
@@ -585,6 +586,83 @@ class YouTubeTelegramBot:
                     pass
 
         return sorted(summary_types)
+
+    def _image_queue_dir(self) -> Path:
+        custom_dir = os.getenv("SUMMARY_IMAGE_QUEUE_DIR")
+        if custom_dir:
+            return Path(custom_dir)
+        return Path("data/image_queue")
+
+    def _image_queue_count(self) -> int:
+        try:
+            qdir = self._image_queue_dir()
+            if not qdir.exists():
+                return 0
+            return sum(1 for p in qdir.glob("*.json") if p.is_file())
+        except Exception as exc:
+            logging.debug("image queue count failed: %s", exc)
+            return 0
+
+    @staticmethod
+    def _report_has_summary_image(report: Dict[str, Any]) -> bool:
+        summary = report.get("summary") or {}
+        if isinstance(summary, dict):
+            if summary.get("summary_image") or summary.get("summary_image_url"):
+                return True
+        return bool(report.get("summary_image") or report.get("summary_image_url"))
+
+    @staticmethod
+    def _report_to_image_payload(report: Dict[str, Any]) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "id": report.get("id") or (report.get("video") or {}).get("video_id") or "",
+            "title": report.get("title")
+            or (report.get("metadata") or {}).get("title")
+            or (report.get("video") or {}).get("title")
+            or "",
+            "metadata": report.get("metadata") or report.get("video") or {},
+            "summary": report.get("summary") or {},
+            "analysis": report.get("analysis") or {},
+        }
+        if not payload.get("id"):
+            vid = (report.get("video") or {}).get("video_id") or (report.get("video") or {}).get("id")
+            if vid:
+                payload["id"] = vid
+        return payload
+
+    def _seed_image_queue(self, limit: Optional[int]) -> int:
+        try:
+            from modules import image_queue
+        except Exception as exc:
+            logging.debug("image queue module unavailable: %s", exc)
+            return 0
+
+        reports_dir = Path("./data/reports")
+        if not reports_dir.exists():
+            return 0
+
+        max_items = None if limit is None else max(0, int(limit))
+        items = sorted(reports_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        enqueued = 0
+        for path in items:
+            if max_items is not None and enqueued >= max_items:
+                break
+            try:
+                report = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if self._report_has_summary_image(report):
+                continue
+            payload = self._report_to_image_payload(report)
+            if not payload.get("id"):
+                continue
+            job = {"mode": "summary_image", "content": payload, "reason": "seeded_catchup"}
+            try:
+                image_queue.enqueue(job)
+            except Exception as exc:
+                logging.debug("image queue enqueue failed for %s: %s", path.name, exc)
+                continue
+            enqueued += 1
+        return enqueued
 
     def _resolve_video_url(self, video_id: str, provided_url: Optional[str] = None) -> Optional[str]:
         """Find the best URL for a given video id."""
@@ -4286,6 +4364,7 @@ class YouTubeTelegramBot:
                 limit = int(parts[-1]) if parts and parts[-1].isdigit() else 10
             except Exception:
                 limit = 10
+            limit = max(limit, 0)
             # If queue is empty, seed from recent reports first
             seeded = 0
             try:
@@ -4295,13 +4374,42 @@ class YouTubeTelegramBot:
                 seeded = 0
             prefix = f"(seeded {seeded}) " if seeded else ""
             await query.edit_message_text(f"🎨 {prefix}Running image catch-up for {limit} item(s)…")
-            # Run drain_image_queue once with limit
+            python_bin = os.getenv("PYTHON_BIN", "python3")
+            repo_root = Path(__file__).resolve().parents[1]
+            cmd = [python_bin, "tools/drain_image_queue.py", "--limit", str(limit)]
             try:
-                from tools import drain_image_queue as _imgq
-                count = _imgq.drain_once(limit)
-                await query.edit_message_text(f"✅ Image catch-up processed {count} job(s)")
+                proc = await aio_subprocess.create_subprocess_exec(
+                    *cmd,
+                    stdout=aio_subprocess.PIPE,
+                    stderr=aio_subprocess.PIPE,
+                    cwd=str(repo_root),
+                )
+                stdout, stderr = await proc.communicate()
             except Exception as exc:
-                await query.edit_message_text(f"⚠️ Image catch-up failed: {str(exc)[:200]}")
+                await query.edit_message_text(f"⚠️ Image catch-up failed to start: {exc}")
+                return
+
+            stdout_text = (stdout.decode("utf-8", errors="ignore") if stdout else "").strip()
+            stderr_text = (stderr.decode("utf-8", errors="ignore") if stderr else "").strip()
+            combined_lines = "\n".join([text for text in (stdout_text, stderr_text) if text])
+            processed = None
+            if combined_lines:
+                for line in combined_lines.splitlines():
+                    match = re.search(r"Processed (\\d+) image job", line)
+                    if match:
+                        processed = int(match.group(1))
+                        break
+
+            if proc.returncode == 0:
+                message = f"✅ Image catch-up processed {processed or 0} job(s)"
+                if not processed and combined_lines:
+                    last_line = combined_lines.splitlines()[-1]
+                    if last_line:
+                        message += f"\n{last_line[:200]}"
+                await query.edit_message_text(message)
+            else:
+                error_snippet = stderr_text or stdout_text or "Unknown error"
+                await query.edit_message_text(f"⚠️ Image catch-up failed: {error_snippet[:200]}")
             return
         
         # Handle summary requests

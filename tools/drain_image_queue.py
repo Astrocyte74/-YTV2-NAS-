@@ -57,72 +57,103 @@ async def process_job(path: Path) -> bool:
     # never create additional queue files on offline/errors; it should leave
     # the current job in place for the next pass.
     import os as _os
+
+    prev_suppress = _os.environ.get("SUMMARY_IMAGE_QUEUE_SUPPRESS")
+    prev_health = _os.environ.get("SUMMARY_IMAGE_HEALTH_BYPASS")
     _os.environ["SUMMARY_IMAGE_QUEUE_SUPPRESS"] = "1"
     # Skip repeated per-job health probes; a single preflight is done in drain_once.
     _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = "1"
     from modules.services.summary_image_service import maybe_generate_summary_image
-    job = _load(path)
-    if not job:
-        _move(path, "failed")
-        return False
-    content = job.get("content") or {}
-    if not isinstance(content, dict):
-        logging.error("Invalid job payload (no content dict): %s", path.name)
-        _move(path, "failed")
-        return False
-    # Attempt generation; if hub offline, maybe_generate_summary_image returns None but may re-enqueue.
-    meta = await maybe_generate_summary_image(content)
-    if not isinstance(meta, dict):
-        logging.info("Skipped (hub offline or error): %s", path.name)
-        return False
 
-    # Upload to dashboard if possible
-    content_id = content.get("id") or content.get("video_id")
-    image_path = Path(meta.get("path") or meta.get("relative_path") or "")
-    if content_id and image_path and image_path.exists():
+    try:
+        job = _load(path)
+        if not job:
+            _move(path, "failed")
+            return False
+        content = job.get("content") or {}
+        if not isinstance(content, dict):
+            logging.error("Invalid job payload (no content dict): %s", path.name)
+            _move(path, "failed")
+            return False
+        # Skip if DB already has an image URL for this content (avoid re-generating)
         try:
-            from modules.render_api_client import create_client_from_env
-            client = create_client_from_env()
-            cid = str(content_id)
-            # Normalize to the same namespace used elsewhere (e.g., yt:<video_id>)
-            if len(cid) == 11 and ":" not in cid:
-                cid = f"yt:{cid}"
-            upload_info = client.upload_image_file(image_path, cid)
-            logging.info("Uploaded image for %s", cid)
+            vid = str(content.get("id") or content.get("video_id") or "")
+            base_vid = vid.split(":", 1)[-1] if ":" in vid else vid
+            dsn = os.getenv("DATABASE_URL_POSTGRES_NEW") or os.getenv("DATABASE_URL")
+            if dsn and base_vid:
+                import psycopg
+                with psycopg.connect(dsn) as _conn:
+                    with _conn.cursor() as _cur:
+                        _cur.execute("SELECT summary_image_url FROM content WHERE video_id=%s", (base_vid,))
+                        row = _cur.fetchone()
+                        if row and row[0]:
+                            logging.info("Skip job %s: summary_image_url already set", base_vid)
+                            _move(path, "processed")
+                            return True
+        except Exception as _exc:
+            logging.debug("DB check skipped: %s", _exc)
 
-            # Prefer URL from upload_info; fallback to metadata/public_url
-            summary_image_url = (
-                (upload_info or {}).get("public_url")
-                or (upload_info or {}).get("relative_url")
-                or meta.get("public_url")
-                or meta.get("relative_path")
-            )
+        # Attempt generation; if hub offline, maybe_generate_summary_image returns None but does not re-enqueue in drain.
+        meta = await maybe_generate_summary_image(content)
+        if not isinstance(meta, dict):
+            logging.info("Skipped (hub offline or error): %s", path.name)
+            return False
 
-            # Best-effort DB update so the dashboard shows the image
-            if summary_image_url:
-                try:
-                    import os as _os
-                    dsn = _os.getenv("DATABASE_URL_POSTGRES_NEW") or _os.getenv("DATABASE_URL")
-                    if dsn:
-                        import psycopg
-                        vid = str(content_id)
-                        if vid.startswith("yt:") and len(vid) == 14:
-                            vid = vid.split(":", 1)[-1]
-                        with psycopg.connect(dsn) as _conn:
-                            with _conn.cursor() as _cur:
-                                _cur.execute(
-                                    "UPDATE content SET summary_image_url=%s, updated_at=now() WHERE video_id=%s",
-                                    (summary_image_url, vid),
-                                )
-                                _conn.commit()
-                        logging.info("Updated DB summary_image_url for %s", vid)
-                except Exception as db_exc:
-                    logging.warning("DB update for summary_image_url failed: %s", db_exc)
-        except Exception as exc:
-            logging.warning("Render upload failed for %s: %s", content_id, exc)
+        # Upload to dashboard if possible
+        content_id = content.get("id") or content.get("video_id")
+        image_path = Path(meta.get("path") or meta.get("relative_path") or "")
+        if content_id and image_path and image_path.exists():
+            try:
+                from modules.render_api_client import create_client_from_env
+                client = create_client_from_env()
+                cid = str(content_id)
+                # Normalize to the same namespace used elsewhere (e.g., yt:<video_id>)
+                if len(cid) == 11 and ":" not in cid:
+                    cid = f"yt:{cid}"
+                upload_info = client.upload_image_file(image_path, cid)
+                logging.info("Uploaded image for %s", cid)
 
-    _move(path, "processed")
-    return True
+                # Prefer URL from upload_info; fallback to metadata/public_url
+                summary_image_url = (
+                    (upload_info or {}).get("public_url")
+                    or (upload_info or {}).get("relative_url")
+                    or meta.get("public_url")
+                    or meta.get("relative_path")
+                )
+
+                # Best-effort DB update so the dashboard shows the image
+                if summary_image_url:
+                    try:
+                        dsn = _os.getenv("DATABASE_URL_POSTGRES_NEW") or _os.getenv("DATABASE_URL")
+                        if dsn:
+                            import psycopg
+                            vid = str(content_id or "")
+                            if ":" in vid:
+                                vid = vid.split(":", 1)[-1]
+                            with psycopg.connect(dsn) as _conn:
+                                with _conn.cursor() as _cur:
+                                    _cur.execute(
+                                        "UPDATE content SET summary_image_url=%s, updated_at=now() WHERE video_id=%s",
+                                        (summary_image_url, vid),
+                                    )
+                                    _conn.commit()
+                            logging.info("Updated DB summary_image_url for %s", vid)
+                    except Exception as db_exc:
+                        logging.warning("DB update for summary_image_url failed: %s", db_exc)
+            except Exception as exc:
+                logging.warning("Render upload failed for %s: %s", content_id, exc)
+
+        _move(path, "processed")
+        return True
+    finally:
+        if prev_suppress is None:
+            _os.environ.pop("SUMMARY_IMAGE_QUEUE_SUPPRESS", None)
+        else:
+            _os.environ["SUMMARY_IMAGE_QUEUE_SUPPRESS"] = prev_suppress
+        if prev_health is None:
+            _os.environ.pop("SUMMARY_IMAGE_HEALTH_BYPASS", None)
+        else:
+            _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = prev_health
 
 
 def drain_once(limit: Optional[int] = None) -> int:

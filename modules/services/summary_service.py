@@ -102,6 +102,27 @@ async def _safe_edit_status(query, text: str, reply_markup=None):
             raise
 
 
+def _image_queue_has_job(content_id: str) -> bool:
+    if not content_id:
+        return False
+    try:
+        qdir = Path("data/image_queue")
+        if not qdir.exists():
+            return False
+        for path in qdir.glob("*.json"):
+            try:
+                data = json.loads(path.read_text())
+            except Exception:
+                continue
+            content = data.get("content") or {}
+            existing = str(content.get("id") or content.get("video_id") or "")
+            if existing == content_id:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def post_dashboard_json(endpoint: str, payload: Dict[str, Any], timeout: int = 30) -> Optional[Dict[str, Any]]:
     base = get_dashboard_base()
     if not base or requests is None:
@@ -1289,15 +1310,20 @@ async def process_content_summary(
                     # (overrides meta) so we don't get false "reachable" signals.
                     prev_mode = os.getenv('TTSHUB_HEALTH_MODE')
                     os.environ['TTSHUB_HEALTH_MODE'] = 'standard'
+                    health = None
+                    health_error = None
                     try:
                         health = await _ds.fetch_drawthings_health(tts_base, ttl=0, force_refresh=True)
+                    except Exception as exc:
+                        health_error = exc
+                        logging.debug("summary image health probe failed: %s", exc)
                     finally:
                         if prev_mode is None:
                             os.environ.pop('TTSHUB_HEALTH_MODE', None)
                         else:
                             os.environ['TTSHUB_HEALTH_MODE'] = prev_mode
 
-                    reachable = bool((health or {}).get('reachable', False))
+                    reachable = bool((health or {}).get('reachable', False)) if health is not None else False
                     # Detect if report already has an image URL
                     has_image = False
                     try:
@@ -1313,22 +1339,10 @@ async def process_content_summary(
                         # Build minimal content payload and enqueue if missing
                         try:
                             from modules import image_queue as _iq
-                            import json as _json
                             content_id_for_job = result.get('id') or ledger_id
-                            # Check if a pending job already exists for this id
-                            pending_exists = False
                             qdir = Path('data/image_queue')
                             qdir.mkdir(parents=True, exist_ok=True)
-                            for p in qdir.glob('*.json'):
-                                try:
-                                    d = _json.loads(p.read_text())
-                                except Exception:
-                                    continue
-                                cid = str((d.get('content') or {}).get('id') or (d.get('content') or {}).get('video_id') or '')
-                                if cid == content_id_for_job:
-                                    pending_exists = True
-                                    break
-                            if not pending_exists:
+                            if not _image_queue_has_job(content_id_for_job):
                                 payload = {
                                     'id': content_id_for_job,
                                     'title': report_dict.get('title') or (report_dict.get('metadata') or {}).get('title') or '',
@@ -1336,9 +1350,25 @@ async def process_content_summary(
                                     'analysis': report_dict.get('analysis') or {},
                                 }
                                 _iq.enqueue({'mode':'summary_image','content':payload,'reason':'summary_offline_enqueue'})
-                                await _safe_edit_status(query, f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))} (hub offline)")
+                                notice = f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))} (hub offline)"
+                                try:
+                                    await query.message.reply_text(notice, parse_mode=ParseMode.MARKDOWN)
+                                except Exception:
+                                    await _safe_edit_status(query, notice)
                         except Exception:
                             pass
+
+                    # Additionally, if a pending file exists now (idempotent queue), surface a visible notice
+                    try:
+                        content_id_for_job = result.get('id') or ledger_id
+                        if _image_queue_has_job(content_id_for_job):
+                            notice = f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))}"
+                            try:
+                                await query.message.reply_text(notice, parse_mode=ParseMode.MARKDOWN)
+                            except Exception:
+                                await _safe_edit_status(query, notice)
+                    except Exception:
+                        pass
             except Exception as _exc:
                 logging.debug("image enqueue/notify skipped: %s", _exc)
 
