@@ -537,6 +537,16 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     if not SUMMARY_IMAGE_ENABLED:
         return None
 
+    # Safety: never generate for test scaffolding
+    try:
+        cid = str(content.get("id") or content.get("video_id") or "")
+        title = (content.get("title") or content.get("metadata", {}).get("title") or "").strip()
+        if cid.upper().startswith("TEST") or title.lower() == "test":
+            logger.debug("summary image skipped: test content (%s / %s)", cid, title)
+            return None
+    except Exception:
+        pass
+
     tts_base = (os.getenv("TTSHUB_API_BASE") or "").strip()
     if not tts_base:
         logger.debug("summary image skipped: TTSHUB_API_BASE not configured")
