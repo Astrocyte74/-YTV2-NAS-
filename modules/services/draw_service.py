@@ -279,13 +279,28 @@ async def fetch_drawthings_health(
         elif not force_refresh and now - cached_ts <= ttl:
             return cached_data
 
-    url = f"{base.rstrip('/')}/drawthings/health"
+    # Prefer a light-weight health path to avoid triggering heavy probes in the hub.
+    # Mode can be overridden via TTSHUB_HEALTH_MODE=meta|standard (default: meta)
+    import os as _os
+    mode = (_os.getenv('TTSHUB_HEALTH_MODE') or 'meta').strip().lower()
+    if mode == 'meta':
+        url = f"{base.rstrip('/')}/meta" if base.endswith('/api') else f"{base.rstrip('/')}/api/meta"
+    else:
+        url = f"{base.rstrip('/')}/drawthings/health"
     loop = asyncio.get_running_loop()
 
     def _call() -> Dict[str, Any]:
-        resp = requests.get(url, timeout=12)
+        resp = requests.get(url, timeout=6)
         resp.raise_for_status()
-        return resp.json() or {}
+        data: Dict[str, Any] = {}
+        try:
+            data = resp.json() or {}
+        except Exception:
+            data = {}
+        # Normalize a minimal, non-generative health when using /api/meta
+        if mode == 'meta':
+            return {"reachable": True, "probe": {"ok": True}, "raw": data}
+        return data
 
     data = await loop.run_in_executor(None, _call)
     _HEALTH_CACHE[base] = (now, data)

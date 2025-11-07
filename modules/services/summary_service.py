@@ -1279,6 +1279,22 @@ async def process_content_summary(
             ledger.upsert(ledger_id, summary_type, ledger_entry)
             logging.info("📊 Added to ledger: %s:%s", display_id, summary_type)
 
+            # Notify when summary image is auto-queued due to hub offline/not reachable
+            try:
+                from modules.services import draw_service as _ds
+                tts_base = os.getenv('TTSHUB_API_BASE') or ''
+                if tts_base and os.getenv('SUMMARY_IMAGE_ENABLED','false').lower() in ('1','true','yes','on'):
+                    # Use lightweight health; if not reachable, we likely queued an image earlier
+                    health = await _ds.fetch_drawthings_health(tts_base, ttl=0, force_refresh=True)
+                    if not bool((health or {}).get('reachable', False)):
+                        try:
+                            queued_id = result.get('id') or ledger_id
+                            await _safe_edit_status(query, f"🖼️ Queued image: {handler._escape_markdown(str(queued_id))} (hub offline)")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
             is_audio_summary = summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es")
 
             if not is_audio_summary:

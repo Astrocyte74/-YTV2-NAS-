@@ -53,6 +53,13 @@ def _load(path: Path) -> Optional[Dict]:
 
 
 async def process_job(path: Path) -> bool:
+    # Suppress auto-enqueue behavior inside the drainer. The drainer should
+    # never create additional queue files on offline/errors; it should leave
+    # the current job in place for the next pass.
+    import os as _os
+    _os.environ["SUMMARY_IMAGE_QUEUE_SUPPRESS"] = "1"
+    # Skip repeated per-job health probes; a single preflight is done in drain_once.
+    _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = "1"
     from modules.services.summary_image_service import maybe_generate_summary_image
     job = _load(path)
     if not job:
@@ -119,6 +126,20 @@ async def process_job(path: Path) -> bool:
 
 
 def drain_once(limit: Optional[int] = None) -> int:
+    # Preflight: perform one lightweight health probe; if unreachable, skip all jobs
+    try:
+        import os as _os
+        from modules.services import draw_service as _ds
+        base = _os.getenv("TTSHUB_API_BASE") or ""
+        if base:
+            health = asyncio.run(_ds.fetch_drawthings_health(base, ttl=0, force_refresh=True))
+            if not bool((health or {}).get("reachable", False)):
+                logging.info("Image drain: hub not reachable; skipping this pass")
+                return 0
+    except Exception as _exc:
+        logging.info("Image drain: health probe failed; skipping this pass")
+        return 0
+
     jobs = sorted(QUEUE_DIR.glob("*.json"))
     if limit is not None:
         jobs = jobs[: max(0, int(limit))]

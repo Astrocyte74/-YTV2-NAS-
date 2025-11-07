@@ -530,6 +530,27 @@ def _derive_public_url(path: Path) -> Optional[str]:
 
 
 _LAST_IMAGE_GEN: Dict[str, float] = {}
+_LAST_IMAGE_ENQ: Dict[str, float] = {}
+
+def _suppress_enqueue() -> bool:
+    try:
+        return str(os.getenv("SUMMARY_IMAGE_QUEUE_SUPPRESS","0")).strip().lower() in ("1","true","yes","on")
+    except Exception:
+        return False
+
+def _should_enqueue(cid: str, ttl: float = 300.0) -> bool:
+    if not cid:
+        return True
+    try:
+        import time as _t
+        now = _t.time()
+        last = _LAST_IMAGE_ENQ.get(cid, 0.0)
+        if (now - last) < ttl:
+            return False
+        _LAST_IMAGE_ENQ[cid] = now
+        return True
+    except Exception:
+        return True
 
 async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
@@ -568,11 +589,38 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         return None
 
     # Quick health probe; if offline, enqueue a job and return gracefully
+    # Allow drain context to bypass per-call health when a preflight has passed
+    bypass_health = str(os.getenv("SUMMARY_IMAGE_HEALTH_BYPASS","0")).strip().lower() in ("1","true","yes","on")
+    health_ttl = 0 if bypass_health else int(os.getenv("SUMMARY_IMAGE_HEALTH_TTL","30") or "30")
     try:
-        health = await draw_service.fetch_drawthings_health(tts_base, ttl=10)
+        health = await draw_service.fetch_drawthings_health(tts_base, ttl=health_ttl)
         if not isinstance(health, dict) or not health:
             raise RuntimeError("empty health")
+        # Treat non-reachable hub as offline and enqueue for later
+        if not bool(health.get("reachable", False)):
+            if _suppress_enqueue():
+                logger.info("summary image: hub not reachable; enqueue suppressed (drain context)")
+                return None
+            try:
+                from modules import image_queue
+                job = {
+                    "mode": "summary_image",
+                    "content": content,
+                    "reason": "hub_not_reachable",
+                }
+                cid = str(content.get("id") or content.get("video_id") or "")
+                if _should_enqueue(cid):
+                    path = image_queue.enqueue(job)
+                    logger.info("summary image queued (hub not reachable): %s", path.name)
+                else:
+                    logger.info("summary image enqueue suppressed (recent enqueue) for %s", cid)
+            except Exception as qexc:
+                logger.warning("summary image could not be queued (not reachable): %s", qexc)
+            return None
     except Exception as exc:
+        if _suppress_enqueue():
+            logger.info("summary image: hub offline; enqueue suppressed (drain context)")
+            return None
         try:
             from modules import image_queue
             job = {
@@ -580,8 +628,12 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                 "content": content,
                 "reason": f"hub_offline:{str(exc)[:80]}",
             }
-            path = image_queue.enqueue(job)
-            logger.info("summary image queued (hub offline): %s", path.name)
+            cid = str(content.get("id") or content.get("video_id") or "")
+            if _should_enqueue(cid):
+                path = image_queue.enqueue(job)
+                logger.info("summary image queued (hub offline): %s", path.name)
+            else:
+                logger.info("summary image enqueue suppressed (recent enqueue) for %s", cid)
         except Exception as qexc:
             logger.warning("summary image could not be queued: %s", qexc)
         return None
@@ -646,6 +698,21 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     absolute_url = generation.get("absolute_url") or generation.get("url")
     if not absolute_url:
         logger.warning("summary image failed: hub did not return an image URL")
+        # Enqueue for later if hub produced no URL (transient failure), unless suppressed
+        if not _suppress_enqueue():
+            try:
+                from modules import image_queue
+                job = {
+                    "mode": "summary_image",
+                    "content": content,
+                    "reason": "no_image_url",
+                }
+                cid = str(content.get("id") or content.get("video_id") or "")
+                if _should_enqueue(cid):
+                    image_queue.enqueue(job)
+                    logger.info("summary image queued (no URL returned)")
+            except Exception:
+                pass
         return None
 
     try:
