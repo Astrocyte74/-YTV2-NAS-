@@ -76,7 +76,11 @@ async def process_job(path: Path) -> bool:
         try:
             from modules.render_api_client import create_client_from_env
             client = create_client_from_env()
-            client.upload_image_file(image_path, str(content_id))
+            cid = str(content_id)
+            # Normalize to the same namespace used elsewhere (e.g., yt:<video_id>)
+            if len(cid) == 11 and ":" not in cid:
+                cid = f"yt:{cid}"
+            client.upload_image_file(image_path, cid)
             logging.info("Uploaded image for %s", content_id)
         except Exception as exc:
             logging.warning("Render upload failed for %s: %s", content_id, exc)
