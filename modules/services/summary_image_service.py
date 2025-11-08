@@ -220,6 +220,31 @@ CATEGORY_KEYWORDS: Dict[str, List[str]] = {
         "score",
         "tournament",
     ],
+    "programming": [
+        "code",
+        "coding",
+        "programming",
+        "software",
+        "devops",
+        "tutorial",
+        "script",
+        "scripting",
+        "python",
+        "javascript",
+        "typescript",
+        "golang",
+        "rust",
+        "kotlin",
+        "java",
+        "ci/cd",
+        "docker",
+        "kubernetes",
+        "sdk",
+        "api",
+        "framework",
+        "cli",
+        "ide",
+    ],
 }
 
 @dataclass
@@ -412,6 +437,20 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         prompt_template=(
             "{enhanced_sentence} Rendered in cinematic warm tones with diffused golden lighting and a calm atmosphere. Allow temple-inspired geometry or sacred architectural light motifs, but avoid literal structures or crosses. No figures, lettering, or icons."
         ),
+        variants=[
+            PromptVariant(
+                key="pulpit_rays",
+                prompt_suffix=" Spotlight a subtle pulpit silhouette with golden volumetric rays and floating dust motes.",
+            ),
+            PromptVariant(
+                key="skylight_bloom",
+                prompt_suffix=" Introduce skylight beams cascading over soft seating rows with gentle lens bloom.",
+            ),
+            PromptVariant(
+                key="temple_geometry",
+                prompt_suffix=" Hint at temple-inspired arch geometry with layered translucent panels and glowing outlines.",
+            ),
+        ],
     ),
     # --- New templates ---
     "tech_hardware": PromptTemplate(
@@ -438,6 +477,33 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
                 key="vaporwave_magenta",
                 style_preset="cinematic",
                 prompt_suffix=" Flood the scene with magenta/teal vaporwave gradients and suspended dust particles for retro-futuristic energy.",
+            ),
+        ],
+    ),
+    "tech_programming": PromptTemplate(
+        key="tech_programming",
+        style_preset="cinematic_dark",
+        prompt_template=(
+            "Immersive software engineering scene for '{title}', mixing glowing terminals, layered diagrams, and tactile desk elements. "
+            "Visualize {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Emphasize elegant code blocks, whiteboard sketches, and flowing neon signal paths. No people or text."
+        ),
+        variants=[
+            PromptVariant(
+                key="dark_terminal",
+                prompt_suffix=" Focus on dark-mode editors with teal syntax glow, glass reflections, and shallow depth of field.",
+            ),
+            PromptVariant(
+                key="whiteboard_flow",
+                style_preset="studio",
+                prompt_suffix=" Capture wide-angle whiteboards with colorful sticky notes, flowcharts, and sunlit studio ambiance.",
+            ),
+            PromptVariant(
+                key="neon_pipeline",
+                style_preset="cinematic",
+                prompt_suffix=" Introduce holographic pipelines and magenta/cyan data streams weaving between transparent screens.",
             ),
         ],
     ),
@@ -506,6 +572,21 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence}"
             " Use glowing synapses and ethereal lighting. No text."
         ),
+        variants=[
+            PromptVariant(
+                key="neon_network",
+                prompt_suffix=" Emphasize magenta/cyan neural threads weaving through translucent human silhouettes.",
+            ),
+            PromptVariant(
+                key="holographic_brain",
+                prompt_suffix=" Form a holographic brain lattice with softly pulsating nodes hovering above metallic surfaces.",
+            ),
+            PromptVariant(
+                key="data_stream",
+                style_preset="cinematic",
+                prompt_suffix=" Surround the subject with cascading glyph streams and volumetric light tunnels to suggest data flow.",
+            ),
+        ],
     ),
     "science_ecology": PromptTemplate(
         key="science_ecology",
@@ -872,6 +953,12 @@ def _select_template_key(
     )
     if any(_text_has_term(text, term) for term in japan_terms) or url_contains(*japan_url_snippets):
         return "travel_japan"
+    # Programming / software
+    programming_terms = (
+        "code","coding","programming","software","devops","tutorial","script","scripting","cli","api","sdk","pipeline","microservice","lambda","kubernetes","docker","golang","python","javascript","typescript","terraform","ansible","ci/cd"
+    )
+    if any(_text_has_term(text, term) for term in programming_terms):
+        return "tech_programming"
     # Maker 3D printing
     three_d_terms = (
         "3d print","3d printing","3d-printer","3d-printers","additive manufacturing","filament printer","resin printer","fdm printer","sla printer","bambu lab","prusa","ender 3","gcode","build plate","nozzle","extruder"
@@ -996,6 +1083,8 @@ def _select_template_key(
                 if any(mk in text for mk in modern_conflict_keywords):
                     return "history_modern_conflict"
                 return "history"
+            if key == "programming":
+                return "tech_programming"
             return key
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
@@ -1008,6 +1097,8 @@ def _select_template_key(
             return "travel_france"
         if any(_text_has_term(lowered_topics, term) for term in japan_terms):
             return "travel_japan"
+        if any(_text_has_term(lowered_topics, term) for term in programming_terms):
+            return "tech_programming"
         # --- Custom routing for new templates (topics) ---
         # Tech datacenter
         if "tech" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("tech", [])):
