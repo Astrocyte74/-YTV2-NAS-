@@ -78,8 +78,7 @@ from modules.ollama_client import (
     pull as ollama_pull,
     health_summary as ollama_health_summary,
 )
-from modules.services import cloud_service
-from modules.services import draw_service
+from modules.services import cloud_service, draw_service, summary_image_service
 from modules.services import ollama_service, summary_service, tts_service
 from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
 import hashlib
@@ -346,6 +345,7 @@ class YouTubeTelegramBot:
             in ("1", "true", "yes", "on")
         )
         self.draw_models_overrides = _load_draw_models()  # cache for later use
+        self._service_health_cache: Dict[str, Any] = {"ts": 0.0, "data": {}}
 
         # Initialize summarizer
         try:
@@ -478,6 +478,103 @@ class YouTubeTelegramBot:
 
     def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
         return ui_existing_variants_message(self.VARIANT_LABELS, content_id, variants, source)
+
+    @staticmethod
+    def _status_icon(state: Optional[bool]) -> str:
+        if state is None:
+            return "⚪️"
+        return "🟢" if state else "🔴"
+
+    async def _probe_local_llm(self) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+
+        def _call() -> Dict[str, Any]:
+            try:
+                summary = ollama_health_summary(cache_ttl=5) or {}
+                summary.setdefault("reachable", bool(summary.get("reachable")))
+                return summary
+            except Exception as exc:
+                return {"provider": None, "base": None, "reachable": False, "models": None, "notes": str(exc)}
+
+        return await loop.run_in_executor(None, _call)
+
+    async def _probe_tts_hub(self) -> Dict[str, Any]:
+        base = (os.getenv("TTSHUB_API_BASE") or "").strip()
+        if not base:
+            return {"configured": False, "reachable": False, "base": None}
+        trimmed = base.rstrip("/")
+        endpoint = f"{trimmed}/meta" if trimmed.endswith("/api") else f"{trimmed}/api/meta"
+        loop = asyncio.get_running_loop()
+
+        def _call() -> Dict[str, Any]:
+            try:
+                resp = requests.get(endpoint, timeout=1.5)
+                if resp.ok:
+                    return {"configured": True, "reachable": True, "base": trimmed}
+                return {"configured": True, "reachable": False, "base": trimmed, "notes": f"HTTP {resp.status_code}"}
+            except Exception as exc:
+                return {"configured": True, "reachable": False, "base": trimmed, "notes": str(exc)}
+
+        return await loop.run_in_executor(None, _call)
+
+    async def _probe_draw_service(self) -> Dict[str, Any]:
+        enabled = summary_image_service.SUMMARY_IMAGE_ENABLED
+        base = (os.getenv("TTSHUB_API_BASE") or "").strip()
+        if not enabled or not base:
+            return {"enabled": bool(enabled), "reachable": bool(not enabled and not base)}
+        try:
+            data = await asyncio.wait_for(
+                draw_service.fetch_drawthings_health(base, ttl=0, force_refresh=True),
+                timeout=1.5,
+            )
+            return {"enabled": True, "reachable": bool((data or {}).get("reachable", False))}
+        except Exception as exc:
+            return {"enabled": True, "reachable": False, "notes": str(exc)}
+
+    async def _get_service_health(self, force: bool = False) -> Dict[str, Any]:
+        now = time.time()
+        cache_ts = float(self._service_health_cache.get("ts") or 0.0)
+        if not force and (now - cache_ts) < 20 and self._service_health_cache.get("data"):
+            return dict(self._service_health_cache["data"])
+        local_llm, tts_hub, image_hub = await asyncio.gather(
+            self._probe_local_llm(),
+            self._probe_tts_hub(),
+            self._probe_draw_service(),
+        )
+        data = {
+            "local_llm": local_llm,
+            "tts_hub": tts_hub,
+            "image_hub": image_hub,
+        }
+        self._service_health_cache = {"ts": now, "data": data}
+        return data
+
+    def _format_service_status_block(self, status: Dict[str, Any]) -> str:
+        lines: List[str] = []
+        llm = status.get("local_llm") or {}
+        if llm:
+            base = llm.get("base") or ""
+            provider = llm.get("provider") or "Local"
+            suffix = f" • {base}" if base else ""
+            lines.append(f"{self._status_icon(llm.get('reachable'))} Local LLM ({provider}){suffix}")
+        tts = status.get("tts_hub") or {}
+        if tts.get("configured"):
+            base = tts.get("base") or ""
+            suffix = f" • {base}" if base else ""
+            lines.append(f"{self._status_icon(tts.get('reachable'))} TTS Hub{suffix}")
+        image = status.get("image_hub") or {}
+        if image.get("enabled"):
+            lines.append(f"{self._status_icon(image.get('reachable'))} Image Hub (Draw Things)")
+        if not lines:
+            return ""
+        note_lines: List[str] = []
+        for label, data in (("Local LLM", llm), ("TTS Hub", tts), ("Image Hub", image)):
+            note = (data.get("notes") or "").strip()
+            if note and not data.get("reachable"):
+                note_lines.append(f"{label}: {note[:120]}")
+        if note_lines:
+            lines.extend(note_lines)
+        return "⚙️ Service status:\n" + "\n".join(lines)
 
     async def _send_existing_summary_notice(self, query, video_id: str, summary_type: str):
         await summary_service.send_existing_summary_notice(self, query, video_id, summary_type)
@@ -1137,13 +1234,12 @@ class YouTubeTelegramBot:
         except Exception:
             llm_status = "❌ LLM not configured"
 
-        # Local LLM (hub/direct) health
+        health = await self._get_service_health(force=True)
+        local_llm_health = health.get("local_llm") or {}
+        tts_health = health.get("tts_hub") or {}
+        image_health = health.get("image_hub") or {}
         hub_env = (os.getenv('TTSHUB_API_BASE') or '').strip()
         direct_env = (os.getenv('OLLAMA_URL') or os.getenv('OLLAMA_HOST') or '').strip()
-        try:
-            hs = ollama_health_summary(cache_ttl=20) or {}
-        except Exception as exc:
-            hs = {"provider": None, "base": None, "reachable": False, "models": None, "notes": str(exc)}
 
         def _mask(url: str) -> str:
             if not url:
@@ -1163,11 +1259,11 @@ class YouTubeTelegramBot:
             "🧩 Local LLM (hub/direct):",
             f"• TTSHUB_API_BASE: {_mask(hub_env)}",
             f"• OLLAMA_URL/HOST: {_mask(direct_env)}",
-            f"• Selected: {hs.get('provider') or 'none'} → {_mask(str(hs.get('base') or ''))}",
-            f"• Reachable: {'✅' if hs.get('reachable') else '❌'}",
-            f"• Models: {hs.get('models') if hs.get('models') is not None else 'unknown'}",
+            f"• Selected: {local_llm_health.get('provider') or 'none'} → {_mask(str(local_llm_health.get('base') or ''))}",
+            f"• Reachable: {'✅' if local_llm_health.get('reachable') else '❌'}",
+            f"• Models: {local_llm_health.get('models') if local_llm_health.get('models') is not None else 'unknown'}",
         ]
-        note = (hs.get('notes') or '').strip()
+        note = (local_llm_health.get('notes') or '').strip()
         if note:
             lines.append(f"• Notes: {note}")
 
@@ -1186,6 +1282,28 @@ class YouTubeTelegramBot:
                 lines.append(f"• Installed Models: {joined}")
         except Exception:
             pass
+
+        if hub_env:
+            lines.extend([
+                "",
+                "🎧 TTS Hub:",
+                f"• Base: {_mask(hub_env)}",
+                f"• Reachable: {'✅' if tts_health.get('reachable') else '❌'}",
+            ])
+            note = (tts_health.get('notes') or '').strip()
+            if note and not tts_health.get('reachable'):
+                lines.append(f"• Notes: {note}")
+
+        if summary_image_service.SUMMARY_IMAGE_ENABLED:
+            lines.extend([
+                "",
+                "🎨 Image Hub:",
+                f"• Enabled: ✅",
+                f"• Reachable: {'✅' if image_health.get('reachable') else '❌'}",
+            ])
+            note = (image_health.get('notes') or '').strip()
+            if note and not image_health.get('reachable'):
+                lines.append(f"• Notes: {note}")
 
         # Show key defaults/env for quick reference (no secrets)
         def env_or(key: str, default: str = 'unset') -> str:
@@ -3233,6 +3351,12 @@ class YouTubeTelegramBot:
 
         # Quick reachability probe before offering local models to avoid slow timeouts when WG/i9 is down
         def _ollama_reachable(timeout: float = 0.8) -> bool:
+            cache_age = time.time() - float(self._service_health_cache.get("ts") or 0.0)
+            if cache_age < 20:
+                cached = self._service_health_cache.get("data") or {}
+                cached_llm = cached.get("local_llm") or {}
+                if cached_llm.get("reachable") is not None:
+                    return bool(cached_llm.get("reachable"))
             try:
                 import os, requests
                 base = (os.getenv('TTSHUB_API_BASE') or os.getenv('OLLAMA_URL') or os.getenv('OLLAMA_HOST') or '').rstrip('/')
@@ -4988,6 +5112,13 @@ class YouTubeTelegramBot:
         variants = self._discover_summary_types(content_id) if content_id else []
         reply_markup = self._build_summary_keyboard(variants, content_id)
         message = self._existing_variants_message(content_id or '', variants, source=source)
+        try:
+            health = await self._get_service_health()
+            status_block = self._format_service_status_block(health)
+            if status_block:
+                message = f"{message}\n\n{status_block}"
+        except Exception:
+            pass
         await query.edit_message_text(
             message,
             reply_markup=reply_markup
