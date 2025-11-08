@@ -745,7 +745,7 @@ def _select_template_key(
     food_url_snippets = (
         "/food","/recipe","/recipes","/cook","/kitchen","/dining","/meal","/cuisine","/baking","bonappetit","foodnetwork","seriouseats","allrecipes","epicurious","tasty.co"
     )
-    if any(term in text for term in food_terms) or url_contains(*food_url_snippets):
+    if any(_text_has_term(text, term) for term in food_terms) or url_contains(*food_url_snippets):
         return "lifestyle_food"
     # Lifestyle/Travel
     travel_terms = (
@@ -754,7 +754,7 @@ def _select_template_key(
     travel_url_snippets = (
         "/travel","/trip","/journey","/tourism","/destinations","/itinerary","travel-guide","lonelyplanet","expedia","tripadvisor"
     )
-    if any(term in text for term in travel_terms) or url_contains(*travel_url_snippets):
+    if any(_text_has_term(text, term) for term in travel_terms) or url_contains(*travel_url_snippets):
         return "lifestyle_travel"
     # Travel France
     france_terms = (
@@ -763,7 +763,7 @@ def _select_template_key(
     france_url_snippets = (
         "france","/fr/","/france","paris","provence","bordeaux","versailles","lyon","normandy"
     )
-    if any(term in text for term in france_terms) or url_contains(*france_url_snippets):
+    if any(_text_has_term(text, term) for term in france_terms) or url_contains(*france_url_snippets):
         return "travel_france"
     # Travel Japan
     japan_terms = (
@@ -772,7 +772,7 @@ def _select_template_key(
     japan_url_snippets = (
         "japan","/jp/","/japan",".jp/","tokyo","kyoto","osaka","sapporo","nara","hokkaido"
     )
-    if any(term in text for term in japan_terms) or url_contains(*japan_url_snippets):
+    if any(_text_has_term(text, term) for term in japan_terms) or url_contains(*japan_url_snippets):
         return "travel_japan"
     # Maker 3D printing
     three_d_terms = (
@@ -781,7 +781,7 @@ def _select_template_key(
     three_d_url_snippets = (
         "/3d-print","/3dprinting","/3d-printer","/additive","3dprinting","all3dp","printables.com","thingiverse","makerworld"
     )
-    if any(term in text for term in three_d_terms) or url_contains(*three_d_url_snippets):
+    if any(_text_has_term(text, term) for term in three_d_terms) or url_contains(*three_d_url_snippets):
         return "maker_3d_printing"
     # Tech datacenter
     if "tech" in text or any(token in text for token in CATEGORY_KEYWORDS.get("tech", [])):
@@ -810,9 +810,9 @@ def _select_template_key(
     # Maker/entertainment hobbies/creativity
     if "maker" in text or "entertainment" in text or any(token in text for token in CATEGORY_KEYWORDS.get("maker", [])) or any(token in text for token in CATEGORY_KEYWORDS.get("entertainment", [])):
         hobbies_terms = ("hobby", "craft", "creative", "art", "painting", "cooking", "baking")
-        if any(term in text for term in three_d_terms):
+        if any(_text_has_term(text, term) for term in three_d_terms):
             return "maker_3d_printing"
-        if any(term in text for term in hobbies_terms):
+        if any(_text_has_term(text, term) for term in hobbies_terms):
             return "hobbies_creativity"
     # Entertainment subcategories
     if "entertainment" in text or any(token in text for token in CATEGORY_KEYWORDS.get("entertainment", [])):
@@ -902,13 +902,13 @@ def _select_template_key(
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
         lowered_topics = " ".join(str(t).lower() for t in topics if t)
-        if any(term in lowered_topics for term in food_terms):
+        if any(_text_has_term(lowered_topics, term) for term in food_terms):
             return "lifestyle_food"
-        if any(term in lowered_topics for term in travel_terms):
+        if any(_text_has_term(lowered_topics, term) for term in travel_terms):
             return "lifestyle_travel"
-        if any(term in lowered_topics for term in france_terms):
+        if any(_text_has_term(lowered_topics, term) for term in france_terms):
             return "travel_france"
-        if any(term in lowered_topics for term in japan_terms):
+        if any(_text_has_term(lowered_topics, term) for term in japan_terms):
             return "travel_japan"
         # --- Custom routing for new templates (topics) ---
         # Tech datacenter
@@ -938,9 +938,9 @@ def _select_template_key(
         # Maker/entertainment hobbies/creativity
         if "maker" in lowered_topics or "entertainment" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("maker", [])) or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("entertainment", [])):
             hobbies_terms = ("hobby", "craft", "creative", "art", "painting", "cooking", "baking")
-            if any(term in lowered_topics for term in three_d_terms):
+            if any(_text_has_term(lowered_topics, term) for term in three_d_terms):
                 return "maker_3d_printing"
-            if any(term in lowered_topics for term in hobbies_terms):
+            if any(_text_has_term(lowered_topics, term) for term in hobbies_terms):
                 return "hobbies_creativity"
         # Entertainment subcategories
         if "entertainment" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("entertainment", [])):
@@ -1441,6 +1441,17 @@ def _extract_source_url(content: Dict[str, Any], analysis: Optional[Dict[str, An
             if trimmed:
                 return trimmed
     return None
+
+
+def _text_has_term(text: str, term: str) -> bool:
+    term = (term or "").strip().lower()
+    if not term:
+        return False
+    text = text or ""
+    if all(ch.isalpha() for ch in term):
+        pattern = rf"\\b{re.escape(term)}\\b"
+        return re.search(pattern, text) is not None
+    return term in text
 
 
 def _now_iso() -> str:
