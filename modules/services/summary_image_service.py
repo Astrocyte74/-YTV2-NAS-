@@ -15,7 +15,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -661,7 +661,11 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         return None
 
     summary_data = content.get("summary") or {}
-    analysis = content.get("analysis") or {}
+    analysis = content.get("analysis")
+    if not isinstance(analysis, dict):
+        analysis = content.get("analysis_json")
+        if not isinstance(analysis, dict):
+            analysis = {}
     summary_text = ""
     if isinstance(summary_data, dict):
         summary_text = summary_data.get("summary") or summary_data.get("text") or ""
@@ -671,25 +675,34 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         logger.debug("summary image skipped: no summary text available")
         return None
 
-    template_key = _select_template_key(summary_text, analysis if isinstance(analysis, dict) else {})
-    template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
+    override_prompt = _extract_override_prompt(content)
+    if override_prompt:
+        prompt = override_prompt.strip()
+        prompt_source = "override"
+        template_key = None
+        template = PROMPT_TEMPLATES.get("default")
+        enhanced_sentence = ""
+    else:
+        template_key = _select_template_key(summary_text, analysis)
+        template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
 
-    headline = _first_sentence(summary_text)
-    topics = _top_topics(analysis if isinstance(analysis, dict) else {}, summary_text)
-    motifs = ", ".join(dict.fromkeys(topics)) if topics else "key ideas from the summary"
-    summary_excerpt = _summary_excerpt(summary_text)
-    context = {
-        "title": content.get("title") or content.get("metadata", {}).get("title") or "Summary",
-        "headline": headline,
-        "motifs": motifs,
-        "summary_excerpt": summary_excerpt,
-    }
+        headline = _first_sentence(summary_text)
+        topics = _top_topics(analysis, summary_text)
+        motifs = ", ".join(dict.fromkeys(topics)) if topics else "key ideas from the summary"
+        summary_excerpt = _summary_excerpt(summary_text)
+        context = {
+            "title": content.get("title") or content.get("metadata", {}).get("title") or "Summary",
+            "headline": headline,
+            "motifs": motifs,
+            "summary_excerpt": summary_excerpt,
+        }
 
-    enhanced_sentence = await _enhance_sentence(template, context)
-    context["enhanced_sentence"] = (enhanced_sentence or "").strip()
+        enhanced_sentence = await _enhance_sentence(template, context)
+        context["enhanced_sentence"] = (enhanced_sentence or "").strip()
 
-    prompt = template.prompt_template.format(**context).strip()
-    logger.info("summary image prompt (template=%s): %s", template.key, prompt)
+        prompt = template.prompt_template.format(**context).strip()
+        prompt_source = template.key
+        logger.info("summary image prompt (template=%s): %s", template.key, prompt)
 
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -758,18 +771,38 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     output_path.write_bytes(image_bytes)
 
     public_url = _derive_public_url(output_path)
+    created_at = _now_iso()
+    model_name = generation.get("model") or generation.get("engine") or (template.key if template else "default")
     metadata = {
         "path": str(output_path),
         "relative_path": str(output_path.relative_to(Path.cwd())),
         "public_url": public_url,
         "seed": generation.get("seed"),
         "prompt": prompt,
+        "prompt_source": prompt_source,
         "template": template.key,
         "preset": template.preset,
         "style_preset": template.style_preset,
         "width": template.width,
         "height": template.height,
         "source_url": absolute_url,
+        "model": model_name,
+        "created_at": created_at,
+        "analysis_variant": build_analysis_variant(
+            {
+                "prompt": prompt,
+                "prompt_source": prompt_source,
+                "template": template.key,
+                "preset": template.preset,
+                "style_preset": template.style_preset,
+                "width": template.width,
+                "height": template.height,
+                "seed": generation.get("seed"),
+                "model": model_name,
+                "created_at": created_at,
+            },
+            public_url,
+        ),
     }
     logger.info("summary image saved to %s (template=%s)", output_path, template.key)
     try:
@@ -780,4 +813,82 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     return metadata
 
 
-__all__ = ["maybe_generate_summary_image", "SUMMARY_IMAGE_ENABLED"]
+def _coerce_dict(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce_analysis(content: Dict[str, Any]) -> Dict[str, Any]:
+    analysis = _coerce_dict(content.get("analysis"))
+    if not analysis:
+        analysis = _coerce_dict(content.get("analysis_json"))
+    return analysis
+
+
+def _extract_override_prompt(content: Dict[str, Any]) -> Optional[str]:
+    analysis = _coerce_analysis(content)
+    prompt = analysis.get("summary_image_prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    prompt = content.get("summary_image_prompt")
+    if isinstance(prompt, str) and prompt.strip():
+        return prompt.strip()
+    return None
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def build_analysis_variant(metadata: Dict[str, Any], public_url: Optional[str]) -> Dict[str, Any]:
+    variant = {
+        "url": public_url or metadata.get("relative_path") or metadata.get("path"),
+        "prompt": metadata.get("prompt"),
+        "prompt_source": metadata.get("prompt_source"),
+        "template": metadata.get("template"),
+        "preset": metadata.get("preset"),
+        "style_preset": metadata.get("style_preset"),
+        "width": metadata.get("width"),
+        "height": metadata.get("height"),
+        "seed": metadata.get("seed"),
+        "model": metadata.get("model"),
+        "created_at": metadata.get("created_at") or _now_iso(),
+    }
+    # Remove keys with None to keep JSON concise
+    return {k: v for k, v in variant.items() if v is not None}
+
+
+def apply_analysis_variant(
+    analysis: Optional[Dict[str, Any]],
+    variant_entry: Dict[str, Any],
+    *,
+    selected_url: Optional[str] = None,
+    prompt: Optional[str] = None,
+    model: Optional[str] = None,
+    version: int = 3,
+) -> Dict[str, Any]:
+    base = _coerce_dict(analysis)
+    variants = base.get("summary_image_variants")
+    if not isinstance(variants, list):
+        variants = []
+    # Remove duplicates with same url
+    new_variants: List[Dict[str, Any]] = [
+        entry for entry in variants if not (isinstance(entry, dict) and entry.get("url") == variant_entry.get("url"))
+    ]
+    new_variants.append(variant_entry)
+    base["summary_image_variants"] = new_variants
+    if prompt:
+        base["summary_image_prompt_last_used"] = prompt
+    if model:
+        base["summary_image_model"] = model
+    base["summary_image_version"] = version
+    if selected_url:
+        base["summary_image_selected_url"] = selected_url
+    return base
+
+
+__all__ = [
+    "maybe_generate_summary_image",
+    "SUMMARY_IMAGE_ENABLED",
+    "build_analysis_variant",
+    "apply_analysis_variant",
+]

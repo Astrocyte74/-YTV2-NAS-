@@ -21,13 +21,14 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in os.sys.path:
     os.sys.path.insert(0, str(ROOT))
 
 from modules.image_queue import QUEUE_DIR
+from modules.services import summary_image_service
 
 
 def setup_logging() -> None:
@@ -63,7 +64,6 @@ async def process_job(path: Path) -> bool:
     _os.environ["SUMMARY_IMAGE_QUEUE_SUPPRESS"] = "1"
     # Skip repeated per-job health probes; a single preflight is done in drain_once.
     _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = "1"
-    from modules.services.summary_image_service import maybe_generate_summary_image
 
     try:
         job = _load(path)
@@ -75,7 +75,7 @@ async def process_job(path: Path) -> bool:
             logging.error("Invalid job payload (no content dict): %s", path.name)
             _move(path, "failed")
             return False
-        # Skip if DB already has an image URL for this content (avoid re-generating)
+        analysis_from_db: Dict[str, Any] = {}
         try:
             vid = str(content.get("id") or content.get("video_id") or "")
             base_vid = vid.split(":", 1)[-1] if ":" in vid else vid
@@ -84,17 +84,42 @@ async def process_job(path: Path) -> bool:
                 import psycopg
                 with psycopg.connect(dsn) as _conn:
                     with _conn.cursor() as _cur:
-                        _cur.execute("SELECT summary_image_url FROM content WHERE video_id=%s", (base_vid,))
+                        _cur.execute("SELECT summary_image_url, analysis_json FROM content WHERE video_id=%s", (base_vid,))
                         row = _cur.fetchone()
-                        if row and row[0]:
-                            logging.info("Skip job %s: summary_image_url already set", base_vid)
-                            _move(path, "processed")
-                            return True
+                        if row:
+                            existing_url = row[0]
+                            raw_analysis = row[1]
+                            if raw_analysis:
+                                if isinstance(raw_analysis, str):
+                                    try:
+                                        analysis_from_db = json.loads(raw_analysis)
+                                    except Exception:
+                                        analysis_from_db = {}
+                                elif isinstance(raw_analysis, dict):
+                                    analysis_from_db = raw_analysis
+                            prompt_from_db = (analysis_from_db.get("summary_image_prompt") or "").strip()
+                            prompt_last_used = (analysis_from_db.get("summary_image_prompt_last_used") or "").strip()
+                            if existing_url and (not prompt_from_db or prompt_from_db == prompt_last_used):
+                                logging.info("Skip job %s: summary_image_url already set", base_vid)
+                                _move(path, "processed")
+                                return True
+                            job_analysis = content.get("analysis")
+                            if isinstance(job_analysis, dict):
+                                merged = dict(analysis_from_db)
+                                merged.update(job_analysis)
+                                if prompt_from_db:
+                                    merged["summary_image_prompt"] = prompt_from_db
+                                content["analysis"] = merged
+                            elif isinstance(analysis_from_db, dict):
+                                copy_analysis = dict(analysis_from_db)
+                                if prompt_from_db:
+                                    copy_analysis["summary_image_prompt"] = prompt_from_db
+                                content["analysis"] = copy_analysis
         except Exception as _exc:
             logging.debug("DB check skipped: %s", _exc)
 
         # Attempt generation; if hub offline, maybe_generate_summary_image returns None but does not re-enqueue in drain.
-        meta = await maybe_generate_summary_image(content)
+        meta = await summary_image_service.maybe_generate_summary_image(content)
         if not isinstance(meta, dict):
             logging.info("Skipped (hub offline or error): %s", path.name)
             return False
@@ -105,6 +130,7 @@ async def process_job(path: Path) -> bool:
         if content_id and image_path and image_path.exists():
             try:
                 from modules.render_api_client import create_client_from_env
+
                 client = create_client_from_env()
                 cid = str(content_id)
                 # Normalize to the same namespace used elsewhere (e.g., yt:<video_id>)
@@ -121,20 +147,37 @@ async def process_job(path: Path) -> bool:
                     or meta.get("relative_path")
                 )
 
-                # Best-effort DB update so the dashboard shows the image
                 if summary_image_url:
                     try:
                         dsn = _os.getenv("DATABASE_URL_POSTGRES_NEW") or _os.getenv("DATABASE_URL")
                         if dsn:
                             import psycopg
+
                             vid = str(content_id or "")
                             if ":" in vid:
                                 vid = vid.split(":", 1)[-1]
+                            variant_entry = meta.get("analysis_variant")
+                            if not variant_entry:
+                                variant_entry = summary_image_service.build_analysis_variant(meta, summary_image_url)
+                            updated_analysis = summary_image_service.apply_analysis_variant(
+                                analysis_from_db,
+                                variant_entry,
+                                selected_url=summary_image_url,
+                                prompt=meta.get("prompt"),
+                                model=meta.get("model"),
+                            )
+                            analysis_payload = json.dumps(updated_analysis)
                             with psycopg.connect(dsn) as _conn:
                                 with _conn.cursor() as _cur:
                                     _cur.execute(
-                                        "UPDATE content SET summary_image_url=%s, updated_at=now() WHERE video_id=%s",
-                                        (summary_image_url, vid),
+                                        """
+                                        UPDATE content
+                                           SET summary_image_url=%s,
+                                               analysis_json=%s,
+                                               updated_at=now()
+                                         WHERE video_id=%s
+                                        """,
+                                        (summary_image_url, analysis_payload, vid),
                                     )
                                     _conn.commit()
                             logging.info("Updated DB summary_image_url for %s", vid)

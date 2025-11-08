@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -165,20 +166,48 @@ async def _generate_image(
         return None
 
 
-def _update_summary_image_url(
+def _update_summary_image_metadata(
     conn: psycopg.Connection,
     video_id: str,
     url: str,
+    metadata: Dict[str, Any],
 ) -> None:
+    analysis_blob = None
+    with conn.cursor() as cur:
+        cur.execute("SELECT analysis_json FROM content WHERE video_id=%s", (video_id,))
+        row = cur.fetchone()
+        if row:
+            analysis_blob = row[0]
+    analysis = {}
+    if analysis_blob:
+        if isinstance(analysis_blob, str):
+            try:
+                analysis = json.loads(analysis_blob)
+            except Exception:
+                analysis = {}
+        elif isinstance(analysis_blob, dict):
+            analysis = analysis_blob
+    variant_entry = metadata.get("analysis_variant")
+    if not variant_entry:
+        variant_entry = summary_image_service.build_analysis_variant(metadata, url)
+    updated_analysis = summary_image_service.apply_analysis_variant(
+        analysis,
+        variant_entry,
+        selected_url=url,
+        prompt=metadata.get("prompt"),
+        model=metadata.get("model"),
+    )
+    payload = json.dumps(updated_analysis)
     with conn.cursor() as cur:
         cur.execute(
             """
             UPDATE content
-            SET summary_image_url = %s,
-                updated_at = now()
-            WHERE video_id = %s;
+               SET summary_image_url = %s,
+                   analysis_json = %s,
+                   updated_at = now()
+             WHERE video_id = %s;
             """,
-            (url, video_id),
+            (url, payload, video_id),
         )
     conn.commit()
 
@@ -230,7 +259,7 @@ async def process_tasks(
                 continue
 
             try:
-                _update_summary_image_url(conn, task.video_id, summary_image_url)
+                _update_summary_image_metadata(conn, task.video_id, summary_image_url, metadata or {})
             except Exception as exc:
                 LOGGER.error("Failed to update DB for %s: %s", task.video_id, exc)
                 continue

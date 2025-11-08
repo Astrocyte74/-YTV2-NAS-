@@ -589,6 +589,24 @@ class YouTubeSummarizer:
                         or image_meta.get("relative_path")
                         or image_meta.get("path")
                     )
+                    variant_entry = image_meta.get("analysis_variant")
+                    if variant_entry:
+                        analysis_block = result.get("analysis")
+                        if not isinstance(analysis_block, dict):
+                            analysis_block = {}
+                        selected_url = (
+                            image_meta.get("public_url")
+                            or image_meta.get("relative_path")
+                            or image_meta.get("path")
+                        )
+                        analysis_block = summary_image_service.apply_analysis_variant(
+                            analysis_block,
+                            variant_entry,
+                            selected_url=selected_url,
+                            prompt=image_meta.get("prompt"),
+                            model=image_meta.get("model"),
+                        )
+                        result["analysis"] = analysis_block
             except Exception as exc:
                 logging.debug("summary image generation skipped: %s", exc)
 
@@ -1029,6 +1047,24 @@ Preview:
                         or image_meta.get("relative_path")
                         or image_meta.get("path")
                     )
+                    variant_entry = image_meta.get("analysis_variant")
+                    if variant_entry:
+                        analysis_block = result.get("analysis")
+                        if not isinstance(analysis_block, dict):
+                            analysis_block = {}
+                        selected_url = (
+                            image_meta.get("public_url")
+                            or image_meta.get("relative_path")
+                            or image_meta.get("path")
+                        )
+                        analysis_block = summary_image_service.apply_analysis_variant(
+                            analysis_block,
+                            variant_entry,
+                            selected_url=selected_url,
+                            prompt=image_meta.get("prompt"),
+                            model=image_meta.get("model"),
+                        )
+                        result["analysis"] = analysis_block
             except Exception as exc:
                 logging.debug("summary image generation skipped: %s", exc)
 
