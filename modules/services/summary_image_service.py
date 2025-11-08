@@ -246,6 +246,117 @@ class PromptTemplate:
 # Base templates we support today. Additional categories can be appended later
 # without touching the core service code.
 PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
+    "entertainment_lordoftherings": PromptTemplate(
+        key="entertainment_lordoftherings",
+        style_preset="cinematic_dark",
+        prompt_template=(
+            "Epic fantasy composition inspired by The Lord of the Rings for '{title}', depicting ancient landscapes, glowing runes, and heroic silhouettes. Depict {headline}. Highlight motifs such as {motifs}. {enhanced_sentence} Rendered with misty mountains, golden light, and mythic depth. No text or logos."
+        ),
+    ),
+    # --- Lifestyle/Food/Travel templates ---
+    "lifestyle_food": PromptTemplate(
+        key="lifestyle_food",
+        style_preset="cinematic_warm",
+        prompt_template=(
+            "Artful culinary composition for '{title}', showing fresh ingredients, plated dishes, and warm natural light. "
+            "Depict {headline}. Highlight motifs such as {motifs}. {enhanced_sentence} "
+            "Rendered with shallow depth of field, soft shadows, and rich textures. No text or brand logos."
+        ),
+    ),
+    "lifestyle_travel": PromptTemplate(
+        key="lifestyle_travel",
+        style_preset="cinematic_cool",
+        prompt_template=(
+            "Cinematic travel scene for '{title}', showing sweeping landscapes, iconic architecture, and natural light. "
+            "Depict {headline}. Highlight motifs such as {motifs}. {enhanced_sentence} "
+            "Use warm skies, soft haze, and gentle color grading to evoke wanderlust. No text or signs."
+        ),
+    ),
+    "travel_france": PromptTemplate(
+        key="travel_france",
+        style_preset="pastel",
+        prompt_template=(
+            "Impressionist travel illustration for '{title}', evoking France through pastel tones, vineyards, cafés, and elegant architecture. "
+            "Depict {headline}. Highlight motifs such as {motifs}. {enhanced_sentence} "
+            "Rendered in soft morning light with warm highlights and gentle brush texture. No text or signage."
+        ),
+    ),
+    "travel_japan": PromptTemplate(
+        key="travel_japan",
+        style_preset="watercolor",
+        prompt_template=(
+            "Serene travel composition for '{title}', evoking Japan with temples, cherry blossoms, and lantern-lit streets. "
+            "Depict {headline}. Highlight motifs such as {motifs}. {enhanced_sentence} "
+            "Rendered in delicate watercolor tones of pink, indigo, and misty grey. No text or signage."
+        ),
+    ),
+    # --- New templates for specific domains ---
+    "tech_datacenter": PromptTemplate(
+        key="tech_datacenter",
+        style_preset="cinematic_cool",
+        prompt_template=(
+            "Futuristic data infrastructure scene with rows of glowing servers, intricate fiber-optic cables, and ambient blue light for '{title}'. "
+            "Visualize {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use reflections, subtle mist, and a sense of scale. No people, no text."
+        ),
+    ),
+    "business_finance": PromptTemplate(
+        key="business_finance",
+        style_preset="studio",
+        prompt_template=(
+            "Studio-lit composition of illuminated financial charts, digital market visuals, and glowing trend lines for '{title}'. "
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use sharp contrasts, metallic accents, and vibrant color gradients. No text or logos."
+        ),
+    ),
+    "science_bio": PromptTemplate(
+        key="science_bio",
+        style_preset="cinematic_cool",
+        prompt_template=(
+            "Cinematic close-up of molecular structures, DNA helices, and neurons with fluorescent highlights for '{title}'. "
+            "Visualize {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use glowing blues and greens, crisp focus, and scientific abstraction. No text or labels."
+        ),
+    ),
+    "entertainment_music": PromptTemplate(
+        key="entertainment_music",
+        style_preset="cinematic_warm",
+        prompt_template=(
+            "Dynamic stage scene with musical instruments, warm spotlights, and stylized sound waves for '{title}'. "
+            "Express {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use golden lighting, vibrant color, and a sense of rhythm. No people or text."
+        ),
+    ),
+    "entertainment_starwars": PromptTemplate(
+        key="entertainment_starwars",
+        style_preset="cinematic_dark",
+        prompt_template=(
+            "Epic galactic vista with starships, glowing lightsabers, and cosmic nebulae inspired by Star Wars for '{title}'. "
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use dramatic lighting, deep shadows, and sci-fi energy. No text or logos."
+        ),
+    ),
+    "entertainment_harrypotter": PromptTemplate(
+        key="entertainment_harrypotter",
+        style_preset="cinematic_warm",
+        prompt_template=(
+            "Magical fantasy scene with candlelit halls, enchanted books, and mystical symbols inspired by Harry Potter for '{title}'. "
+            "Express {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use warm golden light, mysterious ambiance, and subtle magical effects. No text or faces."
+        ),
+    ),
     "spiritual_conference": PromptTemplate(
         key="spiritual_conference",
         style_preset="cinematic_warm",
@@ -387,11 +498,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
     "default": PromptTemplate(
         key="default",
         prompt_template=(
-            'Layered cinematic montage with crisp contrast and depth of field, resembling a magazine editorial photo composite for "{title}". '
-            "Capture the core idea: {headline}. "
-            "Highlight motifs such as {motifs}. "
+            'Layered cinematic montage blending concept and emotion for "{title}". '
+            "Capture the essence of {headline} with symbolic visual cues from {motifs}. "
             "{enhanced_sentence}"
-            "Use dynamic lighting, modern gradients, and rich visual depth. No text or lettering anywhere."
+            "Use modern lighting, balanced composition, and subtle atmosphere. No text or lettering anywhere."
         ),
     ),
     "tech": PromptTemplate(
@@ -447,6 +557,16 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "Highlight motifs such as {motifs}. "
             "{enhanced_sentence}"
             "No text or lettering."
+        ),
+    ),
+    "maker_3d_printing": PromptTemplate(
+        key="maker_3d_printing",
+        style_preset="studio",
+        prompt_template=(
+            "High-detail studio scene of a modern 3D printer fabricating a component for '{title}'. "
+            "Illustrate {headline} with motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            "Show glowing nozzle light, translucent filament spools, and precise mechanical motion. No people, no text."
         ),
     ),
     "education": PromptTemplate(
@@ -592,35 +712,92 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
 
 def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     text = summary_text.lower()
-    url_hint = ""
-    if isinstance(analysis, dict):
-        url_hint = str(
-            analysis.get("canonical_url")
-            or analysis.get("url")
-            or analysis.get("source_url")
-            or ""
-        ).lower()
     # --- Custom routing for new templates ---
-    # Tech hardware
+    # Lifestyle/Food
+    food_terms = (
+        "food","recipe","cook","dish","cuisine","baking","restaurant","meal","flavour","dessert"
+    )
+    if any(term in text for term in food_terms):
+        return "lifestyle_food"
+    # Lifestyle/Travel
+    travel_terms = (
+        "travel","trip","journey","vacation","wanderlust","adventure","destination","tourism","explore","itinerary"
+    )
+    travel_url_snippets = (
+        "/travel","/trip","/journey","/tourism","/destinations","/itinerary","travel-guide","lonelyplanet","expedia","tripadvisor"
+    )
+    if any(term in text for term in travel_terms) or url_contains(*travel_url_snippets):
+        return "lifestyle_travel"
+    # Travel France
+    france_terms = (
+        "france","paris","french","eiffel","louvre","provence","bordeaux","café"
+    )
+    if any(term in text for term in france_terms):
+        return "travel_france"
+    # Travel Japan
+    japan_terms = (
+        "japan","tokyo","kyoto","osaka","japanese","shrine","temple","cherry blossom","sakura"
+    )
+    if any(term in text for term in japan_terms):
+        return "travel_japan"
+    # Maker 3D printing
+    three_d_terms = (
+        "3d print","3d printing","3d-printer","3d-printers","additive manufacturing","filament printer","resin printer","fdm printer","sla printer","bambu lab","prusa","ender 3","gcode","build plate","nozzle","extruder"
+    )
+    three_d_url_snippets = (
+        "/3d-print","/3dprinting","/3d-printer","/additive","3dprinting","all3dp","printables.com","thingiverse","makerworld"
+    )
+    if any(term in text for term in three_d_terms) or url_contains(*three_d_url_snippets):
+        return "maker_3d_printing"
+    # Tech datacenter
     if "tech" in text or any(token in text for token in CATEGORY_KEYWORDS.get("tech", [])):
+        tech_datacenter_terms = ("datacenter", "cloud", "network", "server", "router", "infrastructure")
+        if any(term in text for term in tech_datacenter_terms):
+            return "tech_datacenter"
         tech_hw_terms = ("hardware", "cpu", "gpu", "processor", "motherboard", "ssd", "ram")
         if any(term in text for term in tech_hw_terms):
             return "tech_hardware"
         ai_terms = ("ai", "artificial intelligence", "neural network", "machine learning")
         if any(term in text for term in ai_terms):
             return "tech_ai"
-    # Business reviews/products
+    # Business finance
     if "business" in text or any(token in text for token in CATEGORY_KEYWORDS.get("business", [])):
+        business_finance_terms = ("finance", "market", "economy", "stocks", "investment", "valuation")
+        if any(term in text for term in business_finance_terms):
+            return "business_finance"
         reviews_terms = ("review", "product", "comparison", "gadget", "test", "hands-on")
         if any(term in text for term in reviews_terms):
             return "reviews_products"
+    # Science bio
+    if "science" in text or any(token in text for token in CATEGORY_KEYWORDS.get("science", [])):
+        science_bio_terms = ("dna", "molecule", "neuron", "cell", "biotech", "lab", "medical", "genetic")
+        if any(term in text for term in science_bio_terms):
+            return "science_bio"
     # Maker/entertainment hobbies/creativity
     if "maker" in text or "entertainment" in text or any(token in text for token in CATEGORY_KEYWORDS.get("maker", [])) or any(token in text for token in CATEGORY_KEYWORDS.get("entertainment", [])):
         hobbies_terms = ("hobby", "craft", "creative", "art", "painting", "cooking", "baking")
+        if any(term in text for term in three_d_terms):
+            return "maker_3d_printing"
         if any(term in text for term in hobbies_terms):
             return "hobbies_creativity"
-    # Entertainment home theater
+    # Entertainment subcategories
     if "entertainment" in text or any(token in text for token in CATEGORY_KEYWORDS.get("entertainment", [])):
+        # Lord of the Rings
+        entertainment_lotr_terms = ("lord of the rings", "middle-earth", "frodo", "gandalf", "mordor", "aragorn", "shire")
+        if any(term in text for term in entertainment_lotr_terms):
+            return "entertainment_lordoftherings"
+        # Music
+        entertainment_music_terms = ("music", "song", "album", "band", "concert", "composer", "soundtrack")
+        if any(term in text for term in entertainment_music_terms):
+            return "entertainment_music"
+        # Star Wars
+        entertainment_starwars_terms = ("star wars", "jedi", "lightsaber", "galactic empire", "the force")
+        if any(term in text for term in entertainment_starwars_terms):
+            return "entertainment_starwars"
+        # Harry Potter
+        entertainment_harrypotter_terms = ("harry potter", "hogwarts", "wizard", "magic", "spell")
+        if any(term in text for term in entertainment_harrypotter_terms):
+            return "entertainment_harrypotter"
         home_theater_terms = ("home theater", "projector", "sound system", "av receiver", "dolby", "cinema room")
         if any(term in text for term in home_theater_terms):
             return "home_theater"
@@ -660,7 +837,7 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
                 conference_terms = (
                     "conference", "general conference", "elder", "apostle", "talk", "address", "devotional", "byu", "ensign"
                 )
-                if any(term in text for term in conference_terms) or "study/general-conference" in url_hint:
+                if any(term in text for term in conference_terms):
                     return "spiritual_conference"
                 # Check for style field in analysis
                 style_val = ""
@@ -691,23 +868,77 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
         lowered_topics = " ".join(str(t).lower() for t in topics if t)
+        # Lifestyle/Food
+        food_terms = (
+            "food","recipe","cook","dish","cuisine","baking","restaurant","meal","flavour","dessert"
+        )
+        if any(term in lowered_topics for term in food_terms):
+            return "lifestyle_food"
+        # Lifestyle/Travel
+        travel_terms = (
+            "travel","trip","journey","vacation","wanderlust","adventure","destination","tourism","explore"
+        )
+        if any(term in lowered_topics for term in travel_terms):
+            return "lifestyle_travel"
+        # Travel France
+        france_terms = (
+            "france","paris","french","eiffel","louvre","provence","bordeaux","café"
+        )
+        if any(term in lowered_topics for term in france_terms):
+            return "travel_france"
+        # Travel Japan
+        japan_terms = (
+            "japan","tokyo","kyoto","osaka","japanese","shrine","temple","cherry blossom","sakura"
+        )
+        if any(term in lowered_topics for term in japan_terms):
+            return "travel_japan"
         # --- Custom routing for new templates (topics) ---
+        # Tech datacenter
         if "tech" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("tech", [])):
+            tech_datacenter_terms = ("datacenter", "cloud", "network", "server", "router", "infrastructure")
+            if any(term in lowered_topics for term in tech_datacenter_terms):
+                return "tech_datacenter"
             tech_hw_terms = ("hardware", "cpu", "gpu", "processor", "motherboard", "ssd", "ram")
             if any(term in lowered_topics for term in tech_hw_terms):
                 return "tech_hardware"
             ai_terms = ("ai", "artificial intelligence", "neural network", "machine learning")
             if any(term in lowered_topics for term in ai_terms):
                 return "tech_ai"
+        # Business finance
         if "business" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("business", [])):
+            business_finance_terms = ("finance", "market", "economy", "stocks", "investment", "valuation")
+            if any(term in lowered_topics for term in business_finance_terms):
+                return "business_finance"
             reviews_terms = ("review", "product", "comparison", "gadget", "test", "hands-on")
             if any(term in lowered_topics for term in reviews_terms):
                 return "reviews_products"
+        # Science bio
+        if "science" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("science", [])):
+            science_bio_terms = ("dna", "molecule", "neuron", "cell", "biotech", "lab", "medical", "genetic")
+            if any(term in lowered_topics for term in science_bio_terms):
+                return "science_bio"
+        # Maker/entertainment hobbies/creativity
         if "maker" in lowered_topics or "entertainment" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("maker", [])) or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("entertainment", [])):
             hobbies_terms = ("hobby", "craft", "creative", "art", "painting", "cooking", "baking")
+            if any(term in lowered_topics for term in three_d_terms):
+                return "maker_3d_printing"
             if any(term in lowered_topics for term in hobbies_terms):
                 return "hobbies_creativity"
+        # Entertainment subcategories
         if "entertainment" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("entertainment", [])):
+            # Lord of the Rings
+            entertainment_lotr_terms = ("lord of the rings", "middle-earth", "frodo", "gandalf", "mordor", "aragorn", "shire")
+            if any(term in lowered_topics for term in entertainment_lotr_terms):
+                return "entertainment_lordoftherings"
+            entertainment_music_terms = ("music", "song", "album", "band", "concert", "composer", "soundtrack")
+            if any(term in lowered_topics for term in entertainment_music_terms):
+                return "entertainment_music"
+            entertainment_starwars_terms = ("star wars", "jedi", "lightsaber", "galactic empire", "the force")
+            if any(term in lowered_topics for term in entertainment_starwars_terms):
+                return "entertainment_starwars"
+            entertainment_harrypotter_terms = ("harry potter", "hogwarts", "wizard", "magic", "spell")
+            if any(term in lowered_topics for term in entertainment_harrypotter_terms):
+                return "entertainment_harrypotter"
             home_theater_terms = ("home theater", "projector", "sound system", "av receiver", "dolby", "cinema room")
             if any(term in lowered_topics for term in home_theater_terms):
                 return "home_theater"

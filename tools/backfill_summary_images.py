@@ -229,6 +229,18 @@ async def process_tasks(
             LOGGER.warning("No image generated for %s", task.video_id)
             continue
 
+        prompt_snippet = (metadata.get("prompt") or "").strip()
+        if prompt_snippet:
+            prompt_snippet = prompt_snippet.replace("\n", " ").strip()
+        if prompt_snippet:
+            LOGGER.info(
+                "Prompt (%s/%s): %s%s",
+                metadata.get("template") or "default",
+                metadata.get("prompt_source") or metadata.get("template") or "template",
+                prompt_snippet[:240],
+                "…" if len(prompt_snippet) > 240 else "",
+            )
+
         image_path = Path(metadata["path"])
         if not image_path.exists():
             LOGGER.error("Generated image path missing for %s: %s", task.video_id, image_path)
