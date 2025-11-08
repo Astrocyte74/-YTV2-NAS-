@@ -11,9 +11,9 @@ return None and the caller continues without a generated image.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import os
+import random
 import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -1211,20 +1211,11 @@ def _select_template_key(
     return "default"
 
 
-def _stable_variant_index(template_key: str, content_id: str, count: int) -> int:
-    if count <= 1:
-        return 0
-    seed = f"{template_key}:{content_id or 'content'}"
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-    return int(digest, 16) % count
-
-
 def _resolve_template_variant(template: PromptTemplate, content_id: str) -> Tuple[PromptTemplate, str, Optional[str]]:
     variant_suffix = ""
     variant_key: Optional[str] = None
     if template.variants:
-        idx = _stable_variant_index(template.key, content_id, len(template.variants))
-        choice = template.variants[idx]
+        choice = random.choice(template.variants)
         variant_key = choice.key
         template = replace(
             template,
