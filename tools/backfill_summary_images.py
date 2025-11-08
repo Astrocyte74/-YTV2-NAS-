@@ -98,14 +98,54 @@ def _fetch_candidates(
     conn: psycopg.Connection,
     limit: int,
     only_missing_thumbnail: bool,
+    video_ids: Optional[List[str]] = None,
 ) -> List[TaskItem]:
-    thumbnail_clause = (
-        "AND (c.thumbnail_url IS NULL OR c.thumbnail_url = '')" if only_missing_thumbnail else ""
-    )
-    sql = SUMMARY_SQL.format(thumbnail_filter=thumbnail_clause)
+    if video_ids:
+        placeholders = ", ".join(["%s"] * len(video_ids))
+        sql = (
+            """
+            WITH ranked AS (
+                SELECT
+                    vs.video_id,
+                    vs.variant,
+                    vs.text,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY vs.video_id
+                        ORDER BY vs.created_at DESC
+                    ) AS rn
+                FROM v_latest_summaries vs
+                WHERE vs.video_id IN ("""
+            + placeholders
+            + """)
+            )
+            SELECT
+                c.id,
+                c.video_id,
+                c.title,
+                c.analysis_json,
+                c.subcategories_json,
+                r.text AS summary_text,
+                c.summary_image_url,
+                c.thumbnail_url,
+                c.indexed_at
+            FROM content c
+            LEFT JOIN ranked r
+                ON r.video_id = c.video_id AND r.rn = 1
+            WHERE c.video_id IN ("""
+            + placeholders
+            + """);
+            """
+        )
+        params = tuple(video_ids) * 2
+    else:
+        thumbnail_clause = (
+            "AND (c.thumbnail_url IS NULL OR c.thumbnail_url = '')" if only_missing_thumbnail else ""
+        )
+        sql = SUMMARY_SQL.format(thumbnail_filter=thumbnail_clause)
+        params = {"limit": limit}
 
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(sql, {"limit": limit})
+        cur.execute(sql, params)
         rows = cur.fetchall()
 
     tasks: List[TaskItem] = []
@@ -306,6 +346,12 @@ def parse_args() -> argparse.Namespace:
         default=0.2,
         help="Delay in seconds between uploads (default: 0.2).",
     )
+    parser.add_argument(
+        "--video-id",
+        action="append",
+        dest="video_ids",
+        help="Target specific video_id (can be repeated). When provided, --limit is ignored and only these IDs are processed.",
+    )
     return parser.parse_args()
 
 
@@ -328,7 +374,10 @@ def main() -> int:
         return 1
 
     try:
-        tasks = _fetch_candidates(conn, args.limit, args.only_missing_thumbnail)
+        video_ids = args.video_ids
+        if video_ids:
+            LOGGER.info("Targeted run for %d video_id(s)", len(video_ids))
+        tasks = _fetch_candidates(conn, args.limit, args.only_missing_thumbnail, video_ids)
     except Exception as exc:
         LOGGER.error("Failed to fetch candidates: %s", exc)
         conn.close()
