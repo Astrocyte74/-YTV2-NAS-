@@ -199,6 +199,97 @@ async def process_job(path: Path) -> bool:
             _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = prev_health
 
 
+def _sanitize_id(value: str) -> str:
+    value = value.strip()
+    return value or "unknown"
+
+
+def _queue_has_job(content_id: str) -> bool:
+    if not content_id:
+        return False
+    try:
+        for entry in QUEUE_DIR.glob("*.json"):
+            try:
+                payload = json.loads(entry.read_text())
+            except Exception:
+                continue
+            existing = str((payload.get("content") or {}).get("id") or (payload.get("content") or {}).get("video_id") or "")
+            if existing == content_id:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _seed_prompt_override_jobs(limit: Optional[int] = None) -> int:
+    dsn = os.getenv("DATABASE_URL_POSTGRES_NEW") or os.getenv("DATABASE_URL")
+    if not dsn:
+        return 0
+    try:
+        import psycopg
+    except ImportError:
+        logging.debug("psycopg not available; skipping prompt override seeding")
+        return 0
+
+    sql = """
+        SELECT id,
+               video_id,
+               title,
+               analysis_json->>'summary_image_prompt'            AS prompt,
+               analysis_json->>'summary_image_prompt_last_used'  AS last_used
+          FROM content
+         WHERE COALESCE(trim(analysis_json->>'summary_image_prompt'), '') <> ''
+           AND COALESCE(analysis_json->>'summary_image_prompt', '') <> COALESCE(analysis_json->>'summary_image_prompt_last_used', '')
+         ORDER BY updated_at DESC
+    """
+    params = ()
+    if limit is not None:
+        sql += " LIMIT %s"
+        params = (max(0, int(limit)),)
+
+    seeded = 0
+    try:
+        with psycopg.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall()
+        for row in rows:
+            raw_id, video_id, title, prompt, _ = row
+            prompt = (prompt or "").strip()
+            if not prompt:
+                continue
+            content_id = (raw_id or "").strip() or (f"yt:{_sanitize_id(video_id)}" if video_id and len(video_id) == 11 else f"web:{_sanitize_id(video_id)}")
+            if _queue_has_job(content_id):
+                continue
+            job = {
+                "mode": "summary_image",
+                "reason": "prompt_override",
+                "content": {
+                    "id": content_id,
+                    "video_id": video_id,
+                    "title": title or video_id or content_id,
+                    "metadata": {"title": title or ""},
+                    "summary": {"summary": ""},
+                    "analysis": {"summary_image_prompt": prompt},
+                },
+            }
+            try:
+                QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+                from modules import image_queue
+
+                image_queue.enqueue(job)
+                seeded += 1
+            except Exception as exc:
+                logging.warning("Prompt override enqueue failed for %s: %s", content_id, exc)
+    except Exception as exc:
+        logging.debug("Prompt override scan skipped: %s", exc)
+        return 0
+
+    if seeded:
+        logging.info("Seeded %d prompt override job(s)", seeded)
+    return seeded
+
+
 def drain_once(limit: Optional[int] = None) -> int:
     # Preflight: perform one lightweight health probe; if unreachable, skip all jobs
     try:
@@ -213,6 +304,12 @@ def drain_once(limit: Optional[int] = None) -> int:
     except Exception as _exc:
         logging.info("Image drain: health probe failed; skipping this pass")
         return 0
+
+    try:
+        seed_limit = int(os.getenv("SUMMARY_IMAGE_PROMPT_SEED_LIMIT", "5"))
+    except Exception:
+        seed_limit = 5
+    _seed_prompt_override_jobs(seed_limit if seed_limit > 0 else None)
 
     jobs = sorted(QUEUE_DIR.glob("*.json"))
     if limit is not None:
