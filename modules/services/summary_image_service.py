@@ -671,11 +671,10 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         summary_text = summary_data.get("summary") or summary_data.get("text") or ""
     elif isinstance(summary_data, str):
         summary_text = summary_data
-    if not summary_text:
+    override_prompt = _extract_override_prompt(content)
+    if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
         return None
-
-    override_prompt = _extract_override_prompt(content)
     if override_prompt:
         prompt = override_prompt.strip()
         prompt_source = "override"
