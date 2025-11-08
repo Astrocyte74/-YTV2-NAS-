@@ -246,24 +246,90 @@ class PromptTemplate:
 # Base templates we support today. Additional categories can be appended later
 # without touching the core service code.
 PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
+    "gaming_cinematic": PromptTemplate(
+        key="gaming_cinematic",
+        style_preset="cinematic",
+        prompt_template=(
+            "Dynamic cinematic scene with dramatic lighting, digital armor, glowing UI elements, and particle effects for '{title}'. "
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Rendered as game concept art. No text or logos."
+        ),
+    ),
+    "tech_ai": PromptTemplate(
+        key="tech_ai",
+        style_preset="cinematic_cool",
+        prompt_template=(
+            "Surreal macro composition showing neural networks and human silhouettes merging in luminous data flow for '{title}'. "
+            "Visualize {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use glowing synapses and ethereal lighting. No text."
+        ),
+    ),
+    "science_ecology": PromptTemplate(
+        key="science_ecology",
+        style_preset="watercolor",
+        prompt_template=(
+            "Vivid ecological collage of forests, oceans, and atmosphere for '{title}'. "
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use bioluminescent greens and blues, symbolising regeneration. No text or logos."
+        ),
+    ),
+    "health_mindfulness": PromptTemplate(
+        key="health_mindfulness",
+        style_preset="pastel",
+        prompt_template=(
+            "Abstract light waves and floating shapes symbolizing peace and emotional healing for '{title}'. "
+            "Express {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Rendered in watercolor gradients of mint and lavender. No text or icons."
+        ),
+    ),
+    "history_war": PromptTemplate(
+        key="history_war",
+        style_preset="cinematic",
+        prompt_template=(
+            "Cinematic war montage showing dramatic contrast between chaos and courage for '{title}'. "
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence} "
+            "Rendered with moody, desaturated lighting, smoke, and faint atmospheric haze. No text, weapons, or gore."
+        ),
+    ),
+    "history_modern_conflict": PromptTemplate(
+        key="history_modern_conflict",
+        style_preset="retro_poster",
+        prompt_template=(
+            "Stylized retro poster aesthetic depicting ideological tension and power symbolism for '{title}'. "
+            "Convey {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence} "
+            "Use muted reds, blues, and textured film grain. No faces, flags, or text."
+        ),
+    ),
     "default": PromptTemplate(
         key="default",
         prompt_template=(
-            'Stylized 1:1 summary illustration for "{title}". '
+            'Layered cinematic montage with crisp contrast and depth of field, resembling a magazine editorial photo composite for "{title}". '
             "Capture the core idea: {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Show a cinematic collage of scenes connected to the topic, rich lighting, layered depth. "
-            "No text, no lettering."
+            "{enhanced_sentence}"
+            "Use dynamic lighting, modern gradients, and rich visual depth. No text or lettering anywhere."
         ),
     ),
     "tech": PromptTemplate(
         key="tech",
         style_preset="cinematic_warm",
         prompt_template=(
-            'Stylized 1:1 tech briefing illustration for "{title}". '
+            'Neon-lit macro world of glass circuits and glowing grids, with crisp HDR reflections and subtle motion-blur energy trails for "{title}". '
             "Visualize {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Use a bold cinematic collage with neon accents, glass reflections, and crisp HUD overlays. "
+            "{enhanced_sentence}"
             "No text or logos."
         ),
     ),
@@ -271,10 +337,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="innovation",
         style_preset="cinematic",
         prompt_template=(
-            'Stylized 1:1 innovation collage for "{title}". '
+            'Mixed-media collage merging sketches, prototypes, and digital holograms under dual warm-cool lighting for "{title}". '
             "Blend {headline} across science and technology. "
             "Highlight motifs such as {motifs}. "
-            "Layer luminous circuitry, molecular diagrams, and cosmic gradients with futuristic depth. "
+            "{enhanced_sentence}"
             "No text or logos."
         ),
     ),
@@ -282,10 +348,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="science",
         style_preset="cinematic",
         prompt_template=(
-            'Stylized 1:1 science briefing illustration for "{title}". '
+            'Scientific visualization collage combining fluorescent microscopy and cosmic scale imagery, rendered with crisp diagrammatic overlays for "{title}". '
             "Visualize {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Layer luminous diagrams, molecular structures, and research instrumentation with balanced composition and neutral palette. "
+            "{enhanced_sentence}"
             "No text or equations."
         ),
     ),
@@ -293,10 +359,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="business",
         style_preset="studio",
         prompt_template=(
-            'Stylized 1:1 business insight collage for "{title}". '
+            'Architectural abstraction of commerce: glass towers and dynamic charts fused through isometric perspective and reflective copper tones for "{title}". '
             "Translate {headline} into visuals. "
             "Highlight motifs such as {motifs}. "
-            "Combine skyline silhouettes, data charts, and collaborative workspaces using clean geometry, glass, and chrome materials. "
+            "{enhanced_sentence}"
             "No text or logos."
         ),
     ),
@@ -304,10 +370,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="maker",
         style_preset="illustration",
         prompt_template=(
-            'Stylized 1:1 workshop illustration for "{title}". '
+            'Warm workshop bench covered with sketches, woodgrain textures, and softly lit metallic tools in cinematic macro focus for "{title}". '
             "Turn {headline} into a hands-on scene. "
             "Highlight motifs such as {motifs}. "
-            "Show tools, blueprints, and step-by-step components on a workbench with warm practical lighting and tactile textures. "
+            "{enhanced_sentence}"
             "No text or lettering."
         ),
     ),
@@ -315,10 +381,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="education",
         style_preset="studio",
         prompt_template=(
-            'Stylized 1:1 academic insight illustration for "{title}". '
+            'Abstract visualization of learning: glowing diagrams emerging from open books, rendered in soft natural light and minimalist scholastic design for "{title}". '
             "Translate {headline} into a thoughtful study scene. "
             "Highlight motifs such as {motifs}. "
-            "Show books, chalkboards, diagrams, and study spaces with soft natural light and orderly composition. "
+            "{enhanced_sentence}"
             "No text or lettering."
         ),
     ),
@@ -326,10 +392,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="history",
         style_preset="retro_film",
         prompt_template=(
-            'Stylized 1:1 historical timeline collage for "{title}". '
+            'Cinematic timeline montage blending ancient relics and modern echoes in bronze and indigo hues, illuminated like aged parchment under warm light for "{title}". '
             "Depict {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Blend vintage maps, archival artifacts, and layered silhouettes with aged film grain and sepia tones. "
+            "{enhanced_sentence}"
             "No text or banners."
         ),
     ),
@@ -337,10 +403,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="news",
         style_preset="cinematic_warm",
         prompt_template=(
-            'Stylized 1:1 news briefing illustration for "{title}". '
+            'Photojournalistic collage with strong diagonals, selective red-blue accents, and cinematic press-light contrast evoking urgency for "{title}". '
             "Convey {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Assemble photojournalistic elements—press lights, microphones, city skylines—with bold contrasts and dynamic depth. "
+            "{enhanced_sentence}"
             "No text or captions."
         ),
     ),
@@ -348,10 +414,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="health",
         style_preset="portrait",
         prompt_template=(
-            'Stylized 1:1 wellness illustration for "{title}". '
+            'Organic watercolor abstraction with flowing light and botanical translucency, evoking balance and restoration for "{title}". '
             "Express {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Use calming natural light, abstract body forms, and organic gradients to suggest balance and recovery. "
+            "{enhanced_sentence}"
             "No text or medical icons."
         ),
     ),
@@ -359,10 +425,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="entertainment",
         style_preset="pixar",
         prompt_template=(
-            'Stylized 1:1 entertainment spotlight illustration for "{title}". '
+            'Vivid cinematic spotlight scene with stage haze, vibrant flares, and playful depth of colour celebrating performance for "{title}". '
             "Translate {headline} into stage-ready visuals. "
             "Highlight motifs such as {motifs}. "
-            "Layer spotlights, instruments, film reels, and expressive color bursts with cinematic energy. "
+            "{enhanced_sentence}"
             "No text or logos."
         ),
     ),
@@ -370,10 +436,10 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
         key="sports",
         style_preset="cinematic",
         prompt_template=(
-            'Stylized 1:1 sports highlight illustration for "{title}". '
+            'Dynamic kinetic illustration freezing athletic motion in streaks of light and dust, rendered with high-contrast chiaroscuro and cool-warm energy for "{title}". '
             "Capture {headline}. "
             "Highlight motifs such as {motifs}. "
-            "Freeze dynamic motion trails, stadium lighting, and athletes in action with high-energy contrast and dramatic shadows. "
+            "{enhanced_sentence}"
             "No text or team logos."
         ),
     ),
@@ -415,23 +481,144 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "No figures, no text."
         ),
     ),
+    "spiritual_cosmic": PromptTemplate(
+        key="spiritual_cosmic",
+        style_preset="cinematic_cool",
+        enhance_mode="local",
+        family="spiritual",
+        style_hint="Celestial light and stars",
+        concept_instructions=(
+            "You craft cosmic illustration prompts.\n"
+            "Title: {title}\n"
+            "Key message: {summary_excerpt}\n"
+            "Describe a peaceful celestial scene with glowing light, stars, clouds, or constellations symbolising divine purpose—no figures or text."
+        ),
+        prompt_template=(
+            "{enhanced_sentence} "
+            "Focus on glowing light, celestial gradients, and cosmic calm. No figures, no text."
+        ),
+    ),
+    "spiritual_geometry": PromptTemplate(
+        key="spiritual_geometry",
+        style_preset="studio",
+        enhance_mode="local",
+        family="spiritual",
+        style_hint="Geometric light symbolism",
+        concept_instructions=(
+            "You craft abstract geometric prompts.\n"
+            "Title: {title}\n"
+            "Key message: {summary_excerpt}\n"
+            "Describe an abstract geometric composition symbolising divine order through shapes and light, no people or icons."
+        ),
+        prompt_template=(
+            "{enhanced_sentence} "
+            "Emphasize radiant geometry, harmonious symmetry, and soft gradients of gold and blue. No figures, no text."
+        ),
+    ),
 }
 
 
 def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     text = summary_text.lower()
+    # Heuristic routing for "spiritual" key with style/keyword checks for cosmic/geometry
     for key, keywords in CATEGORY_KEYWORDS.items():
         if any(token in text for token in keywords):
+            # --- Custom logic for entertainment: gaming_cinematic
+            if key == "entertainment":
+                gaming_terms = ("game", "gamer", "rpg", "esport", "console", "controller", "boss fight")
+                if any(term in text for term in gaming_terms):
+                    return "gaming_cinematic"
+            # --- Custom logic for tech: tech_ai
+            if key == "tech":
+                ai_terms = ("ai", "artificial intelligence", "neural network", "machine learning")
+                if any(term in text for term in ai_terms):
+                    return "tech_ai"
+            # --- Custom logic for science: science_ecology
+            if key == "science":
+                ecology_terms = ("ecology", "climate", "environment", "sustainability", "forest", "wildlife", "earth")
+                if any(term in text for term in ecology_terms):
+                    return "science_ecology"
+            # --- Custom logic for health: health_mindfulness
+            if key == "health":
+                mind_terms = ("mental health", "mindfulness", "therapy", "anxiety", "depression", "meditation")
+                if any(term in text for term in mind_terms):
+                    return "health_mindfulness"
             if key == "spiritual":
-                # prefer pastel variant if content feels devotional, fallback to watercolor otherwise
+                # Check for style field in analysis
+                style_val = ""
+                if isinstance(analysis, dict):
+                    style_val = str(analysis.get("style", "")).lower()
+                if "cosmic" in style_val:
+                    return "spiritual_cosmic"
+                if "geometry" in style_val:
+                    return "spiritual_geometry"
+                # Keyword heuristics for cosmic and geometry
+                cosmic_kw = ("heaven", "light", "stars", "celestial", "sky", "eternal", "cosmos")
+                geometry_kw = ("principle", "law", "truth", "order", "structure", "balance", "pattern")
+                if any(kw in text for kw in cosmic_kw):
+                    return "spiritual_cosmic"
+                if any(kw in text for kw in geometry_kw):
+                    return "spiritual_geometry"
                 return "spiritual"
+            if key == "history":
+                # Subcategory detection for history
+                war_keywords = ("ww1", "ww2", "world war", "battle", "revolution", "invasion", "conflict")
+                modern_conflict_keywords = ("cold war", "arms race", "nuclear", "propaganda")
+                if any(wk in text for wk in war_keywords):
+                    return "history_war"
+                if any(mk in text for mk in modern_conflict_keywords):
+                    return "history_modern_conflict"
+                return "history"
             return key
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
         lowered_topics = " ".join(str(t).lower() for t in topics if t)
         for key, keywords in CATEGORY_KEYWORDS.items():
             if any(token in lowered_topics for token in keywords):
-                return "spiritual" if key == "spiritual" else key
+                # --- Custom logic for entertainment: gaming_cinematic
+                if key == "entertainment":
+                    gaming_terms = ("game", "gamer", "rpg", "esport", "console", "controller", "boss fight")
+                    if any(term in lowered_topics for term in gaming_terms):
+                        return "gaming_cinematic"
+                # --- Custom logic for tech: tech_ai
+                if key == "tech":
+                    ai_terms = ("ai", "artificial intelligence", "neural network", "machine learning")
+                    if any(term in lowered_topics for term in ai_terms):
+                        return "tech_ai"
+                # --- Custom logic for science: science_ecology
+                if key == "science":
+                    ecology_terms = ("ecology", "climate", "environment", "sustainability", "forest", "wildlife", "earth")
+                    if any(term in lowered_topics for term in ecology_terms):
+                        return "science_ecology"
+                # --- Custom logic for health: health_mindfulness
+                if key == "health":
+                    mind_terms = ("mental health", "mindfulness", "therapy", "anxiety", "depression", "meditation")
+                    if any(term in lowered_topics for term in mind_terms):
+                        return "health_mindfulness"
+                if key == "spiritual":
+                    style_val = ""
+                    if isinstance(analysis, dict):
+                        style_val = str(analysis.get("style", "")).lower()
+                    if "cosmic" in style_val:
+                        return "spiritual_cosmic"
+                    if "geometry" in style_val:
+                        return "spiritual_geometry"
+                    cosmic_kw = ("heaven", "light", "stars", "celestial", "sky", "eternal", "cosmos")
+                    geometry_kw = ("principle", "law", "truth", "order", "structure", "balance", "pattern")
+                    if any(kw in lowered_topics for kw in cosmic_kw):
+                        return "spiritual_cosmic"
+                    if any(kw in lowered_topics for kw in geometry_kw):
+                        return "spiritual_geometry"
+                    return "spiritual"
+                if key == "history":
+                    war_keywords = ("ww1", "ww2", "world war", "battle", "revolution", "invasion", "conflict")
+                    modern_conflict_keywords = ("cold war", "arms race", "nuclear", "propaganda")
+                    if any(wk in lowered_topics for wk in war_keywords):
+                        return "history_war"
+                    if any(mk in lowered_topics for mk in modern_conflict_keywords):
+                        return "history_modern_conflict"
+                    return "history"
+                return key
     return "default"
 
 

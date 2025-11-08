@@ -32,3 +32,24 @@ Once we have your answers we’ll:
 - align the dashboard buttons with the canonical base URL.
 
 Thanks again—really happy with how the pipeline is shaping up. Shout if you see anything off or want extra metadata for the UI.
+
+## Resetting the Image Pipeline
+
+If you ever need to rebuild all summary images from scratch (new prompts, new templates, etc.):
+
+1. **Remove existing PNGs on the NAS**
+   ```bash
+   docker exec -i youtube-summarizer-bot rm -rf /app/data/exports/images/*
+   ```
+2. **Clear image metadata in Postgres** so every row looks like a fresh target:
+   ```bash
+   docker exec -i youtube-summarizer-bot python3 -c "import os, psycopg\nurl = os.getenv('DATABASE_URL_POSTGRES_NEW') or os.getenv('DATABASE_URL')\nassert url, 'missing DB URL'\nreset_sql = '''\nUPDATE content\n   SET summary_image_url = NULL,\n       analysis_json = COALESCE(analysis_json, '{}'::jsonb)\n                        - 'summary_image_prompt'\n                        - 'summary_image_prompt_last_used'\n                        - 'summary_image_selected_url'\n                        || jsonb_build_object('summary_image_variants', '[]'::jsonb)\n'''\nwith psycopg.connect(url) as conn:\n    with conn.cursor() as cur:\n        cur.execute(reset_sql)\n        conn.commit()\n"
+   ```
+3. **Re-run the image backfill** in manageable batches to regenerate and upload new art: 
+   ```bash
+   docker exec -i youtube-summarizer-bot python3 /app/tools/backfill_summary_images.py --limit 25
+   ```
+4. **Monitor the drain worker** (`drain_image_queue`) to ensure uploads complete and metadata (prompts, variants) appears in Postgres.
+
+Optional: if you only want to regenerate selected video IDs, update their rows instead of the whole table, and supply a CSV of IDs to the backfill script.
+
