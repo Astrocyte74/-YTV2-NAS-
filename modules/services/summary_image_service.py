@@ -919,7 +919,21 @@ def _select_template_key(
     # --- Custom routing for new templates ---
     # Lifestyle/Food
     food_terms = (
-        "food","recipe","cook","dish","cuisine","baking","restaurant","meal","flavour","flavor","dessert","café","cafe"
+        "recipe",
+        "cook",
+        "cooking",
+        "dish",
+        "cuisine",
+        "baking",
+        "bakery",
+        "restaurant",
+        "kitchen",
+        "flavour",
+        "flavor",
+        "dessert",
+        "pastry",
+        "café",
+        "cafe",
     )
     food_url_snippets = (
         "/food","/recipe","/recipes","/cook","/kitchen","/dining","/meal","/cuisine","/baking","bonappetit","foodnetwork","seriouseats","allrecipes","epicurious","tasty.co"
