@@ -43,6 +43,7 @@ os.environ.setdefault("SUMMARY_IMAGE_ENABLED", "1")
 
 LOGGER = logging.getLogger("backfill_summary_images")
 
+IMAGE_MODES = ("ai1", "ai2")
 
 SUMMARY_SQL = """
 WITH ranked AS (
@@ -84,6 +85,45 @@ ORDER BY c.indexed_at DESC
 LIMIT %(limit)s;
 """
 
+SUMMARY_SQL_ANY = """
+WITH ranked AS (
+    SELECT
+        vs.video_id,
+        vs.variant,
+        vs.text,
+        ROW_NUMBER() OVER (
+            PARTITION BY vs.video_id
+            ORDER BY
+                CASE
+                    WHEN vs.variant = 'comprehensive' THEN 1
+                    WHEN vs.variant = 'key-insights' THEN 2
+                    WHEN vs.variant = 'bullet-points' THEN 3
+                    WHEN vs.variant = 'audio' THEN 4
+                    ELSE 5
+                END,
+                vs.created_at DESC
+        ) AS rn
+    FROM v_latest_summaries vs
+)
+SELECT
+    c.id,
+    c.video_id,
+    c.title,
+    c.analysis_json,
+    c.subcategories_json,
+    r.text AS summary_text,
+    c.summary_image_url,
+    c.thumbnail_url,
+    c.indexed_at
+FROM content c
+LEFT JOIN ranked r
+    ON r.video_id = c.video_id AND r.rn = 1
+WHERE 1=1
+    {thumbnail_filter}
+ORDER BY c.indexed_at DESC
+LIMIT %(limit)s;
+"""
+
 
 @dataclass
 class TaskItem:
@@ -94,12 +134,32 @@ class TaskItem:
     indexed_at: Any
 
 
+def _has_ai2_variant(analysis: Dict[str, Any]) -> bool:
+    variants = analysis.get("summary_image_variants")
+    if not isinstance(variants, list):
+        return False
+    for entry in variants:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("image_mode") == "ai2":
+            return True
+        template = (entry.get("template") or "").lower()
+        if template == "ai2_freestyle":
+            return True
+        url = (entry.get("url") or entry.get("relative_path") or "").lower()
+        if url.startswith("ai2_"):
+            return True
+    return False
+
+
 def _fetch_candidates(
     conn: psycopg.Connection,
     limit: int,
     only_missing_thumbnail: bool,
     video_ids: Optional[List[str]] = None,
+    mode: str = "ai1",
 ) -> List[TaskItem]:
+    mode = (mode or "ai1").lower()
     if video_ids:
         placeholders = ", ".join(["%s"] * len(video_ids))
         sql = (
@@ -141,7 +201,10 @@ def _fetch_candidates(
         thumbnail_clause = (
             "AND (c.thumbnail_url IS NULL OR c.thumbnail_url = '')" if only_missing_thumbnail else ""
         )
-        sql = SUMMARY_SQL.format(thumbnail_filter=thumbnail_clause)
+        if mode == "ai2":
+            sql = SUMMARY_SQL_ANY.format(thumbnail_filter=thumbnail_clause)
+        else:
+            sql = SUMMARY_SQL.format(thumbnail_filter=thumbnail_clause)
         params = {"limit": limit}
 
     with conn.cursor(row_factory=dict_row) as cur:
@@ -175,6 +238,10 @@ def _fetch_candidates(
                 analysis = json.loads(analysis)
             except Exception:
                 analysis = {}
+        skip_ai2 = mode == "ai2" and not video_ids and _has_ai2_variant(analysis if isinstance(analysis, dict) else {})
+        if skip_ai2:
+            LOGGER.debug("Skipping %s – AI2 variant already present", row.get("video_id"))
+            continue
 
         tasks.append(
             TaskItem(
@@ -191,6 +258,8 @@ def _fetch_candidates(
 
 async def _generate_image(
     task: TaskItem,
+    *,
+    mode: str,
 ) -> Optional[Dict[str, Any]]:
     payload = {
         "id": task.video_id,
@@ -199,7 +268,7 @@ async def _generate_image(
         "analysis": task.analysis,
     }
     try:
-        metadata = await summary_image_service.maybe_generate_summary_image(payload)
+        metadata = await summary_image_service.maybe_generate_summary_image(payload, mode=mode)
         return metadata
     except Exception as exc:  # pragma: no cover - defensive
         LOGGER.error("Image generation failed for %s: %s", task.video_id, exc)
@@ -211,13 +280,17 @@ def _update_summary_image_metadata(
     video_id: str,
     url: str,
     metadata: Dict[str, Any],
+    *,
+    mode: str,
 ) -> None:
     analysis_blob = None
+    existing_url: Optional[str] = None
     with conn.cursor() as cur:
-        cur.execute("SELECT analysis_json FROM content WHERE video_id=%s", (video_id,))
+        cur.execute("SELECT analysis_json, summary_image_url FROM content WHERE video_id=%s", (video_id,))
         row = cur.fetchone()
         if row:
             analysis_blob = row[0]
+            existing_url = row[1]
     analysis = {}
     if analysis_blob:
         if isinstance(analysis_blob, str):
@@ -230,14 +303,23 @@ def _update_summary_image_metadata(
     variant_entry = metadata.get("analysis_variant")
     if not variant_entry:
         variant_entry = summary_image_service.build_analysis_variant(metadata, url)
+    else:
+        if not variant_entry.get("url"):
+            variant_entry = dict(variant_entry)
+            variant_entry["url"] = url
+        if mode == "ai2":
+            variant_entry = dict(variant_entry)
+            variant_entry["image_mode"] = "ai2"
+    selected_url = url if mode == "ai1" else None
     updated_analysis = summary_image_service.apply_analysis_variant(
         analysis,
         variant_entry,
-        selected_url=url,
+        selected_url=selected_url,
         prompt=metadata.get("prompt"),
         model=metadata.get("model"),
     )
     payload = json.dumps(updated_analysis)
+    new_summary_url = url if mode == "ai1" else (existing_url or "")
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -247,7 +329,7 @@ def _update_summary_image_metadata(
                    updated_at = now()
              WHERE video_id = %s;
             """,
-            (url, payload, video_id),
+            (new_summary_url, payload, video_id),
         )
     conn.commit()
 
@@ -259,12 +341,13 @@ async def process_tasks(
     *,
     dry_run: bool,
     delay_seconds: float,
+    mode: str,
 ) -> None:
     total = len(tasks)
     for idx, task in enumerate(tasks, 1):
         LOGGER.info("(%d/%d) Processing %s", idx, total, task.video_id)
 
-        metadata = await _generate_image(task)
+        metadata = await _generate_image(task, mode=mode)
         if not metadata:
             LOGGER.warning("No image generated for %s", task.video_id)
             continue
@@ -287,7 +370,12 @@ async def process_tasks(
             continue
 
         if dry_run:
-            LOGGER.info("Dry run – would upload %s (template=%s)", image_path, metadata.get("template"))
+            LOGGER.info(
+                "Dry run – would upload %s (template=%s, mode=%s)",
+                image_path,
+                metadata.get("template"),
+                mode,
+            )
             try:
                 image_path.unlink()
             except Exception as exc:
@@ -311,7 +399,7 @@ async def process_tasks(
                 continue
 
             try:
-                _update_summary_image_metadata(conn, task.video_id, summary_image_url, metadata or {})
+                _update_summary_image_metadata(conn, task.video_id, summary_image_url, metadata or {}, mode=mode)
             except Exception as exc:
                 LOGGER.error("Failed to update DB for %s: %s", task.video_id, exc)
                 continue
@@ -347,6 +435,12 @@ def parse_args() -> argparse.Namespace:
         help="Delay in seconds between uploads (default: 0.2).",
     )
     parser.add_argument(
+        "--mode",
+        choices=IMAGE_MODES,
+        default="ai1",
+        help="Image style to generate (ai1=themed, ai2=freestyle).",
+    )
+    parser.add_argument(
         "--video-id",
         action="append",
         dest="video_ids",
@@ -375,9 +469,10 @@ def main() -> int:
 
     try:
         video_ids = args.video_ids
+        mode = args.mode
         if video_ids:
-            LOGGER.info("Targeted run for %d video_id(s)", len(video_ids))
-        tasks = _fetch_candidates(conn, args.limit, args.only_missing_thumbnail, video_ids)
+            LOGGER.info("Targeted run for %d video_id(s) (mode=%s)", len(video_ids), mode)
+        tasks = _fetch_candidates(conn, args.limit, args.only_missing_thumbnail, video_ids, mode)
     except Exception as exc:
         LOGGER.error("Failed to fetch candidates: %s", exc)
         conn.close()
@@ -405,6 +500,7 @@ def main() -> int:
                 conn,
                 dry_run=args.dry_run,
                 delay_seconds=args.delay,
+                mode=mode,
             )
         )
     finally:

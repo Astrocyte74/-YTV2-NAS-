@@ -588,6 +588,32 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             ),
         ],
     ),
+    "ai2_freestyle": PromptTemplate(
+        key="ai2_freestyle",
+        style_preset="cinematic",
+        prompt_template=(
+            "Create an imaginative editorial-style illustration representing '{title}'. "
+            "Capture the essence of {headline} using symbolic storytelling, bold shapes, and expressive lighting. "
+            "{enhanced_sentence}"
+            "No text or logos; focus on mood and creative freedom."
+        ),
+        variants=[
+            PromptVariant(
+                key="surreal_collage",
+                prompt_suffix=" Blend surreal collage elements with layered textures and unexpected juxtapositions.",
+            ),
+            PromptVariant(
+                key="minimal_vector",
+                style_preset="illustration",
+                prompt_suffix=" Render as a clean vector poster with geometric forms and limited colour palette.",
+            ),
+            PromptVariant(
+                key="cinematic_smoke",
+                style_preset="cinematic_dark",
+                prompt_suffix=" Use dramatic chiaroscuro, drifting smoke, and volumetric light for a moody tableau.",
+            ),
+        ],
+    ),
     "science_ecology": PromptTemplate(
         key="science_ecology",
         style_preset="watercolor",
@@ -1387,7 +1413,11 @@ def _pending_job_exists(cid: str) -> bool:
         return False
     return False
 
-async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def maybe_generate_summary_image(
+    content: Dict[str, Any],
+    *,
+    mode: str = "ai1",
+) -> Optional[Dict[str, Any]]:
     """
     Attempt to generate a summary illustration. Returns metadata about the image
     or None if generation is disabled or fails.
@@ -1440,6 +1470,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                 from modules import image_queue
                 job = {
                     "mode": "summary_image",
+                    "image_mode": image_mode,
                     "content": content,
                     "reason": "hub_not_reachable",
                 }
@@ -1460,6 +1491,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
             from modules import image_queue
             job = {
                 "mode": "summary_image",
+                "image_mode": image_mode,
                 "content": content,
                 "reason": f"hub_offline:{str(exc)[:80]}",
             }
@@ -1486,7 +1518,10 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     elif isinstance(summary_data, str):
         summary_text = summary_data
     source_url = _extract_source_url(content, analysis)
-    override_prompt = _extract_override_prompt(content)
+    mode_key = (mode or "ai1").strip().lower()
+    freestyle_mode = mode_key in {"ai2", "freestyle", "ai2_freestyle", "free"}
+    image_mode = "ai2" if freestyle_mode else "ai1"
+    override_prompt = None if freestyle_mode else _extract_override_prompt(content)
     if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
         return None
@@ -1499,7 +1534,10 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         template = PROMPT_TEMPLATES.get("default")
         enhanced_sentence = ""
     else:
-        template_key = _select_template_key(summary_text, analysis, source_url=source_url)
+        if freestyle_mode:
+            template_key = "ai2_freestyle"
+        else:
+            template_key = _select_template_key(summary_text, analysis, source_url=source_url)
         base_template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
         template, variant_suffix, variant_key = _resolve_template_variant(base_template, cid)
 
@@ -1520,11 +1558,12 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         prompt = template.prompt_template.format(**context).strip()
         if variant_suffix:
             prompt = f"{prompt} {variant_suffix}".strip()
-        prompt_source = template.key
+        variant_label = variant_key or "base"
+        prompt_source = f"ai2_{variant_label}" if freestyle_mode else template.key
         logger.info(
             "summary image prompt (template=%s variant=%s): %s",
             template.key,
-            variant_key or "base",
+            variant_label,
             prompt,
         )
 
@@ -1548,6 +1587,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                 from modules import image_queue
                 job = {
                     "mode": "summary_image",
+                    "image_mode": image_mode,
                     "content": content,
                     "reason": f"gen_failed:{str(exc)[:120]}",
                 }
@@ -1570,6 +1610,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
                 from modules import image_queue
                 job = {
                     "mode": "summary_image",
+                    "image_mode": image_mode,
                     "content": content,
                     "reason": "no_image_url",
                 }
@@ -1590,7 +1631,9 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     content_id = content.get("id") or content.get("video_id") or "summary"
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     slug = _sanitize_slug(str(content_id).split(":", 1)[-1])
-    filename = f"{slug}_{timestamp}_{template.key}{template.width}.png"
+    prefix = "AI2_" if image_mode == "ai2" else ""
+    name_token = variant_key or template.key
+    filename = f"{prefix}{slug}_{timestamp}_{name_token}{template.width}.png"
     output_path = EXPORTS_DIR / filename
     output_path.write_bytes(image_bytes)
 
@@ -1606,6 +1649,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         "prompt_source": prompt_source,
         "template": template.key,
         "variant_key": variant_key,
+        "image_mode": image_mode,
         "preset": template.preset,
         "style_preset": template.style_preset,
         "width": template.width,
@@ -1617,6 +1661,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
             {
                 "prompt": prompt,
                 "prompt_source": prompt_source,
+                "image_mode": image_mode,
                 "template": template.key,
                 "preset": template.preset,
                 "style_preset": template.style_preset,
@@ -1702,6 +1747,7 @@ def build_analysis_variant(metadata: Dict[str, Any], public_url: Optional[str]) 
         "prompt": metadata.get("prompt"),
         "prompt_source": metadata.get("prompt_source"),
         "variant_key": metadata.get("variant_key"),
+        "image_mode": metadata.get("image_mode"),
         "template": metadata.get("template"),
         "preset": metadata.get("preset"),
         "style_preset": metadata.get("style_preset"),
@@ -1741,6 +1787,11 @@ def apply_analysis_variant(
     base["summary_image_version"] = version
     if selected_url:
         base["summary_image_selected_url"] = selected_url
+    image_mode = variant_entry.get("image_mode")
+    if image_mode == "ai2":
+        url = variant_entry.get("url")
+        if url:
+            base["summary_image_ai2_url"] = url
     return base
 
 

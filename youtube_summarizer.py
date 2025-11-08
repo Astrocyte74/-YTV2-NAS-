@@ -50,6 +50,13 @@ import requests
 
 from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
 
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+SUMMARY_IMAGE_AI2_ENABLED = _env_flag("SUMMARY_IMAGE_ENABLE_AI2", "true")
+
 # --- Transcript rate limiter / circuit breaker ---
 import time
 
@@ -609,6 +616,28 @@ class YouTubeSummarizer:
                         result["analysis"] = analysis_block
             except Exception as exc:
                 logging.debug("summary image generation skipped: %s", exc)
+            if SUMMARY_IMAGE_AI2_ENABLED:
+                try:
+                    ai2_meta = await summary_image_service.maybe_generate_summary_image(result, mode="ai2")
+                    if ai2_meta:
+                        result["summary_image_ai2"] = ai2_meta
+                        result["summary_image_ai2_url"] = (
+                            ai2_meta.get("public_url")
+                            or ai2_meta.get("relative_path")
+                            or ai2_meta.get("path")
+                        )
+                        variant_entry = ai2_meta.get("analysis_variant")
+                        if variant_entry:
+                            analysis_block = result.get("analysis")
+                            analysis_block = summary_image_service.apply_analysis_variant(
+                                analysis_block,
+                                variant_entry,
+                                prompt=ai2_meta.get("prompt"),
+                                model=ai2_meta.get("model"),
+                            )
+                            result["analysis"] = analysis_block
+                except Exception as exc:
+                    logging.debug("summary ai2 image generation skipped: %s", exc)
 
         return result
 

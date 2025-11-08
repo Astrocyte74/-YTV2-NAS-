@@ -31,6 +31,24 @@ from modules.image_queue import QUEUE_DIR
 from modules.services import summary_image_service
 
 
+def _analysis_has_ai2(analysis: Dict[str, Any]) -> bool:
+    variants = analysis.get("summary_image_variants")
+    if not isinstance(variants, list):
+        return False
+    for entry in variants:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("image_mode") == "ai2":
+            return True
+        template = (entry.get("template") or "").lower()
+        if template == "ai2_freestyle":
+            return True
+        url = (entry.get("url") or entry.get("relative_path") or "").lower()
+        if url.startswith("ai2_"):
+            return True
+    return False
+
+
 def setup_logging() -> None:
     level = os.getenv("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(level=level, format="%(asctime)s - drain_image_queue - %(levelname)s - %(message)s")
@@ -65,6 +83,7 @@ async def process_job(path: Path) -> bool:
     # Skip repeated per-job health probes; a single preflight is done in drain_once.
     _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = "1"
 
+    existing_url: Optional[str] = None
     try:
         job = _load(path)
         if not job:
@@ -75,6 +94,7 @@ async def process_job(path: Path) -> bool:
             logging.error("Invalid job payload (no content dict): %s", path.name)
             _move(path, "failed")
             return False
+        image_mode = str(job.get("image_mode") or "ai1").strip().lower()
         analysis_from_db: Dict[str, Any] = {}
         try:
             vid = str(content.get("id") or content.get("video_id") or "")
@@ -99,8 +119,12 @@ async def process_job(path: Path) -> bool:
                                     analysis_from_db = raw_analysis
                             prompt_from_db = (analysis_from_db.get("summary_image_prompt") or "").strip()
                             prompt_last_used = (analysis_from_db.get("summary_image_prompt_last_used") or "").strip()
-                            if existing_url and (not prompt_from_db or prompt_from_db == prompt_last_used):
+                            if image_mode != "ai2" and existing_url and (not prompt_from_db or prompt_from_db == prompt_last_used):
                                 logging.info("Skip job %s: summary_image_url already set", base_vid)
+                                _move(path, "processed")
+                                return True
+                            if image_mode == "ai2" and _analysis_has_ai2(analysis_from_db):
+                                logging.info("Skip job %s: AI2 variant already set", base_vid)
                                 _move(path, "processed")
                                 return True
                             job_analysis = content.get("analysis")
@@ -119,7 +143,7 @@ async def process_job(path: Path) -> bool:
             logging.debug("DB check skipped: %s", _exc)
 
         # Attempt generation; if hub offline, maybe_generate_summary_image returns None but does not re-enqueue in drain.
-        meta = await summary_image_service.maybe_generate_summary_image(content)
+        meta = await summary_image_service.maybe_generate_summary_image(content, mode=("ai2" if image_mode == "ai2" else "ai1"))
         if not isinstance(meta, dict):
             logging.info("Skipped (hub offline or error): %s", path.name)
             return False
@@ -159,14 +183,23 @@ async def process_job(path: Path) -> bool:
                             variant_entry = meta.get("analysis_variant")
                             if not variant_entry:
                                 variant_entry = summary_image_service.build_analysis_variant(meta, summary_image_url)
+                            else:
+                                if not variant_entry.get("url"):
+                                    variant_entry = dict(variant_entry)
+                                    variant_entry["url"] = summary_image_url
+                                if image_mode == "ai2":
+                                    variant_entry = dict(variant_entry)
+                                    variant_entry["image_mode"] = "ai2"
+                            selected_url = summary_image_url if image_mode != "ai2" else None
                             updated_analysis = summary_image_service.apply_analysis_variant(
                                 analysis_from_db,
                                 variant_entry,
-                                selected_url=summary_image_url,
+                                selected_url=selected_url,
                                 prompt=meta.get("prompt"),
                                 model=meta.get("model"),
                             )
                             analysis_payload = json.dumps(updated_analysis)
+                            target_url = summary_image_url if image_mode != "ai2" else existing_url
                             with psycopg.connect(dsn) as _conn:
                                 with _conn.cursor() as _cur:
                                     _cur.execute(
@@ -177,10 +210,10 @@ async def process_job(path: Path) -> bool:
                                                updated_at=now()
                                          WHERE video_id=%s
                                         """,
-                                        (summary_image_url, analysis_payload, vid),
+                                        (target_url, analysis_payload, vid),
                                     )
                                     _conn.commit()
-                            logging.info("Updated DB summary_image_url for %s", vid)
+                            logging.info("Updated DB summary_image metadata for %s", vid)
                     except Exception as db_exc:
                         logging.warning("DB update for summary_image_url failed: %s", db_exc)
             except Exception as exc:

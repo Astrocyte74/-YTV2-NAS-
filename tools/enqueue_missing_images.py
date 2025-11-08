@@ -90,7 +90,7 @@ def main() -> int:
             skipped_have += 1
             continue
         payload = extract_content_payload(report)
-        job = {"mode": "summary_image", "content": payload, "reason": "missing_image"}
+        job = {"mode": "summary_image", "image_mode": "ai1", "content": payload, "reason": "missing_image"}
         image_queue.enqueue(job)
         enqueued += 1
 
@@ -100,4 +100,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
