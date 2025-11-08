@@ -11,13 +11,14 @@ return None and the caller continues without a generated image.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -221,6 +222,17 @@ CATEGORY_KEYWORDS: Dict[str, List[str]] = {
     ],
 }
 
+@dataclass
+class PromptVariant:
+    key: str
+    prompt_template: Optional[str] = None
+    prompt_suffix: Optional[str] = None
+    style_preset: Optional[str] = None
+    preset: Optional[str] = None
+    enhance_mode: Optional[str] = None
+    style_hint: Optional[str] = None
+    concept_instructions: Optional[str] = None
+
 
 @dataclass
 class PromptTemplate:
@@ -233,6 +245,7 @@ class PromptTemplate:
     style_hint: Optional[str] = None
     family: Optional[str] = None
     concept_instructions: Optional[str] = None
+    variants: List[PromptVariant] = field(default_factory=list)
     prompt_template: str = (
         'Stylized 1:1 summary illustration for "{title}". '
         "Capture the core idea: {headline}. "
@@ -271,6 +284,17 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "Depict {headline}. Highlight motifs such as {motifs}. {enhanced_sentence} "
             "Use warm skies, soft haze, and gentle color grading to evoke wanderlust. No text or signs."
         ),
+        variants=[
+            PromptVariant(
+                key="coastal_sunrise",
+                prompt_suffix=" Highlight sunrise peach light over coastal cliffs with long-lens compression and atmospheric haze.",
+            ),
+            PromptVariant(
+                key="urban_blue_hour",
+                style_preset="cinematic_dark",
+                prompt_suffix=" Focus on city streets at blue hour with neon reflections on wet pavement and light trails.",
+            ),
+        ],
     ),
     "travel_france": PromptTemplate(
         key="travel_france",
@@ -312,6 +336,22 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence}"
             " Use sharp contrasts, metallic accents, and vibrant color gradients. No text or logos."
         ),
+        variants=[
+            PromptVariant(
+                key="night_market",
+                style_preset="cinematic_dark",
+                prompt_suffix=" Frame luminous skyscrapers at night with neon market tickers reflected across glass surfaces.",
+            ),
+            PromptVariant(
+                key="sunrise_boardroom",
+                style_preset="cinematic_warm",
+                prompt_suffix=" Bathe translucent charts in sunrise golds and rose tones, hinting at executive boardrooms.",
+            ),
+            PromptVariant(
+                key="holographic_dashboard",
+                prompt_suffix=" Introduce holographic dashboards suspended in mid-air with cool cyan accents and floating data glyphs.",
+            ),
+        ],
     ),
     "science_bio": PromptTemplate(
         key="science_bio",
@@ -384,6 +424,22 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence}"
             " Use glowing accent lights and crisp depth of field. No text or branding."
         ),
+        variants=[
+            PromptVariant(
+                key="macro_copper",
+                prompt_suffix=" Emphasize copper and amber reflections with cinematic lens flares and razor-thin depth of field.",
+            ),
+            PromptVariant(
+                key="blueprint_azure",
+                style_preset="cinematic_cool",
+                prompt_suffix=" Overlay translucent blueprint schematics and electric-blue rim lights to suggest engineering precision.",
+            ),
+            PromptVariant(
+                key="vaporwave_magenta",
+                style_preset="cinematic",
+                prompt_suffix=" Flood the scene with magenta/teal vaporwave gradients and suspended dust particles for retro-futuristic energy.",
+            ),
+        ],
     ),
     "reviews_products": PromptTemplate(
         key="reviews_products",
@@ -503,6 +559,17 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence}"
             "Use modern lighting, balanced composition, and subtle atmosphere. No text or lettering anywhere."
         ),
+        variants=[
+            PromptVariant(
+                key="prism_warm",
+                prompt_suffix=" Lean into warm amber rim lights with prismatic glass shards to convey optimism.",
+            ),
+            PromptVariant(
+                key="noir_contrast",
+                style_preset="cinematic_dark",
+                prompt_suffix=" Use high-contrast chiaroscuro with cool cyan accents for a more dramatic tone.",
+            ),
+        ],
     ),
     "tech": PromptTemplate(
         key="tech",
@@ -568,6 +635,16 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence}"
             "Show glowing nozzle light, translucent filament spools, and precise mechanical motion. No people, no text."
         ),
+        variants=[
+            PromptVariant(
+                key="filament_macro",
+                prompt_suffix=" Zoom close on the molten filament bead, suspended particles, and spark-like reflections.",
+            ),
+            PromptVariant(
+                key="workspace_wide",
+                prompt_suffix=" Pull back to show the printer on a tidy workbench with labelled tools and colorful filament racks.",
+            ),
+        ],
     ),
     "education": PromptTemplate(
         key="education",
@@ -689,6 +766,17 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence} "
             "Focus on glowing light, celestial gradients, and cosmic calm. No figures, no text."
         ),
+        variants=[
+            PromptVariant(
+                key="radiant_starscape",
+                prompt_suffix=" Scatter radiant constellations and golden dust streams across deep midnight blues.",
+            ),
+            PromptVariant(
+                key="nebula_glow",
+                style_preset="cinematic",
+                prompt_suffix=" Swirl magenta and cyan nebula clouds with subtle aurora ribbons encircling the focal light.",
+            ),
+        ],
     ),
     "spiritual_geometry": PromptTemplate(
         key="spiritual_geometry",
@@ -706,6 +794,16 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
             "{enhanced_sentence} "
             "Emphasize radiant geometry, harmonious symmetry, and soft gradients of gold and blue. No figures, no text."
         ),
+        variants=[
+            PromptVariant(
+                key="golden_ratio",
+                prompt_suffix=" Arrange golden-ratio arcs and concentric halos in matte gold over deep indigo background.",
+            ),
+            PromptVariant(
+                key="crystal_grid",
+                prompt_suffix=" Form crystalline lattices and prism-like beams that intersect to suggest divine order.",
+            ),
+        ],
     ),
 }
 
@@ -1022,6 +1120,34 @@ def _select_template_key(
     return "default"
 
 
+def _stable_variant_index(template_key: str, content_id: str, count: int) -> int:
+    if count <= 1:
+        return 0
+    seed = f"{template_key}:{content_id or 'content'}"
+    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
+    return int(digest, 16) % count
+
+
+def _resolve_template_variant(template: PromptTemplate, content_id: str) -> Tuple[PromptTemplate, str, Optional[str]]:
+    variant_suffix = ""
+    variant_key: Optional[str] = None
+    if template.variants:
+        idx = _stable_variant_index(template.key, content_id, len(template.variants))
+        choice = template.variants[idx]
+        variant_key = choice.key
+        template = replace(
+            template,
+            style_preset=choice.style_preset or template.style_preset,
+            preset=choice.preset or template.preset,
+            enhance_mode=choice.enhance_mode or template.enhance_mode,
+            style_hint=choice.style_hint or template.style_hint,
+            concept_instructions=choice.concept_instructions or template.concept_instructions,
+            prompt_template=choice.prompt_template or template.prompt_template,
+        )
+        variant_suffix = (choice.prompt_suffix or "").strip()
+    return template, variant_suffix, variant_key
+
+
 def _summary_excerpt(summary_text: str, limit: int = 400) -> str:
     clean = re.sub(r"\s+", " ", summary_text).strip()
     return clean[:limit]
@@ -1253,6 +1379,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         analysis = content.get("analysis_json")
         if not isinstance(analysis, dict):
             analysis = {}
+    cid = str(content.get("id") or content.get("video_id") or "")
     summary_text = ""
     if isinstance(summary_data, dict):
         summary_text = summary_data.get("summary") or summary_data.get("text") or ""
@@ -1263,6 +1390,8 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
     if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
         return None
+    variant_key: Optional[str] = None
+    variant_suffix = ""
     if override_prompt:
         prompt = override_prompt.strip()
         prompt_source = "override"
@@ -1271,7 +1400,8 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         enhanced_sentence = ""
     else:
         template_key = _select_template_key(summary_text, analysis, source_url=source_url)
-        template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
+        base_template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
+        template, variant_suffix, variant_key = _resolve_template_variant(base_template, cid)
 
         headline = _first_sentence(summary_text)
         topics = _top_topics(analysis, summary_text)
@@ -1288,8 +1418,15 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         context["enhanced_sentence"] = (enhanced_sentence or "").strip()
 
         prompt = template.prompt_template.format(**context).strip()
+        if variant_suffix:
+            prompt = f"{prompt} {variant_suffix}".strip()
         prompt_source = template.key
-        logger.info("summary image prompt (template=%s): %s", template.key, prompt)
+        logger.info(
+            "summary image prompt (template=%s variant=%s): %s",
+            template.key,
+            variant_key or "base",
+            prompt,
+        )
 
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1368,6 +1505,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         "prompt": prompt,
         "prompt_source": prompt_source,
         "template": template.key,
+        "variant_key": variant_key,
         "preset": template.preset,
         "style_preset": template.style_preset,
         "width": template.width,
@@ -1449,7 +1587,7 @@ def _text_has_term(text: str, term: str) -> bool:
         return False
     text = text or ""
     if all(ch.isalpha() for ch in term):
-        pattern = rf"\\b{re.escape(term)}\\b"
+        pattern = rf"\b{re.escape(term)}\b"
         return re.search(pattern, text) is not None
     return term in text
 
@@ -1463,6 +1601,7 @@ def build_analysis_variant(metadata: Dict[str, Any], public_url: Optional[str]) 
         "url": public_url or metadata.get("relative_path") or metadata.get("path"),
         "prompt": metadata.get("prompt"),
         "prompt_source": metadata.get("prompt_source"),
+        "variant_key": metadata.get("variant_key"),
         "template": metadata.get("template"),
         "preset": metadata.get("preset"),
         "style_preset": metadata.get("style_preset"),
