@@ -710,14 +710,42 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
 }
 
 
-def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
-    text = summary_text.lower()
+def _select_template_key(
+    summary_text: str,
+    analysis: Dict[str, Any],
+    *,
+    source_url: Optional[str] = None,
+) -> str:
+    analysis = analysis or {}
+    text = (summary_text or "").lower()
+
+    source_hint = (source_url or "").strip()
+    if not source_hint and isinstance(analysis, dict):
+        for key in ("source_url", "canonical_url", "origin_url", "url"):
+            candidate = analysis.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                source_hint = candidate.strip()
+                break
+    url = source_hint.lower()
+
+    def url_contains(*snippets: str) -> bool:
+        return bool(url) and any(snippet and snippet in url for snippet in snippets)
+
+    if url_contains(
+        "churchofjesuschrist.org/study/general-conference",
+        "churchofjesuschrist.org/general-conference",
+    ):
+        return "spiritual_conference"
+
     # --- Custom routing for new templates ---
     # Lifestyle/Food
     food_terms = (
-        "food","recipe","cook","dish","cuisine","baking","restaurant","meal","flavour","dessert"
+        "food","recipe","cook","dish","cuisine","baking","restaurant","meal","flavour","flavor","dessert","café","cafe"
     )
-    if any(term in text for term in food_terms):
+    food_url_snippets = (
+        "/food","/recipe","/recipes","/cook","/kitchen","/dining","/meal","/cuisine","/baking","bonappetit","foodnetwork","seriouseats","allrecipes","epicurious","tasty.co"
+    )
+    if any(term in text for term in food_terms) or url_contains(*food_url_snippets):
         return "lifestyle_food"
     # Lifestyle/Travel
     travel_terms = (
@@ -730,15 +758,21 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
         return "lifestyle_travel"
     # Travel France
     france_terms = (
-        "france","paris","french","eiffel","louvre","provence","bordeaux","café"
+        "france","paris","french","eiffel","louvre","provence","bordeaux","café","cafe","versailles","lyon"
     )
-    if any(term in text for term in france_terms):
+    france_url_snippets = (
+        "france","/fr/","/france","paris","provence","bordeaux","versailles","lyon","normandy"
+    )
+    if any(term in text for term in france_terms) or url_contains(*france_url_snippets):
         return "travel_france"
     # Travel Japan
     japan_terms = (
-        "japan","tokyo","kyoto","osaka","japanese","shrine","temple","cherry blossom","sakura"
+        "japan","tokyo","kyoto","osaka","japanese","shrine","temple","cherry blossom","sakura","nara","hokkaido"
     )
-    if any(term in text for term in japan_terms):
+    japan_url_snippets = (
+        "japan","/jp/","/japan",".jp/","tokyo","kyoto","osaka","sapporo","nara","hokkaido"
+    )
+    if any(term in text for term in japan_terms) or url_contains(*japan_url_snippets):
         return "travel_japan"
     # Maker 3D printing
     three_d_terms = (
@@ -868,28 +902,12 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
         lowered_topics = " ".join(str(t).lower() for t in topics if t)
-        # Lifestyle/Food
-        food_terms = (
-            "food","recipe","cook","dish","cuisine","baking","restaurant","meal","flavour","dessert"
-        )
         if any(term in lowered_topics for term in food_terms):
             return "lifestyle_food"
-        # Lifestyle/Travel
-        travel_terms = (
-            "travel","trip","journey","vacation","wanderlust","adventure","destination","tourism","explore"
-        )
         if any(term in lowered_topics for term in travel_terms):
             return "lifestyle_travel"
-        # Travel France
-        france_terms = (
-            "france","paris","french","eiffel","louvre","provence","bordeaux","café"
-        )
         if any(term in lowered_topics for term in france_terms):
             return "travel_france"
-        # Travel Japan
-        japan_terms = (
-            "japan","tokyo","kyoto","osaka","japanese","shrine","temple","cherry blossom","sakura"
-        )
         if any(term in lowered_topics for term in japan_terms):
             return "travel_japan"
         # --- Custom routing for new templates (topics) ---
@@ -1240,6 +1258,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         summary_text = summary_data.get("summary") or summary_data.get("text") or ""
     elif isinstance(summary_data, str):
         summary_text = summary_data
+    source_url = _extract_source_url(content, analysis)
     override_prompt = _extract_override_prompt(content)
     if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
@@ -1251,7 +1270,7 @@ async def maybe_generate_summary_image(content: Dict[str, Any]) -> Optional[Dict
         template = PROMPT_TEMPLATES.get("default")
         enhanced_sentence = ""
     else:
-        template_key = _select_template_key(summary_text, analysis)
+        template_key = _select_template_key(summary_text, analysis, source_url=source_url)
         template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
 
         headline = _first_sentence(summary_text)
@@ -1400,6 +1419,27 @@ def _extract_override_prompt(content: Dict[str, Any]) -> Optional[str]:
     prompt = content.get("summary_image_prompt")
     if isinstance(prompt, str) and prompt.strip():
         return prompt.strip()
+    return None
+
+
+def _extract_source_url(content: Dict[str, Any], analysis: Optional[Dict[str, Any]]) -> Optional[str]:
+    metadata = _coerce_dict(content.get("metadata"))
+    analysis_dict = analysis if isinstance(analysis, dict) else {}
+    candidates = [
+        content.get("source_url"),
+        content.get("url"),
+        content.get("video_url"),
+        metadata.get("source_url"),
+        metadata.get("url"),
+        analysis_dict.get("source_url"),
+        analysis_dict.get("canonical_url"),
+        analysis_dict.get("origin_url"),
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            trimmed = candidate.strip()
+            if trimmed:
+                return trimmed
     return None
 
 
