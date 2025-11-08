@@ -246,6 +246,78 @@ class PromptTemplate:
 # Base templates we support today. Additional categories can be appended later
 # without touching the core service code.
 PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
+    "spiritual_conference": PromptTemplate(
+        key="spiritual_conference",
+        style_preset="cinematic_warm",
+        enhance_mode="local",
+        family="spiritual",
+        style_hint="Warm conference reverence",
+        concept_instructions=(
+            "You craft cinematic prompts evoking a sacred gathering.\n"
+            "Title: {title}\n"
+            "Key message: {summary_excerpt}\n"
+            "Describe a warm, reverent interior scene suggesting a spiritual conference or sacred assembly—soft stage lighting, golden tones, light through windows, or rays from above. Subtle architectural hints like a pulpit, hall, or temple-inspired geometry may appear but not literal depictions. No people, no text, no overt religious symbols."
+        ),
+        prompt_template=(
+            "{enhanced_sentence} Rendered in cinematic warm tones with diffused golden lighting and a calm atmosphere. Allow temple-inspired geometry or sacred architectural light motifs, but avoid literal structures or crosses. No figures, lettering, or icons."
+        ),
+    ),
+    # --- New templates ---
+    "tech_hardware": PromptTemplate(
+        key="tech_hardware",
+        style_preset="studio",
+        prompt_template=(
+            "Studio-lit macro photo of computer components—circuits, chips, cables—rendered with precise reflections and metallic microtextures for '{title}'. "
+            "Visualize {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use glowing accent lights and crisp depth of field. No text or branding."
+        ),
+    ),
+    "reviews_products": PromptTemplate(
+        key="reviews_products",
+        style_preset="studio",
+        prompt_template=(
+            "Elegant studio product composition under soft key lighting for '{title}'. "
+            "Depict {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Emphasize materials, contours, and reflections with minimal background. No logos or packaging."
+        ),
+    ),
+    "hobbies_creativity": PromptTemplate(
+        key="hobbies_creativity",
+        style_preset="illustration",
+        prompt_template=(
+            "Warm tabletop scene of creative tools—brushes, notebooks, crafts—lit with golden hour tones and tactile textures for '{title}'. "
+            "Express {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " No people or text."
+        ),
+    ),
+    "home_theater": PromptTemplate(
+        key="home_theater",
+        style_preset="cinematic_dark",
+        prompt_template=(
+            "Dark cinematic interior scene with glowing projector light, lens flares, and ambient neon reflections for '{title}'. "
+            "Capture {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " No logos, faces, or text."
+        ),
+    ),
+    "vlog_personal": PromptTemplate(
+        key="vlog_personal",
+        style_preset="portrait",
+        prompt_template=(
+            "Soft-focus aesthetic of an everyday moment framed with natural light for '{title}'. "
+            "Express {headline}. "
+            "Highlight motifs such as {motifs}. "
+            "{enhanced_sentence}"
+            " Use shallow depth of field to suggest personality and reflection. No text or direct portraits."
+        ),
+    ),
     "gaming_cinematic": PromptTemplate(
         key="gaming_cinematic",
         style_preset="cinematic",
@@ -520,7 +592,47 @@ PROMPT_TEMPLATES: Dict[str, PromptTemplate] = {
 
 def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     text = summary_text.lower()
-    # Heuristic routing for "spiritual" key with style/keyword checks for cosmic/geometry
+    url_hint = ""
+    if isinstance(analysis, dict):
+        url_hint = str(
+            analysis.get("canonical_url")
+            or analysis.get("url")
+            or analysis.get("source_url")
+            or ""
+        ).lower()
+    # --- Custom routing for new templates ---
+    # Tech hardware
+    if "tech" in text or any(token in text for token in CATEGORY_KEYWORDS.get("tech", [])):
+        tech_hw_terms = ("hardware", "cpu", "gpu", "processor", "motherboard", "ssd", "ram")
+        if any(term in text for term in tech_hw_terms):
+            return "tech_hardware"
+        ai_terms = ("ai", "artificial intelligence", "neural network", "machine learning")
+        if any(term in text for term in ai_terms):
+            return "tech_ai"
+    # Business reviews/products
+    if "business" in text or any(token in text for token in CATEGORY_KEYWORDS.get("business", [])):
+        reviews_terms = ("review", "product", "comparison", "gadget", "test", "hands-on")
+        if any(term in text for term in reviews_terms):
+            return "reviews_products"
+    # Maker/entertainment hobbies/creativity
+    if "maker" in text or "entertainment" in text or any(token in text for token in CATEGORY_KEYWORDS.get("maker", [])) or any(token in text for token in CATEGORY_KEYWORDS.get("entertainment", [])):
+        hobbies_terms = ("hobby", "craft", "creative", "art", "painting", "cooking", "baking")
+        if any(term in text for term in hobbies_terms):
+            return "hobbies_creativity"
+    # Entertainment home theater
+    if "entertainment" in text or any(token in text for token in CATEGORY_KEYWORDS.get("entertainment", [])):
+        home_theater_terms = ("home theater", "projector", "sound system", "av receiver", "dolby", "cinema room")
+        if any(term in text for term in home_theater_terms):
+            return "home_theater"
+        gaming_terms = ("game", "gamer", "rpg", "esport", "console", "controller", "boss fight")
+        if any(term in text for term in gaming_terms):
+            return "gaming_cinematic"
+    # General/personal vlog
+    if "general" in text or "personal" in text:
+        vlog_terms = ("vlog", "daily life", "personal", "reflection", "journal", "thoughts")
+        if any(term in text for term in vlog_terms):
+            return "vlog_personal"
+    # Fallback to original category heuristics
     for key, keywords in CATEGORY_KEYWORDS.items():
         if any(token in text for token in keywords):
             # --- Custom logic for entertainment: gaming_cinematic
@@ -544,6 +656,12 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
                 if any(term in text for term in mind_terms):
                     return "health_mindfulness"
             if key == "spiritual":
+                # Conference detection
+                conference_terms = (
+                    "conference", "general conference", "elder", "apostle", "talk", "address", "devotional", "byu", "ensign"
+                )
+                if any(term in text for term in conference_terms) or "study/general-conference" in url_hint:
+                    return "spiritual_conference"
                 # Check for style field in analysis
                 style_val = ""
                 if isinstance(analysis, dict):
@@ -573,6 +691,33 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
     topics = analysis.get("key_topics") if isinstance(analysis, dict) else None
     if isinstance(topics, list):
         lowered_topics = " ".join(str(t).lower() for t in topics if t)
+        # --- Custom routing for new templates (topics) ---
+        if "tech" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("tech", [])):
+            tech_hw_terms = ("hardware", "cpu", "gpu", "processor", "motherboard", "ssd", "ram")
+            if any(term in lowered_topics for term in tech_hw_terms):
+                return "tech_hardware"
+            ai_terms = ("ai", "artificial intelligence", "neural network", "machine learning")
+            if any(term in lowered_topics for term in ai_terms):
+                return "tech_ai"
+        if "business" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("business", [])):
+            reviews_terms = ("review", "product", "comparison", "gadget", "test", "hands-on")
+            if any(term in lowered_topics for term in reviews_terms):
+                return "reviews_products"
+        if "maker" in lowered_topics or "entertainment" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("maker", [])) or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("entertainment", [])):
+            hobbies_terms = ("hobby", "craft", "creative", "art", "painting", "cooking", "baking")
+            if any(term in lowered_topics for term in hobbies_terms):
+                return "hobbies_creativity"
+        if "entertainment" in lowered_topics or any(token in lowered_topics for token in CATEGORY_KEYWORDS.get("entertainment", [])):
+            home_theater_terms = ("home theater", "projector", "sound system", "av receiver", "dolby", "cinema room")
+            if any(term in lowered_topics for term in home_theater_terms):
+                return "home_theater"
+            gaming_terms = ("game", "gamer", "rpg", "esport", "console", "controller", "boss fight")
+            if any(term in lowered_topics for term in gaming_terms):
+                return "gaming_cinematic"
+        if "general" in lowered_topics or "personal" in lowered_topics:
+            vlog_terms = ("vlog", "daily life", "personal", "reflection", "journal", "thoughts")
+            if any(term in lowered_topics for term in vlog_terms):
+                return "vlog_personal"
         for key, keywords in CATEGORY_KEYWORDS.items():
             if any(token in lowered_topics for token in keywords):
                 # --- Custom logic for entertainment: gaming_cinematic
@@ -596,6 +741,12 @@ def _select_template_key(summary_text: str, analysis: Dict[str, Any]) -> str:
                     if any(term in lowered_topics for term in mind_terms):
                         return "health_mindfulness"
                 if key == "spiritual":
+                    # Conference detection in topics
+                    conference_terms = (
+                        "conference", "general conference", "elder", "apostle", "talk", "address", "devotional", "byu", "ensign"
+                    )
+                    if any(term in lowered_topics for term in conference_terms):
+                        return "spiritual_conference"
                     style_val = ""
                     if isinstance(analysis, dict):
                         style_val = str(analysis.get("style", "")).lower()
