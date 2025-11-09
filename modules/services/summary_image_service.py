@@ -1435,6 +1435,10 @@ async def maybe_generate_summary_image(
     except Exception:
         pass
 
+    mode_key = (mode or "ai1").strip().lower()
+    freestyle_mode = mode_key in {"ai2", "freestyle", "ai2_freestyle", "free"}
+    image_mode = "ai2" if freestyle_mode else "ai1"
+
     # Cooldown to avoid repeated generations for the same content id
     if image_mode != "ai2":
         try:
@@ -1519,9 +1523,6 @@ async def maybe_generate_summary_image(
     elif isinstance(summary_data, str):
         summary_text = summary_data
     source_url = _extract_source_url(content, analysis)
-    mode_key = (mode or "ai1").strip().lower()
-    freestyle_mode = mode_key in {"ai2", "freestyle", "ai2_freestyle", "free"}
-    image_mode = "ai2" if freestyle_mode else "ai1"
     override_prompt = None if freestyle_mode else _extract_override_prompt(content)
     if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
