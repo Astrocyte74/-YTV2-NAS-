@@ -79,7 +79,7 @@ FROM content c
 LEFT JOIN ranked r
     ON r.video_id = c.video_id AND r.rn = 1
 WHERE
-    (c.summary_image_url IS NULL OR c.summary_image_url = '')
+    {image_clause}
     {thumbnail_filter}
 ORDER BY c.indexed_at DESC
 LIMIT %(limit)s;
@@ -118,7 +118,8 @@ SELECT
 FROM content c
 LEFT JOIN ranked r
     ON r.video_id = c.video_id AND r.rn = 1
-WHERE 1=1
+WHERE
+    {image_clause}
     {thumbnail_filter}
 ORDER BY c.indexed_at DESC
 LIMIT %(limit)s;
@@ -160,6 +161,7 @@ def _fetch_candidates(
     mode: str = "ai1",
 ) -> List[TaskItem]:
     mode = (mode or "ai1").lower()
+    image_clause = "1=1" if mode == "ai2" else "(c.summary_image_url IS NULL OR c.summary_image_url = '')"
     if video_ids:
         placeholders = ", ".join(["%s"] * len(video_ids))
         sql = (
@@ -201,10 +203,8 @@ def _fetch_candidates(
         thumbnail_clause = (
             "AND (c.thumbnail_url IS NULL OR c.thumbnail_url = '')" if only_missing_thumbnail else ""
         )
-        if mode == "ai2":
-            sql = SUMMARY_SQL_ANY.format(thumbnail_filter=thumbnail_clause)
-        else:
-            sql = SUMMARY_SQL.format(thumbnail_filter=thumbnail_clause)
+        sql_template = SUMMARY_SQL_ANY if mode == "ai2" else SUMMARY_SQL
+        sql = sql_template.format(image_clause=image_clause, thumbnail_filter=thumbnail_clause)
         params = {"limit": limit}
 
     with conn.cursor(row_factory=dict_row) as cur:
