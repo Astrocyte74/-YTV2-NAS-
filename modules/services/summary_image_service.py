@@ -1436,17 +1436,18 @@ async def maybe_generate_summary_image(
         pass
 
     # Cooldown to avoid repeated generations for the same content id
-    try:
-        import time as _t
-        cid = str(content.get("id") or content.get("video_id") or "")
-        now = _t.time()
-        last = _LAST_IMAGE_GEN.get(cid, 0.0)
-        cooldown = float(os.getenv("SUMMARY_IMAGE_COOLDOWN_SECONDS", "900") or "900")  # 15 min default
-        if cid and (now - last) < cooldown:
-            logger.info("summary image skipped: cooldown active for %s (%.0fs remaining)", cid, cooldown - (now - last))
-            return None
-    except Exception:
-        pass
+    if image_mode != "ai2":
+        try:
+            import time as _t
+            cid = str(content.get("id") or content.get("video_id") or "")
+            now = _t.time()
+            last = _LAST_IMAGE_GEN.get(cid, 0.0)
+            cooldown = float(os.getenv("SUMMARY_IMAGE_COOLDOWN_SECONDS", "900") or "900")  # 15 min default
+            if cid and (now - last) < cooldown:
+                logger.info("summary image skipped: cooldown active for %s (%.0fs remaining)", cid, cooldown - (now - last))
+                return None
+        except Exception:
+            pass
 
     tts_base = (os.getenv("TTSHUB_API_BASE") or "").strip()
     if not tts_base:
