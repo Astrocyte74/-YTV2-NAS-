@@ -1523,7 +1523,7 @@ async def maybe_generate_summary_image(
     elif isinstance(summary_data, str):
         summary_text = summary_data
     source_url = _extract_source_url(content, analysis)
-    override_prompt = None if freestyle_mode else _extract_override_prompt(content)
+    override_prompt = _extract_override_prompt(content, mode="ai2" if freestyle_mode else "ai1")
     if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
         return None
@@ -1696,12 +1696,13 @@ def _coerce_analysis(content: Dict[str, Any]) -> Dict[str, Any]:
     return analysis
 
 
-def _extract_override_prompt(content: Dict[str, Any]) -> Optional[str]:
+def _extract_override_prompt(content: Dict[str, Any], *, mode: str = "ai1") -> Optional[str]:
     analysis = _coerce_analysis(content)
-    prompt = analysis.get("summary_image_prompt")
+    key = "summary_image_prompt" if mode != "ai2" else "summary_image_ai2_prompt"
+    prompt = analysis.get(key)
     if isinstance(prompt, str) and prompt.strip():
         return prompt.strip()
-    prompt = content.get("summary_image_prompt")
+    prompt = content.get(key)
     if isinstance(prompt, str) and prompt.strip():
         return prompt.strip()
     return None
@@ -1782,14 +1783,17 @@ def apply_analysis_variant(
     ]
     new_variants.append(variant_entry)
     base["summary_image_variants"] = new_variants
+    image_mode = variant_entry.get("image_mode")
     if prompt:
-        base["summary_image_prompt_last_used"] = prompt
+        if image_mode == "ai2":
+            base["summary_image_ai2_prompt_last_used"] = prompt
+        else:
+            base["summary_image_prompt_last_used"] = prompt
     if model:
         base["summary_image_model"] = model
     base["summary_image_version"] = version
     if selected_url:
         base["summary_image_selected_url"] = selected_url
-    image_mode = variant_entry.get("image_mode")
     if image_mode == "ai2":
         url = variant_entry.get("url")
         if url:

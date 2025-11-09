@@ -125,13 +125,17 @@ async def process_job(path: Path) -> bool:
                                         analysis_from_db = {}
                                 elif isinstance(raw_analysis, dict):
                                     analysis_from_db = raw_analysis
-                            prompt_from_db = (analysis_from_db.get("summary_image_prompt") or "").strip()
-                            prompt_last_used = (analysis_from_db.get("summary_image_prompt_last_used") or "").strip()
-                            if image_mode != "ai2" and existing_url and (not prompt_from_db or prompt_from_db == prompt_last_used):
+                            prompt_field = "summary_image_prompt" if image_mode != "ai2" else "summary_image_ai2_prompt"
+                            prompt_last_field = f"{prompt_field}_last_used"
+                            prompt_from_db = (analysis_from_db.get(prompt_field) or "").strip()
+                            prompt_last_used = (analysis_from_db.get(prompt_last_field) or "").strip()
+                            override_pending = bool(prompt_from_db and prompt_from_db != prompt_last_used)
+                            has_ai2_variant = _analysis_has_ai2(analysis_from_db) if image_mode == "ai2" else False
+                            if image_mode != "ai2" and existing_url and not override_pending:
                                 logging.info("Skip job %s: summary_image_url already set", base_vid)
                                 _move(path, "processed")
                                 return True
-                            if image_mode == "ai2" and _analysis_has_ai2(analysis_from_db):
+                            if image_mode == "ai2" and has_ai2_variant and not override_pending:
                                 logging.info("Skip job %s: AI2 variant already set", base_vid)
                                 _move(path, "processed")
                                 return True
@@ -140,12 +144,12 @@ async def process_job(path: Path) -> bool:
                                 merged = dict(analysis_from_db)
                                 merged.update(job_analysis)
                                 if prompt_from_db:
-                                    merged["summary_image_prompt"] = prompt_from_db
+                                    merged[prompt_field] = prompt_from_db
                                 content["analysis"] = merged
                             elif isinstance(analysis_from_db, dict):
                                 copy_analysis = dict(analysis_from_db)
                                 if prompt_from_db:
-                                    copy_analysis["summary_image_prompt"] = prompt_from_db
+                                    copy_analysis[prompt_field] = prompt_from_db
                                 content["analysis"] = copy_analysis
         except Exception as _exc:
             logging.debug("DB check skipped: %s", _exc)
@@ -306,7 +310,7 @@ def _sanitize_id(value: str) -> str:
     return value or "unknown"
 
 
-def _queue_has_job(content_id: str) -> bool:
+def _queue_has_job(content_id: str, *, image_mode: Optional[str] = None) -> bool:
     if not content_id:
         return False
     try:
@@ -316,8 +320,17 @@ def _queue_has_job(content_id: str) -> bool:
             except Exception:
                 continue
             existing = str((payload.get("content") or {}).get("id") or (payload.get("content") or {}).get("video_id") or "")
-            if existing == content_id:
-                return True
+            if existing != content_id:
+                continue
+            if image_mode:
+                desired = image_mode.strip().lower()
+                existing_mode = str(payload.get("image_mode") or "").strip().lower()
+                base_mode = str(payload.get("mode") or "").strip().lower()
+                if not existing_mode and base_mode == "summary_image" and desired == "ai1":
+                    existing_mode = "ai1"
+                if existing_mode != desired:
+                    continue
+            return True
     except Exception:
         return False
     return False
@@ -333,15 +346,32 @@ def _seed_prompt_override_jobs(limit: Optional[int] = None) -> int:
         logging.debug("psycopg not available; skipping prompt override seeding")
         return 0
 
-    sql = """
+    total_seeded = 0
+    for image_mode in ("ai1", "ai2"):
+        seeded = _seed_prompt_override_jobs_for_mode(psycopg, dsn, image_mode, limit)
+        total_seeded += seeded
+    if total_seeded:
+        logging.info("Seeded %d prompt override job(s)", total_seeded)
+    return total_seeded
+
+
+def _seed_prompt_override_jobs_for_mode(
+    psycopg_module,
+    dsn: str,
+    image_mode: str,
+    limit: Optional[int],
+) -> int:
+    prompt_field = "summary_image_prompt" if image_mode != "ai2" else "summary_image_ai2_prompt"
+    last_field = f"{prompt_field}_last_used"
+    sql = f"""
         SELECT id,
                video_id,
                title,
-               analysis_json->>'summary_image_prompt'            AS prompt,
-               analysis_json->>'summary_image_prompt_last_used'  AS last_used
+               analysis_json->>'{prompt_field}'           AS prompt,
+               analysis_json->>'{last_field}'             AS last_used
           FROM content
-         WHERE COALESCE(trim(analysis_json->>'summary_image_prompt'), '') <> ''
-           AND COALESCE(analysis_json->>'summary_image_prompt', '') <> COALESCE(analysis_json->>'summary_image_prompt_last_used', '')
+         WHERE COALESCE(trim(analysis_json->>'{prompt_field}'), '') <> ''
+           AND COALESCE(analysis_json->>'{prompt_field}', '') <> COALESCE(analysis_json->>'{last_field}', '')
          ORDER BY updated_at DESC
     """
     params = ()
@@ -349,46 +379,45 @@ def _seed_prompt_override_jobs(limit: Optional[int] = None) -> int:
         sql += " LIMIT %s"
         params = (max(0, int(limit)),)
 
-    seeded = 0
     try:
-        with psycopg.connect(dsn) as conn:
+        with psycopg_module.connect(dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = cur.fetchall()
-        for row in rows:
-            raw_id, video_id, title, prompt, _ = row
-            prompt = (prompt or "").strip()
-            if not prompt:
-                continue
-            content_id = (raw_id or "").strip() or (f"yt:{_sanitize_id(video_id)}" if video_id and len(video_id) == 11 else f"web:{_sanitize_id(video_id)}")
-            if _queue_has_job(content_id):
-                continue
-            job = {
-                "mode": "summary_image",
-                "reason": "prompt_override",
-                "content": {
-                    "id": content_id,
-                    "video_id": video_id,
-                    "title": title or video_id or content_id,
-                    "metadata": {"title": title or ""},
-                    "summary": {"summary": ""},
-                    "analysis": {"summary_image_prompt": prompt},
-                },
-            }
-            try:
-                QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-                from modules import image_queue
-
-                image_queue.enqueue(job)
-                seeded += 1
-            except Exception as exc:
-                logging.warning("Prompt override enqueue failed for %s: %s", content_id, exc)
     except Exception as exc:
-        logging.debug("Prompt override scan skipped: %s", exc)
+        logging.debug("Prompt override scan skipped for %s: %s", image_mode, exc)
         return 0
 
-    if seeded:
-        logging.info("Seeded %d prompt override job(s)", seeded)
+    seeded = 0
+    for row in rows:
+        raw_id, video_id, title, prompt, _ = row
+        prompt = (prompt or "").strip()
+        if not prompt:
+            continue
+        content_id = (raw_id or "").strip() or (f"yt:{_sanitize_id(video_id)}" if video_id and len(video_id) == 11 else f"web:{_sanitize_id(video_id)}")
+        if _queue_has_job(content_id, image_mode=image_mode):
+            continue
+        job = {
+            "mode": "summary_image",
+            "image_mode": image_mode,
+            "reason": "prompt_override",
+            "content": {
+                "id": content_id,
+                "video_id": video_id,
+                "title": title or video_id or content_id,
+                "metadata": {"title": title or ""},
+                "summary": {"summary": ""},
+                "analysis": {prompt_field: prompt},
+            },
+        }
+        try:
+            QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+            from modules import image_queue
+
+            image_queue.enqueue(job)
+            seeded += 1
+        except Exception as exc:
+            logging.warning("Prompt override enqueue failed for %s (%s): %s", content_id, image_mode, exc)
     return seeded
 
 
