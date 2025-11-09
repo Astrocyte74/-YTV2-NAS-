@@ -1074,7 +1074,7 @@ def _select_template_key(
             return "vlog_personal"
     # Fallback to original category heuristics
     for key, keywords in CATEGORY_KEYWORDS.items():
-        if any(token in text for token in keywords):
+        if any(_text_has_term(text, token) for token in keywords):
             # --- Custom logic for entertainment: gaming_cinematic
             if key == "entertainment":
                 gaming_terms = ("game", "gamer", "rpg", "esport", "console", "controller", "boss fight")
