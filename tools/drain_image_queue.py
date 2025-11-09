@@ -31,6 +31,14 @@ from modules.image_queue import QUEUE_DIR
 from modules.services import summary_image_service
 
 
+def _env_flag(name: str, default: str = "false") -> bool:
+    value = os.getenv(name, default)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+AUTO_AI2_ENABLED = _env_flag("SUMMARY_IMAGE_ENABLE_AI2", "true")
+
+
 def _analysis_has_ai2(analysis: Dict[str, Any]) -> bool:
     variants = analysis.get("summary_image_variants")
     if not isinstance(variants, list):
@@ -198,6 +206,7 @@ async def process_job(path: Path) -> bool:
                                 prompt=meta.get("prompt"),
                                 model=meta.get("model"),
                             )
+                            analysis_from_db = updated_analysis
                             analysis_payload = json.dumps(updated_analysis)
                             target_url = summary_image_url if image_mode != "ai2" else existing_url
                             with psycopg.connect(dsn) as _conn:
@@ -214,6 +223,66 @@ async def process_job(path: Path) -> bool:
                                     )
                                     _conn.commit()
                             logging.info("Updated DB summary_image metadata for %s", vid)
+                            existing_url = target_url or existing_url
+
+                            if (
+                                image_mode != "ai2"
+                                and AUTO_AI2_ENABLED
+                                and not _analysis_has_ai2(analysis_from_db)
+                            ):
+                                try:
+                                    logging.info("Auto AI2: generating freestyle variant for %s", vid)
+                                    ai2_meta = await summary_image_service.maybe_generate_summary_image(content, mode="ai2")
+                                    if isinstance(ai2_meta, dict):
+                                        ai2_path = Path(ai2_meta.get("path") or ai2_meta.get("relative_path") or "")
+                                        if ai2_path.exists():
+                                            try:
+                                                from modules.render_api_client import create_client_from_env
+
+                                                ai2_client = create_client_from_env()
+                                                upload = ai2_client.upload_image_file(ai2_path, cid)
+                                                ai2_url = (
+                                                    (upload or {}).get("public_url")
+                                                    or (upload or {}).get("relative_url")
+                                                    or ai2_meta.get("public_url")
+                                                    or ai2_meta.get("relative_path")
+                                                )
+                                                if ai2_url:
+                                                    ai2_variant = ai2_meta.get("analysis_variant")
+                                                    if not ai2_variant:
+                                                        ai2_variant = summary_image_service.build_analysis_variant(ai2_meta, ai2_url)
+                                                    else:
+                                                        if not ai2_variant.get("url"):
+                                                            ai2_variant = dict(ai2_variant)
+                                                            ai2_variant["url"] = ai2_url
+                                                        ai2_variant = dict(ai2_variant)
+                                                        ai2_variant["image_mode"] = "ai2"
+                                                    updated_analysis = summary_image_service.apply_analysis_variant(
+                                                        analysis_from_db,
+                                                        ai2_variant,
+                                                        selected_url=None,
+                                                        prompt=ai2_meta.get("prompt"),
+                                                        model=ai2_meta.get("model"),
+                                                    )
+                                                    analysis_from_db = updated_analysis
+                                                    payload = json.dumps(updated_analysis)
+                                                    with psycopg.connect(dsn) as _conn:
+                                                        with _conn.cursor() as _cur:
+                                                            _cur.execute(
+                                                                """
+                                                                UPDATE content
+                                                                   SET analysis_json=%s,
+                                                                       updated_at=now()
+                                                                 WHERE video_id=%s
+                                                                """,
+                                                                (payload, vid),
+                                                            )
+                                                            _conn.commit()
+                                                    logging.info("Auto AI2 image uploaded for %s", vid)
+                                            except Exception as ai2_upload_exc:
+                                                logging.warning("AI2 upload failed for %s: %s", vid, ai2_upload_exc)
+                                except Exception as ai2_exc:
+                                    logging.warning("AI2 autoplay generation failed for %s: %s", vid, ai2_exc)
                     except Exception as db_exc:
                         logging.warning("DB update for summary_image_url failed: %s", db_exc)
             except Exception as exc:
