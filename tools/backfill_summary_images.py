@@ -43,6 +43,8 @@ os.environ.setdefault("SUMMARY_IMAGE_ENABLED", "1")
 
 LOGGER = logging.getLogger("backfill_summary_images")
 
+LOGGER.info("backfill_summary_images.py loaded from repo commit")
+
 IMAGE_MODES = ("ai1", "ai2")
 
 SUMMARY_SQL = """
