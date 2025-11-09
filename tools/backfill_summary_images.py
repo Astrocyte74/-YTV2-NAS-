@@ -43,8 +43,6 @@ os.environ.setdefault("SUMMARY_IMAGE_ENABLED", "1")
 
 LOGGER = logging.getLogger("backfill_summary_images")
 
-LOGGER.info("backfill_summary_images.py loaded from repo commit")
-
 IMAGE_MODES = ("ai1", "ai2")
 
 SUMMARY_SQL = """
@@ -163,7 +161,10 @@ def _fetch_candidates(
     mode: str = "ai1",
 ) -> List[TaskItem]:
     mode = (mode or "ai1").lower()
-    image_clause = "1=1" if mode == "ai2" else "(c.summary_image_url IS NULL OR c.summary_image_url = '')"
+    if mode == "ai2":
+        image_clause = "NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(c.analysis_json->'summary_image_variants','[]'::jsonb)) v WHERE v->>'image_mode' = 'ai2')"
+    else:
+        image_clause = "(c.summary_image_url IS NULL OR c.summary_image_url = '')"
     if video_ids:
         placeholders = ", ".join(["%s"] * len(video_ids))
         sql = (
