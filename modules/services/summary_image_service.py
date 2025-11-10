@@ -1439,20 +1439,6 @@ async def maybe_generate_summary_image(
     freestyle_mode = mode_key in {"ai2", "freestyle", "ai2_freestyle", "free"}
     image_mode = "ai2" if freestyle_mode else "ai1"
 
-    # Cooldown to avoid repeated generations for the same content id
-    if image_mode != "ai2":
-        try:
-            import time as _t
-            cid = str(content.get("id") or content.get("video_id") or "")
-            now = _t.time()
-            last = _LAST_IMAGE_GEN.get(cid, 0.0)
-            cooldown = float(os.getenv("SUMMARY_IMAGE_COOLDOWN_SECONDS", "900") or "900")  # 15 min default
-            if cid and (now - last) < cooldown:
-                logger.info("summary image skipped: cooldown active for %s (%.0fs remaining)", cid, cooldown - (now - last))
-                return None
-        except Exception:
-            pass
-
     tts_base = (os.getenv("TTSHUB_API_BASE") or "").strip()
     if not tts_base:
         logger.debug("summary image skipped: TTSHUB_API_BASE not configured")
@@ -1524,6 +1510,22 @@ async def maybe_generate_summary_image(
         summary_text = summary_data
     source_url = _extract_source_url(content, analysis)
     override_prompt = _extract_override_prompt(content, mode="ai2" if freestyle_mode else "ai1")
+    override_requested = bool(override_prompt)
+
+    # Cooldown to avoid repeated generations for the same content id
+    if image_mode != "ai2" and not override_requested:
+        try:
+            import time as _t
+            cid = str(content.get("id") or content.get("video_id") or "")
+            now = _t.time()
+            last = _LAST_IMAGE_GEN.get(cid, 0.0)
+            cooldown = float(os.getenv("SUMMARY_IMAGE_COOLDOWN_SECONDS", "900") or "900")  # 15 min default
+            if cid and (now - last) < cooldown:
+                logger.info("summary image skipped: cooldown active for %s (%.0fs remaining)", cid, cooldown - (now - last))
+                return None
+        except Exception:
+            pass
+
     if not summary_text and not override_prompt:
         logger.debug("summary image skipped: no summary text available")
         return None
