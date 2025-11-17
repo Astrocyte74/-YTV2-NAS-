@@ -627,16 +627,12 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
 
         if image_path:
             try:
-                # Status update: illustration phase
+                # Status update: illustration phase (use replies so we do not overwrite the summary text)
+                status_msg = None
                 try:
-                    await _safe_edit_status(query, "🎨 Generating illustration…")
+                    status_msg = await query.message.reply_text("🎨 Generating illustration…")
                 except Exception:
-                    pass
-                # Use a separate reply so we don't overwrite the summary message
-                try:
-                    await query.message.reply_text("🖼️ Attaching illustration…")
-                except Exception:
-                    pass
+                    status_msg = None
                 title_text = result.get("metadata", {}).get("title") or "Summary illustration"
                 caption = f"🎨 *Summary Illustration*\n{handler._escape_markdown(title_text)}"
                 with image_path.open("rb") as photo_file:
@@ -645,6 +641,11 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                         caption=caption,
                         parse_mode=ParseMode.MARKDOWN,
                     )
+                if status_msg:
+                    try:
+                        await status_msg.edit_text("🖼️ Illustration attached.")
+                    except Exception:
+                        pass
             except Exception as exc:
                 logging.debug("Failed to send summary image to Telegram: %s", exc)
 

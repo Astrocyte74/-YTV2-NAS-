@@ -432,6 +432,12 @@ Prompts were refined for better structure and TTS quality:
 - **User Access**: Limit Telegram bot to authorized user ID only
 - **Network**: Run on private NAS network, sync via HTTPS
 
+### NAS environment workflow
+
+- Portainer is the primary source for env vars; `.env` is just a symlink to `.env.nas` for tooling compatibility.
+- After adjusting values in Portainer’s env editor, update the stack or run `redeploy.sh` (calls `docker compose up -d --force-recreate youtube-summarizer-bot`) so the container picks them up.
+- Avoid keeping a separate `.env` copy—if Portainer and the file drift, rebuilds fall back to whatever Portainer stored (that’s how the OpenRouter key, SYNC_SECRET, etc. were lost previously).
+
 ## 📊 Performance
 
 - **Concurrent Processing**: Handles one video at a time (prevents resource issues)
