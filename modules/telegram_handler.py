@@ -1484,6 +1484,9 @@ class YouTubeTelegramBot:
                 ],
                 [
                     InlineKeyboardButton("🎨 Image Catch-up (10)", callback_data="status:image_catchup:10"),
+                    InlineKeyboardButton("🔁 Requeue Missing", callback_data="status:image_requeue:200"),
+                ],
+                [
                     InlineKeyboardButton("Restart", callback_data="status:restart"),
                 ],
             ])
@@ -4534,6 +4537,72 @@ class YouTubeTelegramBot:
             else:
                 error_snippet = stderr_text or stdout_text or "Unknown error"
                 await query.edit_message_text(f"⚠️ Image catch-up failed: {error_snippet[:200]}")
+            return
+        if callback_data.startswith("status:image_requeue"):
+            try:
+                parts = callback_data.split(":")
+                limit = int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 200
+            except Exception:
+                limit = 200
+            limit = max(limit, 1)
+            await query.edit_message_text(f"🔁 Requeueing up to {limit} missing image(s)…")
+            python_bin = os.getenv("PYTHON_BIN", "python3")
+            repo_root = Path(__file__).resolve().parents[1]
+            enqueue_cmd = [python_bin, "tools/enqueue_missing_images.py", "--limit", str(limit)]
+            drain_cmd = [python_bin, "tools/drain_image_queue.py", "--limit", str(limit)]
+            enqueue_lines = ""
+            drain_lines = ""
+            try:
+                proc_enq = await aio_subprocess.create_subprocess_exec(
+                    *enqueue_cmd,
+                    stdout=aio_subprocess.PIPE,
+                    stderr=aio_subprocess.PIPE,
+                    cwd=str(repo_root),
+                )
+                stdout, stderr = await proc_enq.communicate()
+                enqueue_lines = "\n".join(
+                    text for text in (
+                        stdout.decode("utf-8", errors="ignore").strip(),
+                        stderr.decode("utf-8", errors="ignore").strip(),
+                    ) if text
+                )
+            except Exception as exc:
+                await query.edit_message_text(f"⚠️ Requeue failed to start: {exc}")
+                return
+
+            if proc_enq.returncode != 0:
+                snippet = enqueue_lines.splitlines()[-1] if enqueue_lines else "Unknown error"
+                await query.edit_message_text(f"⚠️ Requeue failed: {snippet[:200]}")
+                return
+
+            try:
+                proc_drain = await aio_subprocess.create_subprocess_exec(
+                    *drain_cmd,
+                    stdout=aio_subprocess.PIPE,
+                    stderr=aio_subprocess.PIPE,
+                    cwd=str(repo_root),
+                )
+                stdout, stderr = await proc_drain.communicate()
+                drain_lines = "\n".join(
+                    text for text in (
+                        stdout.decode("utf-8", errors="ignore").strip(),
+                        stderr.decode("utf-8", errors="ignore").strip(),
+                    ) if text
+                )
+            except Exception as exc:
+                await query.edit_message_text(f"⚠️ Drain failed to start: {exc}")
+                return
+
+            if proc_drain.returncode == 0:
+                summary = "✅ Missing images requeued"
+                if enqueue_lines:
+                    summary += f"\n{enqueue_lines.splitlines()[-1][:200]}"
+                if drain_lines:
+                    summary += f"\n{drain_lines.splitlines()[-1][:200]}"
+                await query.edit_message_text(summary)
+            else:
+                snippet = drain_lines.splitlines()[-1] if drain_lines else "Unknown error"
+                await query.edit_message_text(f"⚠️ Drain failed: {snippet[:200]}")
             return
         
         # Handle summary requests
