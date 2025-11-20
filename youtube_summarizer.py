@@ -224,28 +224,6 @@ def _metadata_cache_get(video_id: str) -> Optional[dict]:
     rec = _METADATA_CACHE.get(video_id)
     if not rec:
         return None
-
-    def _normalize_plan(self, plan: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Remove garbage tokens and keep only meaningful section titles."""
-        cleaned: List[Dict[str, str]] = []
-        for item in plan:
-            if not isinstance(item, dict):
-                continue
-            title = (item.get("title") or "").strip().strip('"').strip("'")
-            focus = (item.get("focus") or "").strip().strip('"').strip("'")
-            if not title or not focus:
-                continue
-            if len(title) < 3:
-                continue
-            if not any(c.isalpha() for c in title):
-                continue
-            lower = title.lower()
-            if lower in {"title", "focus", "section", "sections", "item", "plan"}:
-                continue
-            if title in {"[", "]", "{", "}", "[{", "}]", "[{]", "[}"}:
-                continue
-            cleaned.append({"title": title[:80], "focus": focus[:240]})
-        return cleaned
     data, ts = rec
     if (time.time() - ts) > ttl:
         try:
@@ -373,6 +351,28 @@ class YouTubeSummarizer:
                 cb(message.strip())
         except Exception:
             pass
+
+    def _normalize_plan(self, plan: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Remove garbage tokens and keep only meaningful section titles."""
+        cleaned: List[Dict[str, str]] = []
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or "").strip().strip('"').strip("'")
+            focus = (item.get("focus") or "").strip().strip('"').strip("'")
+            if not title or not focus:
+                continue
+            if len(title) < 3:
+                continue
+            if not any(c.isalpha() for c in title):
+                continue
+            lower = title.lower()
+            if lower in {"title", "focus", "section", "sections", "item", "plan"}:
+                continue
+            if title in {"[", "]", "{", "}", "[{", "}]", "[{]", "[}"}:
+                continue
+            cleaned.append({"title": title[:80], "focus": focus[:240]})
+        return cleaned
 
     def _apply_ytdlp_env(self, ydl_opts: dict) -> None:
         """Apply environment-driven tweaks to yt-dlp options.
@@ -612,7 +612,23 @@ class YouTubeSummarizer:
 
         transcript_language = safe_metadata.get("language", "en")
 
-        summary_data = await self.generate_summary(transcript, safe_metadata, summary_type, proficiency_level)
+        # Prefer structured planner flow when enabled (mirrors YouTube path).
+        summary_data = None
+        try:
+            summary_data = await self._generate_structured_summary(
+                transcript,
+                safe_metadata,
+                summary_type,
+                chapter_slices=None,
+                transcript_segments=None,
+                transcript_language=transcript_language,
+                proficiency_level=proficiency_level,
+            )
+        except Exception as exc:
+            print(f"⚠️ Structured summary pipeline (text) failed, using classic path: {exc}")
+
+        if not summary_data:
+            summary_data = await self.generate_summary(transcript, safe_metadata, summary_type, proficiency_level)
 
         summary_language = None
         if isinstance(summary_data, dict):
