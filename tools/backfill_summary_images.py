@@ -432,6 +432,11 @@ def parse_args() -> argparse.Namespace:
         help="Generate images but skip upload/DB updates.",
     )
     parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="List the matching rows and exit without generating or uploading images.",
+    )
+    parser.add_argument(
         "--delay",
         type=float,
         default=0.2,
@@ -487,6 +492,14 @@ def main() -> int:
         return 0
 
     LOGGER.info("Loaded %d candidate(s).", len(tasks))
+
+    if args.plan_only:
+        LOGGER.info("Plan-only mode – no images will be generated.")
+        for task in tasks:
+            indexed = task.indexed_at.isoformat() if task.indexed_at else "unknown"
+            LOGGER.info(" • %s | %s | indexed_at=%s", task.video_id, task.title[:80], indexed)
+        conn.close()
+        return 0
 
     try:
         render_client = RenderAPIClient()

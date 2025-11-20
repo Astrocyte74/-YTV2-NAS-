@@ -700,67 +700,6 @@ class YouTubeTelegramBot:
             logging.debug("image queue count failed: %s", exc)
             return 0
 
-    @staticmethod
-    def _report_has_summary_image(report: Dict[str, Any]) -> bool:
-        summary = report.get("summary") or {}
-        if isinstance(summary, dict):
-            if summary.get("summary_image") or summary.get("summary_image_url"):
-                return True
-        return bool(report.get("summary_image") or report.get("summary_image_url"))
-
-    @staticmethod
-    def _report_to_image_payload(report: Dict[str, Any]) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "id": report.get("id") or (report.get("video") or {}).get("video_id") or "",
-            "title": report.get("title")
-            or (report.get("metadata") or {}).get("title")
-            or (report.get("video") or {}).get("title")
-            or "",
-            "metadata": report.get("metadata") or report.get("video") or {},
-            "summary": report.get("summary") or {},
-            "analysis": report.get("analysis") or {},
-        }
-        if not payload.get("id"):
-            vid = (report.get("video") or {}).get("video_id") or (report.get("video") or {}).get("id")
-            if vid:
-                payload["id"] = vid
-        return payload
-
-    def _seed_image_queue(self, limit: Optional[int]) -> int:
-        try:
-            from modules import image_queue
-        except Exception as exc:
-            logging.debug("image queue module unavailable: %s", exc)
-            return 0
-
-        reports_dir = Path("./data/reports")
-        if not reports_dir.exists():
-            return 0
-
-        max_items = None if limit is None else max(0, int(limit))
-        items = sorted(reports_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        enqueued = 0
-        for path in items:
-            if max_items is not None and enqueued >= max_items:
-                break
-            try:
-                report = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if self._report_has_summary_image(report):
-                continue
-            payload = self._report_to_image_payload(report)
-            if not payload.get("id"):
-                continue
-            job = {"mode": "summary_image", "content": payload, "reason": "seeded_catchup"}
-            try:
-                image_queue.enqueue(job)
-            except Exception as exc:
-                logging.debug("image queue enqueue failed for %s: %s", path.name, exc)
-                continue
-            enqueued += 1
-        return enqueued
-
     def _resolve_video_url(self, video_id: str, provided_url: Optional[str] = None) -> Optional[str]:
         """Find the best URL for a given video id."""
         if provided_url:
@@ -4492,15 +4431,7 @@ class YouTubeTelegramBot:
             except Exception:
                 limit = 10
             limit = max(limit, 0)
-            # If queue is empty, seed from recent reports first
-            seeded = 0
-            try:
-                if self._image_queue_count() == 0:
-                    seeded = self._seed_image_queue(limit)
-            except Exception:
-                seeded = 0
-            prefix = f"(seeded {seeded}) " if seeded else ""
-            await query.edit_message_text(f"🎨 {prefix}Running image catch-up for {limit} item(s)…")
+            await query.edit_message_text(f"🎨 Running image catch-up for {limit} item(s)…")
             python_bin = os.getenv("PYTHON_BIN", "python3")
             repo_root = Path(__file__).resolve().parents[1]
             cmd = [python_bin, "tools/drain_image_queue.py", "--limit", str(limit)]
@@ -4539,70 +4470,10 @@ class YouTubeTelegramBot:
                 await query.edit_message_text(f"⚠️ Image catch-up failed: {error_snippet[:200]}")
             return
         if callback_data.startswith("status:image_requeue"):
-            try:
-                parts = callback_data.split(":")
-                limit = int(parts[-1]) if len(parts) > 1 and parts[-1].isdigit() else 200
-            except Exception:
-                limit = 200
-            limit = max(limit, 1)
-            await query.edit_message_text(f"🔁 Requeueing up to {limit} missing image(s)…")
-            python_bin = os.getenv("PYTHON_BIN", "python3")
-            repo_root = Path(__file__).resolve().parents[1]
-            enqueue_cmd = [python_bin, "tools/enqueue_missing_images.py", "--limit", str(limit)]
-            drain_cmd = [python_bin, "tools/drain_image_queue.py", "--limit", str(limit)]
-            enqueue_lines = ""
-            drain_lines = ""
-            try:
-                proc_enq = await aio_subprocess.create_subprocess_exec(
-                    *enqueue_cmd,
-                    stdout=aio_subprocess.PIPE,
-                    stderr=aio_subprocess.PIPE,
-                    cwd=str(repo_root),
-                )
-                stdout, stderr = await proc_enq.communicate()
-                enqueue_lines = "\n".join(
-                    text for text in (
-                        stdout.decode("utf-8", errors="ignore").strip(),
-                        stderr.decode("utf-8", errors="ignore").strip(),
-                    ) if text
-                )
-            except Exception as exc:
-                await query.edit_message_text(f"⚠️ Requeue failed to start: {exc}")
-                return
-
-            if proc_enq.returncode != 0:
-                snippet = enqueue_lines.splitlines()[-1] if enqueue_lines else "Unknown error"
-                await query.edit_message_text(f"⚠️ Requeue failed: {snippet[:200]}")
-                return
-
-            try:
-                proc_drain = await aio_subprocess.create_subprocess_exec(
-                    *drain_cmd,
-                    stdout=aio_subprocess.PIPE,
-                    stderr=aio_subprocess.PIPE,
-                    cwd=str(repo_root),
-                )
-                stdout, stderr = await proc_drain.communicate()
-                drain_lines = "\n".join(
-                    text for text in (
-                        stdout.decode("utf-8", errors="ignore").strip(),
-                        stderr.decode("utf-8", errors="ignore").strip(),
-                    ) if text
-                )
-            except Exception as exc:
-                await query.edit_message_text(f"⚠️ Drain failed to start: {exc}")
-                return
-
-            if proc_drain.returncode == 0:
-                summary = "✅ Missing images requeued"
-                if enqueue_lines:
-                    summary += f"\n{enqueue_lines.splitlines()[-1][:200]}"
-                if drain_lines:
-                    summary += f"\n{drain_lines.splitlines()[-1][:200]}"
-                await query.edit_message_text(summary)
-            else:
-                snippet = drain_lines.splitlines()[-1] if drain_lines else "Unknown error"
-                await query.edit_message_text(f"⚠️ Drain failed: {snippet[:200]}")
+            await query.edit_message_text(
+                "🔁 Automated requeue is disabled.\n"
+                "Use the Postgres cleanup helpers (clear_summary_images.py) and rerun the hub manually."
+            )
             return
         
         # Handle summary requests
