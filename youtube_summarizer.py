@@ -120,6 +120,62 @@ _TRANSCRIPT_CACHE: dict[str, Tuple[str, str, float]] = {}
 # video_id -> (segments:list[dict], ts:float)
 _TRANSCRIPT_SEGMENT_CACHE: dict[str, Tuple[List[dict], float]] = {}
 
+
+def _slice_transcript_by_chapters(
+    transcript_segments: Optional[List[Dict[str, Any]]],
+    chapters: Optional[List[Dict[str, Any]]],
+    fallback_transcript: str,
+) -> List[Dict[str, Any]]:
+    """
+    Build per-chapter transcript slices using timestamped segments when available.
+
+    Returns a list of {title, start, end, text}.
+    """
+    if not chapters or not isinstance(chapters, list):
+        return []
+
+    slices: List[Dict[str, Any]] = []
+
+    def slice_segments(start: float, end: Optional[float]) -> str:
+        if not transcript_segments:
+            return ""
+        end_val = end if end is not None else (transcript_segments[-1].get("start", 0.0) + transcript_segments[-1].get("duration", 0.0))
+        parts: List[str] = []
+        for seg in transcript_segments:
+            try:
+                st = float(seg.get("start", 0.0))
+                dur = float(seg.get("duration", 0.0))
+            except Exception:
+                st, dur = 0.0, 0.0
+            if st >= end_val:
+                break
+            if (st + dur) <= start:
+                continue
+            txt = seg.get("text")
+            if txt:
+                parts.append(txt)
+        return " ".join(parts).strip()
+
+    for idx, ch in enumerate(chapters):
+        try:
+            start = float(ch.get("start_time", 0.0))
+            end = ch.get("end_time")
+            end_val = float(end) if end is not None else None
+            text = slice_segments(start, end_val)
+            # If segments missing, leave text empty; caller can fall back to full transcript
+            slices.append(
+                {
+                    "index": idx,
+                    "title": ch.get("title") or f"Chapter {idx+1}",
+                    "start": start,
+                    "end": end_val,
+                    "text": text,
+                }
+            )
+        except Exception:
+            continue
+    return slices
+
 def _transcript_cache_ttl() -> float:
     try:
         return float(os.getenv('YT_TRANSCRIPT_CACHE_TTL', '86400') or '86400')
@@ -1686,6 +1742,17 @@ Preview:
             except Exception:
                 transcript_segments = None
         
+        # Build per-chapter transcript slices when possible
+        chapter_slices: List[Dict[str, Any]] = []
+        try:
+            chapter_slices = _slice_transcript_by_chapters(
+                transcript_segments,
+                (metadata or {}).get("chapters") or [],
+                transcript_text or "",
+            )
+        except Exception:
+            chapter_slices = []
+
         try:
             logging.info(
                 "YouTube audit: transcript=%s (%d chars) metadata=%s",
@@ -1701,6 +1768,7 @@ Preview:
             'transcript_language': transcript_language,
             'metadata': metadata,
             'transcript_segments': transcript_segments,
+            'chapter_slices': chapter_slices,
         }
     
     def _try_yt_dlp_transcript_extraction(self, info: dict) -> Optional[str]:
