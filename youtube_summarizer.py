@@ -65,6 +65,7 @@ SUMMARY_IMAGE_AI2_ENABLED = _env_flag("SUMMARY_IMAGE_ENABLE_AI2", "true")
 # Enable two-pass (plan + execute) summaries and chapter-aware aggregation
 STRUCTURED_SUMMARY_ENABLED = _env_flag("YT_STRUCTURED_SUMMARY", "true")
 SUMMARY_PLAN_MAX_SECTIONS = max(1, _env_int("YT_SUMMARY_PLAN_MAX_SECTIONS", 6))
+STRUCTURED_PLANNER_EXCERPT_CHARS = max(3000, _env_int("YT_STRUCTURED_PLANNER_EXCERPT_CHARS", 12000))
 
 # --- Transcript rate limiter / circuit breaker ---
 import time
@@ -614,6 +615,7 @@ class YouTubeSummarizer:
 
         # Prefer structured planner flow when enabled (mirrors YouTube path).
         summary_data = None
+        plan_hint: Optional[List[Dict[str, str]]] = None
         try:
             summary_data = await self._generate_structured_summary(
                 transcript,
@@ -628,6 +630,12 @@ class YouTubeSummarizer:
             print(f"⚠️ Structured summary pipeline (text) failed, using classic path: {exc}")
 
         if not summary_data:
+            # Try to at least capture a planner outline for long/complex content
+            try:
+                excerpt = transcript[:STRUCTURED_PLANNER_EXCERPT_CHARS]
+                plan_hint = await self._plan_sections_from_transcript(excerpt, safe_metadata)
+            except Exception:
+                plan_hint = None
             summary_data = await self.generate_summary(transcript, safe_metadata, summary_type, proficiency_level)
 
         summary_language = None
@@ -635,6 +643,8 @@ class YouTubeSummarizer:
             summary_language = summary_data.get("language")
             if "summary" not in summary_data and isinstance(summary_data.get("audio"), str):
                 summary_data["summary"] = summary_data["audio"]
+            if plan_hint and not summary_data.get("summary_plan"):
+                summary_data["summary_plan"] = {"source": "planner", "sections": plan_hint}
 
         if isinstance(summary_data, str) and not summary_language:
             summary_language = transcript_language
@@ -2513,10 +2523,18 @@ Preview:
             except Exception as exc:
                 print(f"⚠️ Chapter-based summary failed, falling back to planner: {exc}")
 
+        # Planner path (with optional excerpt for very long content)
+        working_transcript = transcript
         try:
-            plan = await self._plan_sections_from_transcript(transcript, metadata)
+            if len(transcript or "") > STRUCTURED_PLANNER_EXCERPT_CHARS:
+                working_transcript = transcript[:STRUCTURED_PLANNER_EXCERPT_CHARS]
+        except Exception:
+            working_transcript = transcript
+
+        try:
+            plan = await self._plan_sections_from_transcript(working_transcript, metadata)
             if plan:
-                summary = await self._summarize_with_plan(transcript, metadata, summary_type, plan, transcript_language)
+                summary = await self._summarize_with_plan(working_transcript, metadata, summary_type, plan, transcript_language)
                 if summary:
                     if transcript_segments and not summary.get("transcript_segments"):
                         summary["transcript_segments"] = transcript_segments
@@ -3409,6 +3427,7 @@ Multiple Categories (when content genuinely spans areas):
         # Step 2: Generate summary
         print("Generating summary...")
         summary_data = None
+        plan_hint: Optional[List[Dict[str, str]]] = None
         try:
             summary_data = await self._generate_structured_summary(
                 transcript,
@@ -3422,6 +3441,11 @@ Multiple Categories (when content genuinely spans areas):
         except Exception as exc:
             print(f"⚠️ Structured summary pipeline failed, using classic path: {exc}")
         if not summary_data:
+            try:
+                excerpt = transcript[:STRUCTURED_PLANNER_EXCERPT_CHARS]
+                plan_hint = await self._plan_sections_from_transcript(excerpt, metadata)
+            except Exception:
+                plan_hint = None
             summary_data = await self.generate_summary(transcript, metadata, summary_type, proficiency_level)
 
         # Ensure raw artifacts are carried forward for reporting
@@ -3430,6 +3454,8 @@ Multiple Categories (when content genuinely spans areas):
                 summary_data["transcript_segments"] = transcript_segments
             if chapter_slices and not summary_data.get("chapter_slices"):
                 summary_data["chapter_slices"] = chapter_slices
+            if plan_hint and not summary_data.get("summary_plan"):
+                summary_data["summary_plan"] = {"source": "planner", "sections": plan_hint}
 
         summary_language = None
         if isinstance(summary_data, dict):
