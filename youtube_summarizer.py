@@ -54,8 +54,17 @@ from modules.tts_hub import TTSHubClient, LocalTTSUnavailable
 def _env_flag(name: str, default: str = "false") -> bool:
     return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, default)).strip() or default)
+    except Exception:
+        return default
+
 
 SUMMARY_IMAGE_AI2_ENABLED = _env_flag("SUMMARY_IMAGE_ENABLE_AI2", "true")
+# Enable two-pass (plan + execute) summaries and chapter-aware aggregation
+STRUCTURED_SUMMARY_ENABLED = _env_flag("YT_STRUCTURED_SUMMARY", "true")
+SUMMARY_PLAN_MAX_SECTIONS = max(1, _env_int("YT_SUMMARY_PLAN_MAX_SECTIONS", 6))
 
 # --- Transcript rate limiter / circuit breaker ---
 import time
@@ -2132,6 +2141,290 @@ Preview:
         except Exception as e:
             print(f"Error parsing generic transcript: {e}")
             return ""
+
+    def _format_timecode(self, seconds: Optional[float]) -> str:
+        """Format seconds as mm:ss for logging/prompts."""
+        try:
+            if seconds is None:
+                return ""
+            mins, secs = divmod(int(float(seconds)), 60)
+            return f"{mins:02d}:{secs:02d}"
+        except Exception:
+            return ""
+
+    def _format_chapter_range(self, start: Optional[float], end: Optional[float]) -> str:
+        start_str = self._format_timecode(start)
+        end_str = self._format_timecode(end)
+        if start_str and end_str:
+            return f"{start_str}-{end_str}"
+        return start_str or end_str
+
+    async def _generate_headline_from_summary(self, summary_text: str, metadata: Dict[str, Any]) -> str:
+        """Helper to keep headline generation consistent across summary styles."""
+        title_prompt = f"""
+        Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
+        Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
+        **IMPORTANT: Respond in the same language as the content.**
+        Source title: {metadata.get('title', '')}
+        Summary:
+        {summary_text[:1200]}
+        """
+
+        headline_text = await self._robust_llm_call(
+            [HumanMessage(content=title_prompt)],
+            operation_name="headline (structured)",
+            max_retries=2,
+        )
+        return headline_text or "Generated Summary"
+
+    async def _plan_sections_from_transcript(self, transcript: str, metadata: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Lightweight planner: propose 3–6 natural sections when chapters are absent."""
+        if not transcript:
+            return []
+        safe_excerpt = self._sanitize_content(transcript, max_length=7000)
+        if not safe_excerpt:
+            return []
+        min_sections = 3
+        max_sections = max(min_sections, SUMMARY_PLAN_MAX_SECTIONS)
+        plan_prompt = f"""
+        You are designing a short outline for summarizing a YouTube video.
+
+        - Propose {min_sections}-{max_sections} sections that follow the video's natural flow.
+        - Use what the transcript already contains; do NOT invent topics.
+        - Keep titles concise (2-6 words) and descriptive.
+        - Return JSON array of objects with keys: title, focus.
+        - Respond in the transcript language.
+
+        Transcript excerpt (trimmed):
+        {safe_excerpt}
+        """
+        raw_plan = await self._robust_llm_call(
+            [HumanMessage(content=plan_prompt)],
+            operation_name="summary planner",
+            max_retries=2,
+        )
+        if not raw_plan:
+            return []
+
+        plan: List[Dict[str, str]] = []
+        parsed = None
+        try:
+            parsed = json.loads(raw_plan)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                title = (item.get("title") or "").strip()
+                focus = (item.get("focus") or item.get("description") or "").strip()
+                if title and focus:
+                    plan.append({"title": title[:80], "focus": focus[:240]})
+        if plan:
+            return plan
+
+        # Fallback: parse line-oriented responses
+        for line in raw_plan.splitlines():
+            cleaned = line.strip().lstrip("-•").lstrip("0123456789. ").strip()
+            if not cleaned:
+                continue
+            if " - " in cleaned:
+                title, focus = cleaned.split(" - ", 1)
+            elif ":" in cleaned:
+                title, focus = cleaned.split(":", 1)
+            else:
+                title, focus = cleaned, ""
+            title = title.strip().strip("*").strip()
+            focus = focus.strip()
+            if title:
+                plan.append(
+                    {
+                        "title": title[:80],
+                        "focus": (focus or "Cover this part of the content").strip()[:240],
+                    }
+                )
+        return plan[:max_sections]
+
+    async def _summarize_with_plan(
+        self,
+        transcript: str,
+        metadata: Dict[str, Any],
+        summary_type: str,
+        plan: List[Dict[str, str]],
+        transcript_language: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Use a planner-driven outline to keep summaries structured when no chapters exist."""
+        if not plan:
+            return None
+
+        plan_lines = "\n".join(
+            [f"- {item['title']}: {item.get('focus', '')}" for item in plan if item.get("title")]
+        )
+        safe_transcript = self._sanitize_content(transcript, max_length=12000)
+        plan_prompt = f"""
+        Use the following outline to summarize the video. Stick to the provided section order.
+
+        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
+        Outline:
+        {plan_lines}
+
+        Transcript:
+        {safe_transcript}
+
+        Write a concise, well-structured summary in the transcript language ({transcript_language or 'unknown'}):
+        - Begin with a 2-3 sentence overview.
+        - Use the outline section titles as headings; under each heading, add 2-4 bullets with concrete facts.
+        - Finish with one sentence starting “Bottom line: …”.
+        Rules: no speculation, no emojis, no code fences, and rely only on the transcript.
+        """
+
+        summary_text = await self._robust_llm_call(
+            [HumanMessage(content=plan_prompt)],
+            operation_name="structured summary (plan)",
+            max_retries=2,
+        )
+        if not summary_text:
+            return None
+
+        headline = await self._generate_headline_from_summary(summary_text, metadata)
+        return {
+            "summary": summary_text,
+            "headline": headline,
+            "summary_type": summary_type,
+            "generated_at": datetime.now().isoformat(),
+            "language": transcript_language or metadata.get("language", "en"),
+            "summary_plan": {"source": "planner", "sections": plan},
+        }
+
+    async def _summarize_by_chapters(
+        self,
+        chapter_slices: List[Dict[str, Any]],
+        metadata: Dict[str, Any],
+        summary_type: str,
+        transcript_language: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Summarize each chapter then combine for a cohesive result."""
+        usable = [c for c in chapter_slices if (c.get("text") or "").strip()]
+        if not usable:
+            return None
+
+        chapter_summaries: List[Dict[str, Any]] = []
+        for ch in usable:
+            section_text = self._sanitize_content(ch.get("text", ""), max_length=6500)
+            if not section_text:
+                continue
+            time_range = self._format_chapter_range(ch.get("start"), ch.get("end"))
+            section_prompt = f"""
+            Summarize this YouTube chapter in the transcript language ({transcript_language or 'unknown'}).
+
+            Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
+            Chapter: {ch.get('title', 'Chapter')} ({time_range or 'time unknown'})
+
+            Chapter transcript:
+            {section_text}
+
+            Output:
+            - 1 sentence “Overview:” capturing the key idea.
+            - 2–4 “• ” bullets with concrete facts, names, or results from this chapter.
+            Rules: no speculation, keep chronological, no emojis/code fences.
+            """
+            chunk_summary = await self._robust_llm_call(
+                [HumanMessage(content=section_prompt)],
+                operation_name="chapter summary",
+                max_retries=2,
+            )
+            if not chunk_summary:
+                continue
+            chapter_summaries.append(
+                {
+                    "title": ch.get("title", "").strip() or f"Chapter {ch.get('index', 0)+1}",
+                    "start": ch.get("start"),
+                    "end": ch.get("end"),
+                    "summary": chunk_summary.strip(),
+                }
+            )
+
+        if not chapter_summaries:
+            return None
+
+        combined_lines = []
+        for idx, item in enumerate(chapter_summaries, start=1):
+            range_str = self._format_chapter_range(item.get("start"), item.get("end"))
+            combined_lines.append(
+                f"{idx}. {item.get('title', 'Chapter')} ({range_str}) — {item.get('summary', '').strip()}"
+            )
+        combined_blob = "\n".join(combined_lines)
+
+        combine_prompt = f"""
+        Combine these per-chapter summaries into one cohesive {summary_type or 'comprehensive'} summary.
+        Keep chapters in order, keep details factual, and avoid repetition.
+
+        Chapters:
+        {combined_blob}
+
+        Output:
+        - 2-3 sentence overview.
+        - Section headings that mirror the chapter titles (do NOT rename or shorten them) with 2-4 bullets each.
+        - A final sentence starting “Bottom line: …”.
+        Use the transcript language ({transcript_language or 'unknown'}); no emojis/code fences.
+        """
+        combined_summary = await self._robust_llm_call(
+            [HumanMessage(content=combine_prompt)],
+            operation_name="chapter summary combine",
+            max_retries=2,
+        )
+        if not combined_summary:
+            combined_summary = "\n\n".join(combined_lines)
+
+        headline = await self._generate_headline_from_summary(combined_summary, metadata)
+        return {
+            "summary": combined_summary,
+            "headline": headline,
+            "summary_type": summary_type,
+            "generated_at": datetime.now().isoformat(),
+            "language": transcript_language or metadata.get("language", "en"),
+            "chapter_summaries": chapter_summaries,
+            "summary_plan": {"source": "chapters", "count": len(chapter_summaries)},
+        }
+
+    async def _generate_structured_summary(
+        self,
+        transcript: str,
+        metadata: Dict[str, Any],
+        summary_type: str,
+        *,
+        chapter_slices: Optional[List[Dict[str, Any]]] = None,
+        transcript_language: Optional[str] = None,
+        proficiency_level: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Two-pass summarization that prefers chapter slices, else uses an outline planner."""
+        _ = proficiency_level  # reserved for future style tweaks
+        if not STRUCTURED_SUMMARY_ENABLED:
+            return None
+
+        try:
+            slices = [c for c in (chapter_slices or []) if c]
+        except Exception:
+            slices = []
+
+        if slices:
+            try:
+                summary = await self._summarize_by_chapters(slices, metadata, summary_type, transcript_language)
+                if summary:
+                    return summary
+            except Exception as exc:
+                print(f"⚠️ Chapter-based summary failed, falling back to planner: {exc}")
+
+        try:
+            plan = await self._plan_sections_from_transcript(transcript, metadata)
+            if plan:
+                summary = await self._summarize_with_plan(transcript, metadata, summary_type, plan, transcript_language)
+                if summary:
+                    return summary
+        except Exception as exc:
+            print(f"⚠️ Planner summary failed: {exc}")
+
+        return None
     
     async def generate_summary(self, transcript: str, metadata: Dict, 
                              summary_type: str = "comprehensive", proficiency_level: str = None) -> Dict[str, str]:
@@ -2972,6 +3265,10 @@ Multiple Categories (when content genuinely spans areas):
         transcript_language = transcript_data.get('transcript_language') or metadata.get('language') or 'en'
         metadata['language'] = transcript_language
         transcript = transcript_data['transcript']
+        transcript_segments = transcript_data.get('transcript_segments')
+        chapter_slices = transcript_data.get("chapter_slices") or []
+        if chapter_slices and not metadata.get("chapters"):
+            metadata["chapters"] = chapter_slices
         content_type = transcript_data.get('content_type', 'transcript')
         
         # REJECT only videos with truly no content (very rare now with hybrid system)
@@ -3009,7 +3306,27 @@ Multiple Categories (when content genuinely spans areas):
         
         # Step 2: Generate summary
         print("Generating summary...")
-        summary_data = await self.generate_summary(transcript, metadata, summary_type, proficiency_level)
+        summary_data = None
+        try:
+            summary_data = await self._generate_structured_summary(
+                transcript,
+                metadata,
+                summary_type,
+                chapter_slices=chapter_slices,
+                transcript_language=transcript_language,
+                proficiency_level=proficiency_level,
+            )
+        except Exception as exc:
+            print(f"⚠️ Structured summary pipeline failed, using classic path: {exc}")
+        if not summary_data:
+            summary_data = await self.generate_summary(transcript, metadata, summary_type, proficiency_level)
+
+        # Ensure raw artifacts are carried forward for reporting
+        if isinstance(summary_data, dict):
+            if transcript_segments and not summary_data.get("transcript_segments"):
+                summary_data["transcript_segments"] = transcript_segments
+            if chapter_slices and not summary_data.get("chapter_slices"):
+                summary_data["chapter_slices"] = chapter_slices
 
         summary_language = None
         if isinstance(summary_data, dict):
@@ -3085,6 +3402,7 @@ Multiple Categories (when content genuinely spans areas):
             'metadata': metadata,
             'transcript': transcript,
             'transcript_segments': transcript_segments,
+            'chapter_slices': chapter_slices,
             'summary': summary_data,
             'processed_at': datetime.now().isoformat(),
             'processor_info': {

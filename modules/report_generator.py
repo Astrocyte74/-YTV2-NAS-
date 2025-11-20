@@ -671,7 +671,7 @@ class JSONReportGenerator:
     
     def _extract_summary_info(self, summary_data: Dict[str, Any]) -> Dict[str, Any]:
         """Extract and standardize summary information."""
-        return {
+        info = {
             "content": summary_data.get("summary", ""),
             "type": summary_data.get("summary_type", "comprehensive"),
             "analysis": summary_data.get("analysis", {}),
@@ -684,6 +684,16 @@ class JSONReportGenerator:
             "image_url": summary_data.get("summary_image_url")
             or (summary_data.get("summary_image") or {}).get("public_url"),
         }
+        # Optional rich fields for chapter-aware and planner-driven summaries
+        if summary_data.get("transcript_segments"):
+            info["transcript_segments"] = summary_data["transcript_segments"]
+        if summary_data.get("chapter_slices"):
+            info["chapter_slices"] = summary_data["chapter_slices"]
+        if summary_data.get("chapter_summaries"):
+            info["chapter_summaries"] = summary_data["chapter_summaries"]
+        if summary_data.get("summary_plan"):
+            info["summary_plan"] = summary_data["summary_plan"]
+        return info
     
     def _calculate_stats(self, video_data: Dict[str, Any], summary_data: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate report statistics."""
@@ -836,6 +846,10 @@ def create_report_from_youtube_summarizer(summarizer_result: Dict[str, Any],
         summary_data["transcript_segments"] = summarizer_result["transcript_segments"]
     if summarizer_result.get("chapter_slices"):
         summary_data["chapter_slices"] = summarizer_result["chapter_slices"]
+    if summarizer_result.get("chapter_summaries"):
+        summary_data["chapter_summaries"] = summarizer_result["chapter_summaries"]
+    if summarizer_result.get("summary_plan"):
+        summary_data["summary_plan"] = summarizer_result["summary_plan"]
     
     # Extract processing info from summarizer result
     processing_info = summarizer_result.get("processor_info", processing_info)
