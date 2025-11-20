@@ -66,7 +66,7 @@ Only do a full wipe when you intentionally want to regenerate *all* summary art 
 
 1. **Remove existing PNGs on the NAS**
    ```bash
-   docker exec -i youtube-summarizer-bot rm -rf /app/data/exports/images/*
+   docker exec -i youtube-summarizer-bot rm -rf /app/exports/images/*
    ```
 2. **Clear image metadata in Postgres** (reuse `scripts/clear_summary_images.py --apply --after 1900-01-01` if preferable) so every row becomes a fresh target:
    ```bash

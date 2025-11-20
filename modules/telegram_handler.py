@@ -1423,7 +1423,6 @@ class YouTubeTelegramBot:
                 ],
                 [
                     InlineKeyboardButton("🎨 Image Catch-up (10)", callback_data="status:image_catchup:10"),
-                    InlineKeyboardButton("🔁 Requeue Missing", callback_data="status:image_requeue:200"),
                 ],
                 [
                     InlineKeyboardButton("Restart", callback_data="status:restart"),
@@ -4468,12 +4467,6 @@ class YouTubeTelegramBot:
             else:
                 error_snippet = stderr_text or stdout_text or "Unknown error"
                 await query.edit_message_text(f"⚠️ Image catch-up failed: {error_snippet[:200]}")
-            return
-        if callback_data.startswith("status:image_requeue"):
-            await query.edit_message_text(
-                "🔁 Automated requeue is disabled.\n"
-                "Use the Postgres cleanup helpers (clear_summary_images.py) and rerun the hub manually."
-            )
             return
         
         # Handle summary requests

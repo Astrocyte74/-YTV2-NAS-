@@ -3,9 +3,9 @@
 This document catalogs the active summarization prompts, where they live, and suggested refinements to improve factuality, structure, and rendering in the dashboard inline reader.
 
 ## Locations (source of truth)
-- Prompts (YouTube + web transcripts): `youtube_summarizer.py:1367`
-- Base context (prepended to every prompt): `youtube_summarizer.py:1355`
-- Headline generator: `youtube_summarizer.py:1536`
+- Prompts (YouTube + web transcripts): `youtube_summarizer.py` — search for “Comprehensive prompt” / “Audio prompt” blocks.
+- Base context (prepended to every prompt): `youtube_summarizer.py` — the `Base Context` text just above the prompt blocks.
+- Headline generator: `youtube_summarizer.py` — `headline prompt` block in the same prompt section.
 
 ## Base Context (always prepended)
 - Injects: Title, Channel, Upload Date, Duration, URL, then Full Transcript
@@ -164,4 +164,3 @@ Lead with the most concrete noun or named entity; avoid starting with vague verb
 
 ---
 Maintainers: Update this file when prompt wording changes so downstream UI/formatter expectations stay in sync.
-
