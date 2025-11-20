@@ -3016,6 +3016,7 @@ Multiple Categories (when content genuinely spans areas):
             'url': youtube_url,
             'metadata': metadata,
             'transcript': transcript,
+            'transcript_segments': transcript_segments,
             'summary': summary_data,
             'processed_at': datetime.now().isoformat(),
             'processor_info': {
