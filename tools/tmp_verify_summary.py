@@ -20,8 +20,13 @@ async def main():
         "Alphafly 3 dominated, Vaporfly 4 reached the podium, and Asics MetaSpeed Sky Tokyo won the men's race. "
         "MetaSpeed Ray compliance begins on September 11, 2025. The course is scenic, twisty, hilly, and not considered fast."
     )
-    meta = {"title":"Test Summary","uploader":"Tester","url":"http://example.com","duration":300,"language":"en"}
-    res = await y.process_text_content(content_id='TEST_FORMAT_CHECK', text=text, metadata=meta, summary_type='bullet-points')
+    meta = {"title": "Test Summary", "uploader": "Tester", "url": "http://example.com", "duration": 300, "language": "en"}
+    res = await y.process_text_content(
+        content_id='TEST_FORMAT_CHECK',
+        text=text,
+        metadata=meta,
+        summary_type='bullet-points',
+    )
     print('TYPE:', type(res))
     if isinstance(res, dict):
         summary_text = (res.get('summary') or '')
