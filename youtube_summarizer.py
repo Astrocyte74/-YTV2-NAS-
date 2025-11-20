@@ -116,6 +116,10 @@ _TRANSCRIPT_LIMITER: TranscriptLimiter | None = None
 from typing import Tuple
 _TRANSCRIPT_CACHE: dict[str, Tuple[str, str, float]] = {}
 
+# Optional: cache transcript segments (timestamped)
+# video_id -> (segments:list[dict], ts:float)
+_TRANSCRIPT_SEGMENT_CACHE: dict[str, Tuple[List[dict], float]] = {}
+
 def _transcript_cache_ttl() -> float:
     try:
         return float(os.getenv('YT_TRANSCRIPT_CACHE_TTL', '86400') or '86400')
@@ -182,6 +186,31 @@ def _transcript_cache_put(video_id: str, text: str, lang: str) -> None:
         logging.info("Transcript cached for %s (len=%d)", video_id, len(text or ''))
     except Exception:
         pass
+
+def _transcript_segment_cache_put(video_id: str, segments: List[dict]) -> None:
+    try:
+        _TRANSCRIPT_SEGMENT_CACHE[video_id] = (segments or [], time.time())
+        logging.info("Transcript segments cached for %s (count=%d)", video_id, len(segments or []))
+    except Exception:
+        pass
+
+def _transcript_segment_cache_get(video_id: str) -> Optional[List[dict]]:
+    ttl = _transcript_cache_ttl()
+    rec = _TRANSCRIPT_SEGMENT_CACHE.get(video_id)
+    if not rec:
+        return None
+    segments, ts = rec
+    if (time.time() - ts) > ttl:
+        try:
+            del _TRANSCRIPT_SEGMENT_CACHE[video_id]
+        except Exception:
+            pass
+        return None
+    try:
+        logging.info("Transcript segment cache hit for %s (age=%.0fs)", video_id, time.time() - ts)
+    except Exception:
+        pass
+    return segments
 
 # Import LLM configuration manager
 from llm_config import llm_config
@@ -1646,6 +1675,16 @@ Preview:
             metadata = self._get_fallback_metadata(youtube_url, video_id)
             metadata_source = 'scrape'
             _metadata_cache_put(video_id, metadata)
+
+        # Ensure segments captured if transcript is available
+        if transcript_text and transcript_segments is None:
+            try:
+                from youtube_transcript_api import YouTubeTranscriptApi
+                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id)
+                if transcript_segments:
+                    _transcript_segment_cache_put(video_id, transcript_segments)
+            except Exception:
+                transcript_segments = None
         
         try:
             logging.info(
@@ -1660,7 +1699,8 @@ Preview:
         return {
             'transcript': transcript_text,
             'transcript_language': transcript_language,
-            'metadata': metadata
+            'metadata': metadata,
+            'transcript_segments': transcript_segments,
         }
     
     def _try_yt_dlp_transcript_extraction(self, info: dict) -> Optional[str]:
@@ -1739,6 +1779,7 @@ Preview:
         """
         # Initialize variables in outer scope
         transcript_text = None
+        transcript_segments = None
         video_id = self._extract_video_id(youtube_url)
         
         # STEP 1: Try simplified approach - transcript API + web scraping for metadata
@@ -1746,12 +1787,23 @@ Preview:
         transcript_text = result['transcript']
         metadata = result['metadata']
         transcript_language = result.get('transcript_language') or 'en'
+        # Optional: capture timestamped segments if available
+        transcript_segments = _transcript_segment_cache_get(video_id)
+        if transcript_text and transcript_segments is None:
+            try:
+                from youtube_transcript_api import YouTubeTranscriptApi
+                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id)
+                if transcript_segments:
+                    _transcript_segment_cache_put(video_id, transcript_segments)
+            except Exception:
+                transcript_segments = None
         
         # If we got a good transcript, return immediately with web-scraped metadata
         if transcript_text and len(transcript_text.strip()) > 100:
             return {
                 'metadata': metadata,
                 'transcript': transcript_text,
+                'transcript_segments': transcript_segments,
                 'content_type': 'transcript',
                 'transcript_language': transcript_language,
                 'success': True,
