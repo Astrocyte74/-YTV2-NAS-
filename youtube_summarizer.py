@@ -1408,9 +1408,16 @@ Preview:
         
         # --- Metadata: prefer official Data API when configured; else fallback to yt-dlp, else scrape ---
         metadata = None
-        source_pref = (os.getenv('YT_METADATA_SOURCE') or 'auto').strip().lower()
+        raw_source_pref = (os.getenv('YT_METADATA_SOURCE') or 'auto').strip()
+        source_pref = raw_source_pref.split(",")[0].strip().lower() if raw_source_pref else "auto"
         api_key = os.getenv('YT_API_KEY')
         metadata_source = 'none'
+        combo_pref = source_pref in (
+            "api+yt_dlp",
+            "api_plus_ytdlp",
+            "data_api_plus_ytdlp",
+            "both",
+        )
 
         # Helper: YouTube Data API v3 (videos.list)
         def _metadata_via_data_api() -> Optional[dict]:
@@ -1521,6 +1528,38 @@ Preview:
                     logging.info("YouTube metadata: using Data API (videos.list)")
                     metadata_source = 'data_api'
                     _metadata_cache_put(video_id, metadata)
+
+        # Optional: augment Data API metadata with chapters via yt-dlp (single extra call)
+        if used_api and combo_pref:
+            try:
+                ydl_opts = {
+                    'skip_download': True,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': False,
+                    'ignoreconfig': True,
+                    'noplaylist': True,
+                    'simulate': True,
+                    'format': 'best',
+                    'extractor_args': {'youtube': {'player-client': ['android', 'web']}},
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+                    },
+                    'geo_bypass': True,
+                    'geo_bypass_country': 'US',
+                    'retries': 3,
+                    'socket_timeout': 20,
+                }
+                self._apply_ytdlp_env(ydl_opts)
+                info = self._extract_with_robust_ytdlp(youtube_url, ydl_opts)
+                chapters = info.get('chapters') if info else None
+                if chapters:
+                    metadata['chapters'] = chapters
+                    metadata_source = 'data_api+yt_dlp_chapters'
+                    _metadata_cache_put(video_id, metadata)
+                    logging.info("YouTube metadata: merged Data API with yt-dlp chapters")
+            except Exception as exc:
+                logging.warning("yt-dlp chapter augment failed: %s", exc)
 
         # Fallback to yt-dlp when requested or when Data API not used/failed
         if metadata is None and (source_pref in ('yt_dlp','ytdlp','dlp','auto','') or source_pref not in ('data_api','api')):
