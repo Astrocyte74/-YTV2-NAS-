@@ -224,6 +224,28 @@ def _metadata_cache_get(video_id: str) -> Optional[dict]:
     rec = _METADATA_CACHE.get(video_id)
     if not rec:
         return None
+
+    def _normalize_plan(self, plan: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Remove garbage tokens and keep only meaningful section titles."""
+        cleaned: List[Dict[str, str]] = []
+        for item in plan:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or "").strip().strip('"').strip("'")
+            focus = (item.get("focus") or "").strip().strip('"').strip("'")
+            if not title or not focus:
+                continue
+            if len(title) < 3:
+                continue
+            if not any(c.isalpha() for c in title):
+                continue
+            lower = title.lower()
+            if lower in {"title", "focus", "section", "sections", "item", "plan"}:
+                continue
+            if title in {"[", "]", "{", "}", "[{", "}]", "[{]", "[}"}:
+                continue
+            cleaned.append({"title": title[:80], "focus": focus[:240]})
+        return cleaned
     data, ts = rec
     if (time.time() - ts) > ttl:
         try:
@@ -2252,7 +2274,7 @@ Preview:
                     if title and focus:
                         plan.append({"title": title[:80], "focus": focus[:240]})
             if plan:
-                return plan
+                return self._normalize_plan(plan)
 
         # Fallback: parse line-oriented responses
         for line in raw_plan.splitlines():
@@ -2280,7 +2302,7 @@ Preview:
                         "focus": (focus or "Cover this part of the content").strip()[:240],
                     }
                 )
-        return plan[:max_sections]
+        return self._normalize_plan(plan)[:max_sections]
 
     async def _summarize_with_plan(
         self,
