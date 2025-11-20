@@ -1387,6 +1387,7 @@ Preview:
         transcript_text = None
         transcript_language = None
         transcript_source = 'none'
+        transcript_segments: Optional[List[Dict[str, Any]]] = None
         
         @contextlib.contextmanager
         def _transcript_proxy_context():
@@ -1420,6 +1421,8 @@ Preview:
         # Get transcript via youtube-transcript-api with multiple language support
         if TRANSCRIPT_API_AVAILABLE:
             try:
+                # Defensive import to avoid unbound errors if the package is partially missing
+                from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
                 with _transcript_proxy_context():
                     # Cache check first
                     cached_text, cached_lang = _transcript_cache_get(video_id)
@@ -1499,6 +1502,10 @@ Preview:
                 # Swallow StopIteration from cache hit
                 if not isinstance(e, StopIteration):
                     print(f"⚠️ YouTube Transcript API failed: {e}")
+            finally:
+                # Explicitly mark segments missing when API path fails
+                if transcript_segments is None:
+                    transcript_segments = None
         
         # --- Metadata: prefer official Data API when configured; else fallback to yt-dlp, else scrape ---
         metadata = None
@@ -1860,10 +1867,15 @@ Preview:
         video_id = self._extract_video_id(youtube_url)
         
         # STEP 1: Try simplified approach - transcript API + web scraping for metadata
-        result = self._get_transcript_and_metadata_via_api(video_id, youtube_url)
-        transcript_text = result['transcript']
-        metadata = result['metadata']
-        transcript_language = result.get('transcript_language') or 'en'
+        try:
+            result = self._get_transcript_and_metadata_via_api(video_id, youtube_url)
+        except Exception as exc:
+            logging.error("Primary transcript/metadata path failed: %s", exc)
+            result = {"success": False, "error": str(exc)}
+
+        transcript_text = (result or {}).get('transcript')
+        metadata = (result or {}).get('metadata') or {}
+        transcript_language = (result or {}).get('transcript_language') or 'en'
         # Optional: capture timestamped segments if available
         transcript_segments = _transcript_segment_cache_get(video_id)
         if transcript_text and transcript_segments is None:
@@ -2019,7 +2031,8 @@ Preview:
                     return {
                         'error': 'No transcript available - only description found. Rejecting to prevent hallucination.',
                         'success': False,
-                        'content_type': 'description_only'
+                        'content_type': 'description_only',
+                        'transcript_segments': transcript_segments,
                     }
                 
                 transcript_language = transcript_language or info.get('language') or 'en'
@@ -2029,6 +2042,7 @@ Preview:
                     'content_type': content_type,
                     'transcript_language': transcript_language,
                     'success': True,
+                    'transcript_segments': transcript_segments,
                     'chapters': metadata.get('chapters', []),
                 }
                 
@@ -2048,12 +2062,14 @@ Preview:
                     'content_type': 'transcript',
                     'transcript_language': transcript_language,
                     'success': True,
+                    'transcript_segments': transcript_segments,
                     'chapters': fallback_metadata.get('chapters', []),
                 }
             else:
                 return {
                     'error': str(e),
-                    'success': False
+                    'success': False,
+                    'transcript_segments': transcript_segments,
                 }
     
     def _parse_srv3_transcript(self, srv3_data: str) -> str:
@@ -2206,27 +2222,48 @@ Preview:
         if not raw_plan:
             return []
 
+        # Strip code fences and try JSON first
+        cleaned = raw_plan.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(
+                line for line in cleaned.splitlines() if not line.strip().startswith("```")
+            ).strip()
+
         plan: List[Dict[str, str]] = []
         parsed = None
-        try:
-            parsed = json.loads(raw_plan)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, list):
-            for item in parsed:
-                if not isinstance(item, dict):
-                    continue
-                title = (item.get("title") or "").strip()
-                focus = (item.get("focus") or item.get("description") or "").strip()
-                if title and focus:
-                    plan.append({"title": title[:80], "focus": focus[:240]})
-        if plan:
-            return plan
+        for candidate in (cleaned, raw_plan):
+            if plan:
+                break
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                parsed = None
+            items = None
+            if isinstance(parsed, dict):
+                items = parsed.get("sections") or parsed.get("plan") or parsed.get("parts")
+            elif isinstance(parsed, list):
+                items = parsed
+            if isinstance(items, list):
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    title = (item.get("title") or item.get("name") or "").strip()
+                    focus = (item.get("focus") or item.get("description") or item.get("summary") or "").strip()
+                    if title and focus:
+                        plan.append({"title": title[:80], "focus": focus[:240]})
+            if plan:
+                return plan
 
         # Fallback: parse line-oriented responses
         for line in raw_plan.splitlines():
             cleaned = line.strip().lstrip("-•").lstrip("0123456789. ").strip()
             if not cleaned:
+                continue
+            if cleaned.startswith("```"):
+                continue
+            if cleaned in {"[", "]", "{", "}", "[{", "}]", "[{]", "[}"}:
+                continue
+            if cleaned.lower() in {"title", "focus", "section", "sections"}:
                 continue
             if " - " in cleaned:
                 title, focus = cleaned.split(" - ", 1)
@@ -2234,9 +2271,9 @@ Preview:
                 title, focus = cleaned.split(":", 1)
             else:
                 title, focus = cleaned, ""
-            title = title.strip().strip("*").strip()
-            focus = focus.strip()
-            if title:
+            title = title.strip().strip("*").strip().strip('"').strip()
+            focus = focus.strip().strip('"').strip()
+            if title and title not in {"[", "]", "{", "}", "[{", "}]", "[{]", "[}"}:
                 plan.append(
                     {
                         "title": title[:80],
@@ -2394,6 +2431,7 @@ Preview:
         summary_type: str,
         *,
         chapter_slices: Optional[List[Dict[str, Any]]] = None,
+        transcript_segments: Optional[List[Dict[str, Any]]] = None,
         transcript_language: Optional[str] = None,
         proficiency_level: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
@@ -2407,10 +2445,32 @@ Preview:
         except Exception:
             slices = []
 
+        # If chapters exist but no slices, try to fetch segments once to build slices.
+        if (not slices) and (metadata.get("chapters")) and (not transcript_segments) and TRANSCRIPT_API_AVAILABLE:
+            try:
+                vid = metadata.get("id") or metadata.get("video_id")
+                if vid:
+                    from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
+                    segs = YouTubeTranscriptApi.get_transcript(vid)
+                    if segs:
+                        transcript_segments = segs
+                        slices = _slice_transcript_by_chapters(
+                            transcript_segments,
+                            metadata.get("chapters") or [],
+                            transcript,
+                        )
+            except Exception as exc:
+                print(f"⚠️ Unable to fetch timestamped segments for chapters: {exc}")
+                transcript_segments = transcript_segments or None
+
         if slices:
             try:
                 summary = await self._summarize_by_chapters(slices, metadata, summary_type, transcript_language)
                 if summary:
+                    if transcript_segments and not summary.get("transcript_segments"):
+                        summary["transcript_segments"] = transcript_segments
+                    if slices and not summary.get("chapter_slices"):
+                        summary["chapter_slices"] = slices
                     return summary
             except Exception as exc:
                 print(f"⚠️ Chapter-based summary failed, falling back to planner: {exc}")
@@ -2420,6 +2480,10 @@ Preview:
             if plan:
                 summary = await self._summarize_with_plan(transcript, metadata, summary_type, plan, transcript_language)
                 if summary:
+                    if transcript_segments and not summary.get("transcript_segments"):
+                        summary["transcript_segments"] = transcript_segments
+                    if slices and not summary.get("chapter_slices"):
+                        summary["chapter_slices"] = slices
                     return summary
         except Exception as exc:
             print(f"⚠️ Planner summary failed: {exc}")
@@ -3313,6 +3377,7 @@ Multiple Categories (when content genuinely spans areas):
                 metadata,
                 summary_type,
                 chapter_slices=chapter_slices,
+                transcript_segments=transcript_segments,
                 transcript_language=transcript_language,
                 proficiency_level=proficiency_level,
             )
