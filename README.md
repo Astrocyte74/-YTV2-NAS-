@@ -434,9 +434,9 @@ Prompts were refined for better structure and TTS quality:
 
 ### NAS environment workflow
 
-- Portainer is the primary source for env vars; `.env` is just a symlink to `.env.nas` for tooling compatibility.
-- After adjusting values in Portainer’s env editor, update the stack or run `redeploy.sh` (calls `docker compose up -d --force-recreate youtube-summarizer-bot`) so the container picks them up.
-- Avoid keeping a separate `.env` copy—if Portainer and the file drift, rebuilds fall back to whatever Portainer stored (that’s how the OpenRouter key, SYNC_SECRET, etc. were lost previously).
+- Portainer is the primary source for env vars; `.env`/`.env.nas` exist only as a synchronized copy for reference.
+- After adjusting values in Portainer’s env editor, redeploy from Portainer. Do **not** use `redeploy.sh` (it is disabled) unless you intentionally sync the env files first.
+- Keep `.env.nas` in lockstep with Portainer after each change to avoid drift and accidental rollbacks to stale keys/secrets.
 
 ## 📊 Performance
 
