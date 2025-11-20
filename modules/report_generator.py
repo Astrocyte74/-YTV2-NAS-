@@ -831,6 +831,11 @@ def create_report_from_youtube_summarizer(summarizer_result: Dict[str, Any],
         "analysis": summarizer_result.get("analysis", {}),
         "summary_type": summarizer_result.get("summary_type", "comprehensive")
     }
+    # Pass through transcript, segments, and chapter slices when present
+    if summarizer_result.get("transcript_segments"):
+        summary_data["transcript_segments"] = summarizer_result["transcript_segments"]
+    if summarizer_result.get("chapter_slices"):
+        summary_data["chapter_slices"] = summarizer_result["chapter_slices"]
     
     # Extract processing info from summarizer result
     processing_info = summarizer_result.get("processor_info", processing_info)
