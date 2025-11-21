@@ -36,6 +36,9 @@ def build_summary_keyboard(
             InlineKeyboardButton(label_for('key-insights'), callback_data="summarize_key-insights"),
         ],
         [
+            InlineKeyboardButton(label_for('bullet-points'), callback_data="summarize_bullet-points"),
+        ],
+        [
             InlineKeyboardButton(label_for('audio'), callback_data="summarize_audio"),
         ],
         [
