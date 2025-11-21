@@ -3051,6 +3051,36 @@ class YouTubeTelegramBot:
             return [last] if last else []
         return [str(s).strip() for s in recent if str(s).strip()][:n]
 
+    # ------------------------- Quick label helpers -------------------------
+    def _friendly_llm_provider(self, provider: Optional[str]) -> str:
+        mapping = {
+            "openai": "OpenAI",
+            "anthropic": "Anthropic",
+            "openrouter": "OpenRouter",
+            "ollama": "Ollama",
+        }
+        if not provider:
+            return "LLM"
+        return mapping.get(provider.lower(), provider.title())
+
+    def _format_quick_cloud_label(self, model_slug: str) -> str:
+        """Render a compact 'Cloud • model' label, resolving provider when possible."""
+        if not model_slug:
+            return "Cloud"
+        try:
+            from llm_config import llm_config as _lc
+            resolved_provider, resolved_model, _ = _lc.get_model_config(None, model_slug)
+            prov_name = self._friendly_llm_provider(resolved_provider)
+            short_model = self._short_model_name(resolved_model)
+            return f"{prov_name} • {self._short_label(short_model or model_slug, 24)}"
+        except Exception:
+            return f"Cloud • {self._short_label(self._short_model_name(model_slug), 24)}"
+
+    def _format_quick_local_label(self, model_slug: str) -> str:
+        if not model_slug:
+            return "Local"
+        return f"Local • {self._short_label(self._short_model_name(model_slug), 24)}"
+
     def _build_provider_with_quick_keyboard(
         self,
         cloud_label: str,
@@ -3062,14 +3092,14 @@ class YouTubeTelegramBot:
         if quick_cloud_slug:
             rows.append([
                 InlineKeyboardButton(
-                    f"API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
+                    self._format_quick_cloud_label(quick_cloud_slug),
                     callback_data=f"summary_quick:cloud:{quick_cloud_slug}",
                 )
             ])
         if quick_local_slug:
             rows.append([
                 InlineKeyboardButton(
-                    f"Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
+                    self._format_quick_local_label(quick_local_slug),
                     callback_data=f"summary_quick:ollama:{quick_local_slug}",
                 )
             ])
@@ -3107,14 +3137,14 @@ class YouTubeTelegramBot:
         if quick_cloud_slug:
             rows.append([
                 InlineKeyboardButton(
-                    f"API • {self._short_label(self._short_model_name(quick_cloud_slug), 24)}",
+                    self._format_quick_cloud_label(quick_cloud_slug),
                     callback_data=f"summary_quick:cloud:{quick_cloud_slug}",
                 )
             ])
         if quick_local_slug:
             rows.append([
                 InlineKeyboardButton(
-                    f"Local • {self._short_label(self._short_model_name(quick_local_slug), 24)}",
+                    self._format_quick_local_label(quick_local_slug),
                     callback_data=f"summary_quick:ollama:{quick_local_slug}",
                 )
             ])
