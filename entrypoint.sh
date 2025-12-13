@@ -11,6 +11,13 @@ ZIMAGE_QUEUE_INTERVAL="${ZIMAGE_QUEUE_INTERVAL:-30}"
 
 echo "[entrypoint] Starting services (ENABLE_TTS_QUEUE_WORKER=${ENABLE_TTS_QUEUE_WORKER}, TTS_INTERVAL=${TTS_QUEUE_INTERVAL}s, ENABLE_IMAGE_QUEUE_WORKER=${ENABLE_IMAGE_QUEUE_WORKER}, IMG_INTERVAL=${IMAGE_QUEUE_INTERVAL}s, ENABLE_ZIMAGE_QUEUE_WORKER=${ENABLE_ZIMAGE_QUEUE_WORKER}, ZIMG_INTERVAL=${ZIMAGE_QUEUE_INTERVAL}s)"
 
+is_enabled() {
+  case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Start Telegram bot
 ${PYTHON_BIN} telegram_bot.py &
 BOT_PID=$!
@@ -28,14 +35,14 @@ if [ "${ENABLE_TTS_QUEUE_WORKER}" = "1" ]; then
 fi
 
 # Optionally start the Image queue worker in watch mode
-if [ "${ENABLE_IMAGE_QUEUE_WORKER}" = "1" ]; then
+if is_enabled "${ENABLE_IMAGE_QUEUE_WORKER}"; then
   ${PYTHON_BIN} tools/drain_image_queue.py --watch --interval "${IMAGE_QUEUE_INTERVAL}" &
   IMG_WORKER_PID=$!
   echo "[entrypoint] Image queue worker PID=${IMG_WORKER_PID}"
 fi
 
 # Optionally start the Z-Image queue worker in watch mode
-if [ "${ENABLE_ZIMAGE_QUEUE_WORKER}" = "1" ]; then
+if is_enabled "${ENABLE_ZIMAGE_QUEUE_WORKER}"; then
   ${PYTHON_BIN} tools/drain_zimage_queue.py --watch --interval "${ZIMAGE_QUEUE_INTERVAL}" &
   ZIMG_WORKER_PID=$!
   echo "[entrypoint] Z-Image queue worker PID=${ZIMG_WORKER_PID}"
