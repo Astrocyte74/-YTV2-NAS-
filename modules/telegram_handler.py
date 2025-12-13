@@ -4232,8 +4232,12 @@ class YouTubeTelegramBot:
                     break
         res = prefs.get("resolution") or ""
         steps = prefs.get("steps") or 7
+        # Force a stable message bubble width in Telegram by including a long,
+        # unbroken separator line (Telegram sizes the bubble based on line widths).
+        ruler = "────────────────────────────────"
         parts = [
             "Z-Image Options",
+            ruler,
             f"Style: {style}",
             f"Enhance: {enhance}",
             f"LoRA: {lora_label}",
