@@ -4333,7 +4333,7 @@ class YouTubeTelegramBot:
         ]
         if view == "advanced" or prefs.get("queue_only"):
             parts.append(f"Queue-only: {queue_only}")
-        if view == "advanced" or prefs.get("lora_id"):
+        if view == "advanced" or view == "basic" or prefs.get("lora_id"):
             parts.append(f"LoRA: {lora_label}")
         parts.extend([
             ruler,
@@ -4400,7 +4400,6 @@ class YouTubeTelegramBot:
         style = (prefs.get("style") or "Cinematic photo").strip()
         rows: List[List[InlineKeyboardButton]] = []
         if view != "advanced":
-            rows.append([InlineKeyboardButton("🎬 Generate Image", callback_data="zimg:generate")])
             rows.append([
                 InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
                 InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
@@ -4452,6 +4451,26 @@ class YouTubeTelegramBot:
             q_row.append(InlineKeyboardButton(f"{mark}{label}", callback_data=f"zimg:quality:set:{key}"))
         rows.append(q_row)
 
+        # LoRA controls in Basic (keep on the first view)
+        if view != "advanced":
+            if loras:
+                lora_id = prefs.get("lora_id")
+                current_idx = -1
+                for idx, entry in enumerate(loras):
+                    if entry.get("id") == lora_id:
+                        current_idx = idx
+                        break
+                total = len(loras)
+                center = f"LoRA {current_idx + 1 if current_idx >= 0 else 1}/{total}" if total > 0 else "LoRA"
+                rows.append([
+                    InlineKeyboardButton("◀️ Prev LoRA", callback_data="zimg:lora:prev"),
+                    InlineKeyboardButton(center, callback_data="zimg:nop"),
+                    InlineKeyboardButton("Next LoRA ▶️", callback_data="zimg:lora:next"),
+                ])
+                rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
+            else:
+                rows.append([InlineKeyboardButton("LoRA: (unavailable)", callback_data="zimg:nop")])
+
         # Random prompt helpers (rename to clarify: sets prompt only)
         rows.append([
             InlineKeyboardButton("🤖 Random Photo Prompt", callback_data="zimg:random:set:photo"),
@@ -4463,18 +4482,12 @@ class YouTubeTelegramBot:
         ])
 
         if view != "advanced":
-            # LoRA: only show when active; use Advanced for cycling/picking
-            if prefs.get("lora_id"):
-                rows.append([
-                    InlineKeyboardButton("🎭 Change LoRA", callback_data="zimg:view:set:advanced"),
-                    InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear"),
-                ])
-            else:
-                rows.append([InlineKeyboardButton("🎭 Choose LoRA", callback_data="zimg:view:set:advanced")])
             rows.append([
                 InlineKeyboardButton("⚙️ Advanced Settings", callback_data="zimg:view:set:advanced"),
                 InlineKeyboardButton("Close", callback_data="zimg:close"),
             ])
+            # Primary action at the bottom (more obvious)
+            rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
             return InlineKeyboardMarkup(rows)
 
         # Advanced controls
