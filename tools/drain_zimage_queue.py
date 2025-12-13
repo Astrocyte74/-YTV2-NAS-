@@ -146,6 +146,21 @@ async def process_job(path: Path) -> bool:
     data = None
     image_bytes = None
     async with httpx.AsyncClient() as client:
+        enable_health = _env_bool("ENABLE_ZIMAGE_HEALTHCHECK", "1")
+        try:
+            health_timeout = float(_env_default("ZIMAGE_HEALTHCHECK_TIMEOUT", "5"))
+        except Exception:
+            health_timeout = 5.0
+        if enable_health:
+            try:
+                h = await client.get(f"{base}/health", timeout=health_timeout)
+                h_ok = h.status_code == 200 and isinstance(h.json(), dict) and h.json().get("status") == "ok"
+                if not h_ok:
+                    logging.info("Z-Image health failed; leaving job pending")
+                    return False
+            except Exception as exc:
+                logging.info("Z-Image health unreachable: %s; leaving job pending", exc)
+                return False
         try:
             resp = await client.post(gen_url, json=payload, timeout=post_timeout)
         except Exception as exc:

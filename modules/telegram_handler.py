@@ -3817,6 +3817,26 @@ class YouTubeTelegramBot:
             prompt = re.sub(r"\s*#\d+\s*$", "", prompt).strip()
         return prompt, seed
 
+    async def _zimage_health_ok(self, base: str) -> bool:
+        enable = (os.getenv("ENABLE_ZIMAGE_HEALTHCHECK", "1").strip().lower() in {"1", "true", "yes", "on"})
+        if not enable:
+            return True
+        try:
+            timeout = float(os.getenv("ZIMAGE_HEALTHCHECK_TIMEOUT", "5"))
+        except Exception:
+            timeout = 5.0
+        url = f"{base}/health"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, timeout=timeout)
+                if resp.status_code != 200:
+                    return False
+                body = resp.json()
+                return isinstance(body, dict) and body.get("status") == "ok"
+        except Exception as exc:
+            logging.debug("zimage health failed: %s", exc)
+            return False
+
     def _zimage_enqueue_for_later(self, job: Dict[str, Any], chat_id: Optional[int], status_message: Any = None) -> None:
         if not job or not job.get("prompt") or not job.get("base"):
             return
@@ -3865,13 +3885,22 @@ class YouTubeTelegramBot:
         async def _mark(text: str):
             if status_message and bot:
                 try:
-                    await status_message.edit_text(text)
-                except Exception:
-                    pass
+            await status_message.edit_text(text)
+        except Exception:
+            pass
         if not bot:
             return
         if not base:
             await bot.send_message(chat_id=chat_id, text="Z-Image base URL not set.")
+            return
+        # Fast preflight: if offline, queue immediately
+        health_ok = await self._zimage_health_ok(base)
+        if not health_ok:
+            await _mark("🕒 Z-Image offline; queued for later.")
+            if queue_on_fail:
+                self._zimage_enqueue_for_later(job, chat_id, status_message)
+            else:
+                await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; queued for later.")
             return
         payload = {
             "prompt": prompt,

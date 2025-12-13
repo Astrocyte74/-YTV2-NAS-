@@ -44,7 +44,7 @@ Z‑Image Turbo (Mac)
 - Configure `ZIMAGE_BASE_URL` (prefer the Mac’s WireGuard IP, e.g., `http://10.0.4.x:8000`). Defaults: style `Cinematic photo`, 512×512, 7 steps, CFG 0.0. `ZIMAGE_DEFAULT_STYLE` accepts a comma list and uses the first entry (e.g., `Cinematic photo,Anime`). `ZIMAGE_DEFAULT_RESOLUTION` also accepts a comma list and uses the first entry (e.g., `512x512,768x768`).
 - Commands: `/zimage …` (`/z`, `/image` aliases). Optional seed suffix `#12345` to fix seed; otherwise random.
 - Queueing: max 2 in-flight generations; up to 5 queued. Replies with position if queued; sends the PNG back as a photo when done.
-- Offline queue: when the Mac/WG is unreachable, jobs can be persisted to `data/zimage_queue/` and drained by `tools/drain_zimage_queue.py` (enable with `ENABLE_ZIMAGE_QUEUE_WORKER=1`, interval via `ZIMAGE_QUEUE_INTERVAL`).
+- Offline queue: when the Mac/WG is unreachable, jobs can be persisted to `data/zimage_queue/` and drained by `tools/drain_zimage_queue.py` (enable with `ENABLE_ZIMAGE_QUEUE_WORKER=1`, interval via `ZIMAGE_QUEUE_INTERVAL`). A preflight health check (`/health`) with a short timeout (`ZIMAGE_HEALTHCHECK_TIMEOUT`, default 5s; disable via `ENABLE_ZIMAGE_HEALTHCHECK=0`) avoids long waits when the service is down.
 
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
