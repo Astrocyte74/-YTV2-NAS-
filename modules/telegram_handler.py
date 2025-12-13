@@ -4402,7 +4402,6 @@ class YouTubeTelegramBot:
         if view != "advanced":
             rows.append([
                 InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
-                InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
             ])
         else:
             rows.append([
@@ -4411,7 +4410,6 @@ class YouTubeTelegramBot:
             ])
             rows.append([
                 InlineKeyboardButton("🎬 Generate", callback_data="zimg:generate"),
-                InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
             ])
             rows.append([
                 InlineKeyboardButton("✨ Enhance Now", callback_data="zimg:prompt:enhance"),
@@ -4429,19 +4427,13 @@ class YouTubeTelegramBot:
             ])
             rows.append([InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear")])
 
-        # Style chips
-        style_row1: List[InlineKeyboardButton] = []
-        style_row2: List[InlineKeyboardButton] = []
-        for idx, (label, full) in enumerate(styles):
-            mark = "✅ " if full == style else ""
-            btn = InlineKeyboardButton(f"{mark}{label}", callback_data=f"zimg:style:set:{idx}")
-            if idx < 3:
-                style_row1.append(btn)
-            else:
-                style_row2.append(btn)
-        rows.append(style_row1)
-        if style_row2:
-            rows.append(style_row2)
+        # Style picker: single rotating button (includes None)
+        style_label = style
+        for short, full in styles:
+            if full == style:
+                style_label = short
+                break
+        rows.append([InlineKeyboardButton(f"🎨 Style: {style_label}", callback_data="zimg:style:next")])
 
         # Quality presets (basic + advanced)
         current_quality = _quality_name()
@@ -5242,15 +5234,6 @@ class YouTubeTelegramBot:
                         except ValueError:
                             idx = 0
                         prefs["style"] = styles[(idx + 1) % len(styles)]
-                    # New: zimg:style:set:<idx>
-                    elif len(parts) >= 4 and parts[2] == "set":
-                        styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
-                        try:
-                            idx = int(parts[3])
-                        except Exception:
-                            idx = -1
-                        if 0 <= idx < len(styles):
-                            prefs["style"] = styles[idx]
                 elif action == "enhance":
                     prefs["enhance"] = not prefs.get("enhance")
                 elif action == "queue":
@@ -5363,16 +5346,6 @@ class YouTubeTelegramBot:
                         pass
                 elif action == "prompt" and len(parts) >= 3:
                     sub = parts[2]
-                    if sub == "send":
-                        txt = (prefs.get("last_prompt") or "").strip()
-                        if not txt:
-                            await query.answer("No prompt set yet", show_alert=False)
-                            return
-                        try:
-                            await query.message.reply_text(f"Prompt:\n{txt}")
-                        except Exception:
-                            pass
-                        return
                     if sub == "enhance":
                         txt = (prefs.get("last_prompt") or "").strip()
                         if not txt:
