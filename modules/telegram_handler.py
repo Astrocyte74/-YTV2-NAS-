@@ -2395,16 +2395,6 @@ class YouTubeTelegramBot:
             "lora_id": prefs.get("lora_id"),
             "lora_scale": prefs.get("lora_scale") or 1.0,
         }
-        # Queue-only mode: always persist for later instead of attempting live generation
-        if prefs.get("queue_only"):
-            try:
-                job_copy = dict(job)
-                job_copy.pop("status_message", None)
-                zimage_queue.enqueue(job_copy)
-                await message.reply_text(self._zimage_queue_receipt(job_copy, prefix="🕒 (queue-only)"))
-            except Exception:
-                await message.reply_text("⚠️ Failed to queue Z-Image job.")
-            return
         if self.zimage_inflight >= self.ZIMAGE_MAX_INFLIGHT:
             if len(self.zimage_queue) >= self.ZIMAGE_MAX_QUEUE:
                 await message.reply_text("Z-Image queue is full; please try again in a moment.")
@@ -3892,7 +3882,6 @@ class YouTubeTelegramBot:
             "view": "basic",
             "style": defaults.get("style") or "Cinematic photo",
             "enhance": False,
-            "queue_only": False,
             "lora_id": None,
             "lora_scale": 1.0,
             "resolution": f"{defaults.get('width')}x{defaults.get('height')}",
@@ -4303,7 +4292,6 @@ class YouTubeTelegramBot:
         view = (prefs.get("view") or "basic").strip().lower()
         style = prefs.get("style") or "Cinematic photo"
         enhance = "On" if prefs.get("enhance") else "Off"
-        queue_only = "On" if prefs.get("queue_only") else "Off"
         prompt_cat = (prefs.get("prompt_category") or "photo").strip().lower()
         lora_id = prefs.get("lora_id")
         lora_label = "None"
@@ -4342,8 +4330,6 @@ class YouTubeTelegramBot:
         ]
         if view != "advanced":
             parts.append(f"Prompt Type: {prompt_cat_label}")
-        if view == "advanced" or prefs.get("queue_only"):
-            parts.append(f"Queue-only: {queue_only}")
         if view == "advanced" or view == "basic" or prefs.get("lora_id"):
             parts.append(f"LoRA: {lora_label}")
         parts.extend([
@@ -4400,7 +4386,8 @@ class YouTubeTelegramBot:
                 return "High"
             return "Custom"
 
-        view = (prefs.get("view") or "basic").strip().lower()
+        # Advanced view has been intentionally removed; keep this as a single-screen UI.
+        prefs["view"] = "basic"
         prompt_cat = (prefs.get("prompt_category") or "photo").strip().lower()
         styles = [
             ("None", "None"),
@@ -4412,32 +4399,12 @@ class YouTubeTelegramBot:
         style = (prefs.get("style") or "Cinematic photo").strip()
         rows: List[List[InlineKeyboardButton]] = []
 
-        # Advanced view: keep it minimal (maintenance + toggles) so it doesn't
-        # reshuffle primary actions or duplicate controls from the Basic view.
-        if view == "advanced":
-            rows.append([
-                InlineKeyboardButton("⬅️ Basic", callback_data="zimg:view:set:basic"),
-                InlineKeyboardButton("Close", callback_data="zimg:close"),
-            ])
-            rows.append([
-                InlineKeyboardButton(
-                    "Auto Enhance: On" if prefs.get("enhance") else "Auto Enhance: Off",
-                    callback_data="zimg:enhance:toggle",
-                ),
-                InlineKeyboardButton(
-                    "Queue-only: On" if prefs.get("queue_only") else "Queue-only: Off",
-                    callback_data="zimg:queue:toggle",
-                ),
-            ])
-            rows.append([InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear")])
-            rows.append([InlineKeyboardButton("♻️ Reset settings", callback_data="zimg:reset")])
-            if prefs.get("lora_id"):
-                rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
-            rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
-            return InlineKeyboardMarkup(rows)
-
         rows.append([
             InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
+            InlineKeyboardButton(
+                "🔄 Auto-Enhance: On" if prefs.get("enhance") else "🔄 Auto-Enhance: Off",
+                callback_data="zimg:enhance:toggle",
+            ),
         ])
 
         # Style picker: single rotating button (includes None)
@@ -4490,9 +4457,10 @@ class YouTubeTelegramBot:
             rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
         rows.append([
-            InlineKeyboardButton("⚙️ Advanced Settings", callback_data="zimg:view:set:advanced"),
-            InlineKeyboardButton("Close", callback_data="zimg:close"),
+            InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear"),
+            InlineKeyboardButton("♻️ Reset", callback_data="zimg:reset"),
         ])
+        rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
         # Primary action at the bottom (more obvious)
         rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
         return InlineKeyboardMarkup(rows)
@@ -5240,11 +5208,11 @@ class YouTubeTelegramBot:
                                 pass
                             # Keep panel displayed
                     else:
-                        prefs["queue_only"] = not prefs.get("queue_only")
+                        # Queue-only mode was removed from the UI; ignore toggles.
+                        pass
                 elif action == "view" and len(parts) >= 4 and parts[2] == "set":
-                    target = (parts[3] or "").strip().lower()
-                    if target in {"basic", "advanced"}:
-                        prefs["view"] = target
+                    # Advanced view removed; ignore.
+                    pass
                 elif action == "quality" and len(parts) >= 4 and parts[2] == "set":
                     key = (parts[3] or "").strip().lower()
                     if key == "fast":
@@ -5453,20 +5421,9 @@ class YouTubeTelegramBot:
                         "lora_id": prefs.get("lora_id"),
                         "lora_scale": prefs.get("lora_scale") or 1.0,
                     }
-                    if prefs.get("queue_only"):
-                        try:
-                            zimage_queue.enqueue(job)
-                            try:
-                                await query.message.reply_text(self._zimage_queue_receipt(job, loras=loras, prefix="🕒 (queue-only)"))
-                            except Exception:
-                                await query.answer("Queued", show_alert=False)
-                        except Exception:
-                            await query.answer("Queue failed", show_alert=False)
-                        # keep panel
-                    else:
-                        status_msg = await query.message.reply_text("🖼️ Generating image…")
-                        job["status_message"] = status_msg
-                        asyncio.create_task(self._zimage_start_job(job))
+                    status_msg = await query.message.reply_text("🖼️ Generating image…")
+                    job["status_message"] = status_msg
+                    asyncio.create_task(self._zimage_start_job(job))
                     # keep panel displayed
                 elif action == "reset":
                     self.zimage_prefs.pop(chat_id, None)
