@@ -149,10 +149,12 @@ async def continue_exchange(
     defaults = handler._ollama_persona_defaults()
     persona_a = session.get("persona_a") or defaults[0]
     persona_b = session.get("persona_b") or defaults[1]
-    persona_a_custom = bool(session.get("persona_a_custom"))
-    persona_b_custom = bool(session.get("persona_b_custom"))
-    intro_a = bool(persona_a_custom and session.get("persona_a_intro_pending"))
-    intro_b = bool(persona_b_custom and session.get("persona_b_intro_pending"))
+    persona_a_none = handler._is_no_persona(persona_a)
+    persona_b_none = handler._is_no_persona(persona_b)
+    persona_a_custom = bool(session.get("persona_a_custom")) and not persona_a_none
+    persona_b_custom = bool(session.get("persona_b_custom")) and not persona_b_none
+    intro_a = bool(persona_a_custom and session.get("persona_a_intro_pending")) and not persona_a_none
+    intro_b = bool(persona_b_custom and session.get("persona_b_intro_pending")) and not persona_b_none
     topic = session.get("topic", "The nature of space and time")
     turn_idx = turn_number or (session.get("ai2ai_round") or 0) + 1
     session["ai2ai_round"] = turn_idx
@@ -165,17 +167,22 @@ async def continue_exchange(
     turn_suffix = f" · Turn {turn_idx}"
     if total:
         turn_suffix += f"/{total}"
+    pa_disp = handler._persona_label(persona_a, model_a or "Speaker A")
+    pb_disp = handler._persona_label(persona_b, model_b or "Speaker B")
+    topic_prompt_a = (
+        f"Debate topic: {topic}. Present your view concisely and focus on evidence."
+        if persona_a_none else
+        f"Debate topic: {topic}. Present your view from your own time and culture, "
+        "using only knowledge that would have been available in your lifetime."
+    )
     a_messages = [
         {
             "role": "system",
-            "content": handler._ollama_persona_system_prompt(persona_a, "opponent", intro_a),
+            "content": handler._ollama_neutral_system_prompt("opponent", intro_a) if persona_a_none else handler._ollama_persona_system_prompt(persona_a, "opponent", intro_a),
         },
         {
             "role": "user",
-            "content": (
-                f"Debate topic: {topic}. Present your view from your own time and culture, "
-                "using only knowledge that would have been available in your lifetime."
-            ),
+            "content": topic_prompt_a,
         },
     ]
     from types import SimpleNamespace
@@ -198,7 +205,6 @@ async def continue_exchange(
             return M(self._app, chat_id)
 
     u = U(handler.application, chat_id)
-    pa_disp, _ = handler._persona_parse(persona_a)
     # Allow per-slot provider: default to local (ollama)
     prov_a = (session.get('ai2ai_provider_a') or 'ollama')
     if prov_a == 'cloud':
@@ -243,7 +249,6 @@ async def continue_exchange(
         tr = session.get("ai2ai_transcript")
         if not isinstance(tr, list):
             tr = []
-        pa_disp, _ = handler._persona_parse(persona_a)
         tr.append({"speaker": "A", "persona": pa_disp, "model": model_a, "text": a_text or ""})
         session["ai2ai_transcript"] = tr[-200:]
     except Exception:
@@ -252,19 +257,19 @@ async def continue_exchange(
         session["persona_a_intro_pending"] = False
     if session.get("ai2ai_cancel"):
         return
+    b_intro = intro_b and not persona_b_none
+    respond_label = pa_disp if not persona_a_none else "the other speaker"
+    response_prompt = f"Respond to {respond_label}'s statement: {a_text[:800]}"
     b_messages = [
         {
             "role": "system",
-            "content": handler._ollama_persona_system_prompt(persona_b, "opponent", intro_b),
+            "content": handler._ollama_neutral_system_prompt("opponent", b_intro) if persona_b_none else handler._ollama_persona_system_prompt(persona_b, "opponent", b_intro),
         },
         {
             "role": "user",
-            "content": (
-                f"Respond to {persona_a}'s statement: {a_text[:800]}"
-            ),
+            "content": response_prompt,
         },
     ]
-    pb_disp, _ = handler._persona_parse(persona_b)
     prov_b = (session.get('ai2ai_provider_b') or 'ollama')
     if prov_b == 'cloud':
         opt_b = session.get('ai2ai_cloud_option_b') or {}
@@ -305,7 +310,6 @@ async def continue_exchange(
         tr = session.get("ai2ai_transcript")
         if not isinstance(tr, list):
             tr = []
-        pb_disp, _ = handler._persona_parse(persona_b)
         tr.append({"speaker": "B", "persona": pb_disp, "model": model_b, "text": b_text or ""})
         session["ai2ai_transcript"] = tr[-200:]
     except Exception:
@@ -594,8 +598,12 @@ async def handle_callback(
                     session[f"persona_{slot_lower}"] = chosen
                     session[f"persona_category_{slot_lower}"] = categories.get(cat_key, {}).get("label")
                     if slot in ("A", "B"):
-                        session[f"persona_{slot_lower}_custom"] = True
-                        session[f"persona_{slot_lower}_intro_pending"] = True
+                        if handler._is_no_persona(chosen):
+                            session[f"persona_{slot_lower}_custom"] = False
+                            session[f"persona_{slot_lower}_intro_pending"] = False
+                        else:
+                            session[f"persona_{slot_lower}_custom"] = True
+                            session[f"persona_{slot_lower}_intro_pending"] = True
                     handler._update_persona_session_fields(session, slot_lower, chosen)
                 session[f"ai2ai_view_{slot_lower}"] = "persona_list"
             models = session.get("models") or []
@@ -610,18 +618,18 @@ async def handle_callback(
         if len(parts) >= 2:
             slot = parts[1].upper()
             slot_lower = slot.lower()
-            session.pop(f"persona_{slot_lower}", None)
-            session.pop(f"persona_category_{slot_lower}", None)
+            session[f"persona_{slot_lower}"] = "No persona"
+            session[f"persona_category_{slot_lower}"] = "No persona"
             if slot in ("A", "B"):
-                session.pop(f"persona_{slot_lower}_custom", None)
-                session.pop(f"persona_{slot_lower}_intro_pending", None)
-            session.pop(f"persona_{slot_lower}_display", None)
-            session.pop(f"persona_{slot_lower}_gender", None)
+                session[f"persona_{slot_lower}_custom"] = False
+                session[f"persona_{slot_lower}_intro_pending"] = False
+            session[f"persona_{slot_lower}_display"] = ""
+            session[f"persona_{slot_lower}_gender"] = None
             models = session.get("models") or []
             kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
             await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
             handler.ollama_sessions[chat_id] = session
-            await query.answer("Persona cleared")
+            await query.answer("Persona cleared (no persona)")
             return True
 
     if callback_data.startswith("ollama_set_a:"):

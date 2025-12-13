@@ -85,6 +85,9 @@ import hashlib
 from pydub import AudioSegment
 
 
+NO_PERSONA_LABEL = "No persona (default self)"
+
+
 def _clean_label(value: Optional[str]) -> str:
     if not value:
         return ""
@@ -3575,8 +3578,18 @@ class YouTubeTelegramBot:
         val = os.getenv('OLLAMA_STREAM_DEFAULT', '1').lower()
         return val not in ('0', 'false', 'no')
 
+    def _is_no_persona(self, name: Optional[str]) -> bool:
+        if not name:
+            return False
+        return str(name).strip().lower().startswith("no persona")
+
     def _ollama_persona_categories(self) -> Dict[str, Dict[str, Any]]:
-        categories: Dict[str, Dict[str, Any]] = {}
+        categories: Dict[str, Dict[str, Any]] = {
+            "__NONE__": {
+                "label": "No persona",
+                "names": [NO_PERSONA_LABEL],
+            }
+        }
 
         keys: List[str] = []
         base_key = "OLLAMA_PERSONA"
@@ -3610,7 +3623,7 @@ class YouTubeTelegramBot:
                 "names": names,
             }
 
-        if not categories:
+        if len(categories) == 1:  # only the No persona entry exists
             categories["DEFAULT"] = {
                 "label": "Classic",
                 "names": ["Albert Einstein", "Isaac Newton"],
@@ -3627,6 +3640,8 @@ class YouTubeTelegramBot:
         raw = (name or "").strip()
         if not raw:
             return "", None
+        if self._is_no_persona(raw):
+            return "", None
         m = re.search(r"\s*\(([MF])\)\s*$", raw, flags=re.IGNORECASE)
         if not m:
             return raw, None
@@ -3638,6 +3653,9 @@ class YouTubeTelegramBot:
         """Update session with display and gender for a given slot ('a' or 'b' or 'single')."""
         slot = (slot or "").lower()
         display, gender = self._persona_parse(name)
+        if self._is_no_persona(name):
+            display = ""
+            gender = None
         if slot in ("a", "b"):
             session[f"persona_{slot}_display"] = display or name or ""
             session[f"persona_{slot}_gender"] = gender
@@ -3645,13 +3663,25 @@ class YouTubeTelegramBot:
             session["persona_single_display"] = display or name or ""
             session["persona_single_gender"] = gender
 
+    def _persona_label(self, raw: Optional[str], fallback: str) -> str:
+        display, _ = self._persona_parse(raw)
+        if self._is_no_persona(raw):
+            return "No persona"
+        if not display:
+            return fallback
+        return display
+
+    def _ai2ai_persona_label(self, session: Dict[str, Any], slot: str, fallback: str) -> str:
+        raw = session.get(f"persona_{slot}") if session else None
+        return self._persona_label(raw, fallback)
+
     def _ollama_persona_pool(self) -> List[str]:
         categories = self._ollama_persona_categories()
         pool: List[str] = []
         for info in categories.values():
             names = info.get("names") or []
             for name in names:
-                if isinstance(name, str) and name.strip():
+                if isinstance(name, str) and name.strip() and not self._is_no_persona(name):
                     pool.append(name.strip())
         if not pool:
             pool = ["Albert Einstein", "Isaac Newton"]
@@ -3717,6 +3747,19 @@ class YouTubeTelegramBot:
                     "You have never heard of your opponent before; be curious about who they are and what world they come from. "
                     "Finish by inviting your opponent to explain themselves."
                 )
+        return content
+
+    def _ollama_neutral_system_prompt(self, intro_target: str, intro_pending: bool) -> str:
+        content = (
+            "You are an AI assistant taking part in a short debate with another AI. "
+            "Provide concise, well-reasoned replies grounded in evidence and clear reasoning. "
+            "Be direct, avoid role-play, and keep the tone professional."
+        )
+        if intro_pending:
+            if intro_target == "user":
+                content += " Introduce yourself briefly and invite the other party to share their view."
+            else:
+                content += " Introduce yourself briefly and invite your counterpart to share their perspective."
         return content
 
     def _ollama_single_view_toggle_row(self, view: str) -> List[InlineKeyboardButton]:
@@ -3795,10 +3838,12 @@ class YouTubeTelegramBot:
                 self._update_persona_session_fields(session, 'a', session.get('persona_a'))
                 self._update_persona_session_fields(session, 'b', session.get('persona_b'))
             defaults = self._ollama_persona_defaults()
+            model_a = session.get('ai2ai_model_a') or session.get('model') or defaults[0]
+            model_b = session.get('ai2ai_model_b') or session.get('model') or defaults[1]
             pa = session.get('persona_a') or defaults[0]
             pb = session.get('persona_b') or defaults[1]
-            pa_disp, _ = self._persona_parse(pa)
-            pb_disp, _ = self._persona_parse(pb)
+            pa_disp = self._ai2ai_persona_label(session, 'a', model_a)
+            pb_disp = self._ai2ai_persona_label(session, 'b', model_b)
             categories = self._ollama_persona_categories()
             cat_a = session.get("persona_category_a")
             if not cat_a:
@@ -5875,12 +5920,10 @@ class YouTubeTelegramBot:
 
     def _ai2ai_audio_caption(self, session: Dict[str, Any]) -> str:
         defaults = self._ollama_persona_defaults()
-        a_raw = session.get("persona_a") or defaults[0]
-        b_raw = session.get("persona_b") or defaults[1]
-        a_disp, _ = self._persona_parse(a_raw)
-        b_disp, _ = self._persona_parse(b_raw)
-        model_a = session.get("ai2ai_model_a") or session.get("model") or "?"
-        model_b = session.get("ai2ai_model_b") or session.get("model") or "?"
+        model_a = session.get("ai2ai_model_a") or session.get("model") or defaults[0]
+        model_b = session.get("ai2ai_model_b") or session.get("model") or defaults[1]
+        a_disp = self._ai2ai_persona_label(session, 'a', str(model_a))
+        b_disp = self._ai2ai_persona_label(session, 'b', str(model_b))
         tts_a = (session.get('ai2ai_tts_a_label') or '').strip()
         tts_b = (session.get('ai2ai_tts_b_label') or '').strip()
         provider = (session.get('ai2ai_tts_provider') or '').strip()
@@ -6081,10 +6124,16 @@ class YouTubeTelegramBot:
                 defaults = self._ollama_persona_defaults()
                 persona_a_raw = session.get("persona_a") or defaults[0]
                 persona_b_raw = session.get("persona_b") or defaults[1]
+                persona_a_none = self._is_no_persona(persona_a_raw)
+                persona_b_none = self._is_no_persona(persona_b_raw)
                 a_display, a_gender = self._persona_parse(persona_a_raw)
                 b_display, b_gender = self._persona_parse(persona_b_raw)
                 if not gender_toggle:
                     a_gender = None
+                    b_gender = None
+                if persona_a_none:
+                    a_gender = None
+                if persona_b_none:
                     b_gender = None
 
                 def _pick_for(label: str, gender: Optional[str], avoid: Optional[Tuple[str, str]] = None) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
@@ -6144,15 +6193,20 @@ class YouTubeTelegramBot:
 
         # Prepare utterance order with optional intros
         defaults = self._ollama_persona_defaults()
+        model_a = session.get("ai2ai_model_a") or session.get("model") or defaults[0]
+        model_b = session.get("ai2ai_model_b") or session.get("model") or defaults[1]
         persona_a = session.get("persona_a") or defaults[0]
         persona_b = session.get("persona_b") or defaults[1]
-        a_display, _ = self._persona_parse(persona_a)
-        b_display, _ = self._persona_parse(persona_b)
+        persona_a_none = self._is_no_persona(persona_a)
+        persona_b_none = self._is_no_persona(persona_b)
+        a_label = self._persona_label(persona_a, str(model_a))
+        b_label = self._persona_label(persona_b, str(model_b))
         sequence: List[Tuple[str, str]] = []  # (speaker, text)
-        if intro_enabled:
-            sequence.append(("A", f"Hello, my name is {a_display}."))
+        intro_allowed = intro_enabled and not persona_a_none and not persona_b_none
+        if intro_allowed:
+            sequence.append(("A", f"Hello, my name is {a_label}."))
             sequence.append(("__pause__", str(intro_pause_ms)))
-            sequence.append(("B", f"And my name is {b_display}."))
+            sequence.append(("B", f"And my name is {b_label}."))
             sequence.append(("__pause__", str(intro_pause_ms)))
         for entry in transcript:
             sp = (entry or {}).get("speaker") or "A"

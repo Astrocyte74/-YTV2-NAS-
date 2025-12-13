@@ -7,6 +7,7 @@ It merges your original behavioural memo and Codex CLI’s engineering plan so y
 2025-10-22 update: the Telegram bot has been modularized into service layers (`modules/services/...`).
 This revision aligns the persona plan with that structure—persona loading lives in a new service
 module that the handlers consume, while the CLI helper remains an optional future add-on.
+Implementation status: `persona_service.py` and the CLI helpers are still planned/not yet implemented; treat these references as roadmap placeholders.
 
 ⸻
 

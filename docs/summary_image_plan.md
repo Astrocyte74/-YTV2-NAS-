@@ -5,10 +5,14 @@
 - Provide richer assets for dashboards, Telegram shares, and future social repost tooling (two-image layout: source + summary graphic).
 - Reuse the Draw Things hub we already operate, keeping control of style, latency, and cost.
 
+## Current Status (2025-11)
+- Pipeline is live on NAS: summaries now generate 384×384 PNGs and upload them to the dashboard via `/api/upload-image` (see `docs/dashboard_summary_image_memo.md` for operations/reset steps).
+- This file is retained as the original design plan; use the memo above for the authoritative runbook and env/auth details.
+
 ## Scope
 - **Sources:** Any summary we already generate (YouTube, Reddit, web articles). Start with long-form video summaries.
 - **Output:** One additional image per summary (`summary_image_url`) sized for card-style usage (~384×384).
-- **Status:** Planning & validation only—no production wiring yet.
+- **Status:** Implemented; future tweaks should stay aligned with the memo linked above.
 
 ## Proposed Pipeline
 1. **Trigger point**  

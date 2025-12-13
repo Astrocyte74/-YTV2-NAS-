@@ -82,6 +82,7 @@ async def handle_callback(handler, query, callback_data: str, session: Dict[str,
         response = "Persona selected"
         if 0 <= index < len(names):
             chosen = names[index]
+            is_none = handler._is_no_persona(chosen)
             current = session.get("persona_single")
             if current == chosen and session.get("persona_single_custom"):
                 session.pop("persona_single", None)
@@ -90,10 +91,17 @@ async def handle_callback(handler, query, callback_data: str, session: Dict[str,
                 session.pop("persona_single_category", None)
                 response = "Persona cleared"
             else:
-                session["persona_single"] = chosen
-                session["persona_single_custom"] = True
-                session["persona_single_intro_pending"] = True
-                session["persona_single_category"] = categories.get(cat_key, {}).get("label")
+                if is_none:
+                    session.pop("persona_single", None)
+                    session["persona_single_custom"] = False
+                    session["persona_single_intro_pending"] = False
+                    session["persona_single_category"] = categories.get(cat_key, {}).get("label")
+                    response = "Persona cleared"
+                else:
+                    session["persona_single"] = chosen
+                    session["persona_single_custom"] = True
+                    session["persona_single_intro_pending"] = True
+                    session["persona_single_category"] = categories.get(cat_key, {}).get("label")
             session["single_view"] = "persona_list"
         models = session.get("models") or []
         kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
