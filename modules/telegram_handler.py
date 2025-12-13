@@ -4445,7 +4445,7 @@ class YouTubeTelegramBot:
             if full == style:
                 style_label = short
                 break
-        rows.append([InlineKeyboardButton(f"🎨 Style: {style_label}", callback_data="zimg:style:next")])
+        rows.append([InlineKeyboardButton(f"🔄 Style: {style_label}", callback_data="zimg:style:next")])
 
         # Quality presets (basic + advanced)
         current_quality = _quality_name()
@@ -4463,7 +4463,7 @@ class YouTubeTelegramBot:
             "design": "Design",
         }.get(prompt_cat, prompt_cat.title() if prompt_cat else "Photo")
         rows.append([
-            InlineKeyboardButton(f"🧠 Prompt Type: {prompt_cat_label}", callback_data="zimg:promptcat:next"),
+            InlineKeyboardButton(f"🔄 Prompt Type: {prompt_cat_label}", callback_data="zimg:promptcat:next"),
             InlineKeyboardButton("🎲 Generate Prompt", callback_data="zimg:prompt:gen"),
         ])
 
@@ -4477,7 +4477,7 @@ class YouTubeTelegramBot:
                     lora_label = entry.get("display_name") or lora_label
                     break
         if loras:
-            rows.append([InlineKeyboardButton(f"🎭 LoRA: {lora_label}", callback_data="zimg:lora:next")])
+            rows.append([InlineKeyboardButton(f"🔄 LoRA: {lora_label}", callback_data="zimg:lora:next")])
         else:
             rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
@@ -4493,7 +4493,7 @@ class YouTubeTelegramBot:
         # Advanced controls
         if loras:
             rows.append([
-                InlineKeyboardButton(f"🎭 LoRA: {lora_label}", callback_data="zimg:lora:next"),
+                InlineKeyboardButton(f"🔄 LoRA: {lora_label}", callback_data="zimg:lora:next"),
                 InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear"),
             ])
         else:
