@@ -45,7 +45,7 @@ Z‑Image Turbo (Mac)
 - Commands: `/zimage …` (`/z`, `/image` aliases). Optional seed suffix `#12345` to fix seed; otherwise random.
 - Options UI: `/zoptions` (`/zopts`) opens a control panel that shows current settings + last prompt (or use `/zopts <prompt>` to set the stored prompt without generating). Use buttons to set style (rotating), quality (rotating), size/steps (rotating), prompt type + “Generate Prompt”, LoRA (rotating, includes None), enhance the current prompt, and Generate using the stored prompt. Advanced Settings exposes queue-only and queue management plus finer overrides.
   - Notes: Random buttons set the prompt but do not auto-generate (press Generate). Settings are per-chat and in-memory; restarting the bot/container resets them to env defaults.
-  - UX: `/zopts` opens a Basic view (Style + Quality presets + LoRA + Generate). Use “Advanced Settings” to access resolution/steps overrides, queue-only, and queue management.
+  - UX: `/zopts` opens a Basic view (prompt helpers + Style/Quality/Size/Steps/LoRA + Generate). “Advanced Settings” is intentionally minimal: auto-enhance toggle, queue-only toggle, clear queued jobs, and reset.
 - Queueing: max 2 in-flight generations; up to 5 queued. When Z-Image is offline/unreachable, jobs are persisted to `data/zimage_queue/` and drained by `tools/drain_zimage_queue.py` (enable with `ENABLE_ZIMAGE_QUEUE_WORKER=1`, interval via `ZIMAGE_QUEUE_INTERVAL`).
   - Preflight: `GET /health` is probed first (short timeout via `ZIMAGE_HEALTHCHECK_TIMEOUT`, default 5s; disable via `ENABLE_ZIMAGE_HEALTHCHECK=0`) to avoid long waits when the service is down.
 

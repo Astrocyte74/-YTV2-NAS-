@@ -4411,25 +4411,17 @@ class YouTubeTelegramBot:
         ]
         style = (prefs.get("style") or "Cinematic photo").strip()
         rows: List[List[InlineKeyboardButton]] = []
-        if view != "advanced":
-            rows.append([
-                InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
-            ])
-        else:
+
+        # Advanced view: keep it minimal (maintenance + toggles) so it doesn't
+        # reshuffle primary actions or duplicate controls from the Basic view.
+        if view == "advanced":
             rows.append([
                 InlineKeyboardButton("⬅️ Basic", callback_data="zimg:view:set:basic"),
                 InlineKeyboardButton("Close", callback_data="zimg:close"),
             ])
             rows.append([
-                InlineKeyboardButton("🎬 Generate", callback_data="zimg:generate"),
-            ])
-            rows.append([
-                InlineKeyboardButton("✨ Enhance Now", callback_data="zimg:prompt:enhance"),
-                InlineKeyboardButton("♻️ Reset", callback_data="zimg:reset"),
-            ])
-            rows.append([
                 InlineKeyboardButton(
-                    "Enhance: On" if prefs.get("enhance") else "Enhance: Off",
+                    "Auto Enhance: On" if prefs.get("enhance") else "Auto Enhance: Off",
                     callback_data="zimg:enhance:toggle",
                 ),
                 InlineKeyboardButton(
@@ -4438,6 +4430,15 @@ class YouTubeTelegramBot:
                 ),
             ])
             rows.append([InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear")])
+            rows.append([InlineKeyboardButton("♻️ Reset settings", callback_data="zimg:reset")])
+            if prefs.get("lora_id"):
+                rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
+            rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
+            return InlineKeyboardMarkup(rows)
+
+        rows.append([
+            InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
+        ])
 
         # Style picker: single rotating button (includes None)
         style_label = style
@@ -4488,25 +4489,12 @@ class YouTubeTelegramBot:
         else:
             rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
-        if view != "advanced":
-            rows.append([
-                InlineKeyboardButton("⚙️ Advanced Settings", callback_data="zimg:view:set:advanced"),
-                InlineKeyboardButton("Close", callback_data="zimg:close"),
-            ])
-            # Primary action at the bottom (more obvious)
-            rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
-            return InlineKeyboardMarkup(rows)
-
-        # Advanced controls
-        if loras:
-            rows.append([
-                InlineKeyboardButton(f"🔄 LoRA: {lora_label}", callback_data="zimg:lora:next"),
-                InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear"),
-            ])
-        else:
-            rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
-
-        rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
+        rows.append([
+            InlineKeyboardButton("⚙️ Advanced Settings", callback_data="zimg:view:set:advanced"),
+            InlineKeyboardButton("Close", callback_data="zimg:close"),
+        ])
+        # Primary action at the bottom (more obvious)
+        rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
         return InlineKeyboardMarkup(rows)
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
