@@ -4266,9 +4266,9 @@ class YouTubeTelegramBot:
             if total > 0:
                 center = f"LoRA {current_idx + 1 if current_idx >= 0 else 1}/{total}"
             rows.append([
-                InlineKeyboardButton("◀️ Prev", callback_data="zimg:lora:prev"),
+                InlineKeyboardButton("◀️ Prev LoRA", callback_data="zimg:lora:prev"),
                 InlineKeyboardButton(center, callback_data="zimg:nop"),
-                InlineKeyboardButton("Next ▶️", callback_data="zimg:lora:next"),
+                InlineKeyboardButton("Next LoRA ▶️", callback_data="zimg:lora:next"),
             ])
         res_val = prefs.get("resolution") or "512x512"
         rows.append([
