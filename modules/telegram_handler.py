@@ -2373,16 +2373,21 @@ class YouTubeTelegramBot:
             return
         prompt, seed = self._zimage_parse_seed(prompt)
         prefs = self._zimage_prefs_for_chat(message.chat_id)
+        width, height = self._zimage_parse_resolution(
+            prefs.get("resolution"),
+            defaults.get("width") or 512,
+            defaults.get("height") or 512,
+        )
         job = {
             "chat_id": message.chat_id,
             "prompt": prompt,
             "seed": seed,
             "base": base,
             "style": prefs.get("style") or defaults.get("style"),
-            "steps": defaults.get("steps"),
+            "steps": prefs.get("steps") or defaults.get("steps"),
             "cfg_scale": defaults.get("cfg_scale"),
-            "width": defaults.get("width"),
-            "height": defaults.get("height"),
+            "width": width,
+            "height": height,
             "queue_on_fail": True,
             "enhance": bool(prefs.get("enhance")),
             "lora_id": prefs.get("lora_id"),
@@ -3863,6 +3868,7 @@ class YouTubeTelegramBot:
             "lora_id": None,
             "lora_scale": 1.0,
             "resolution": f"{defaults.get('width')}x{defaults.get('height')}",
+            "steps": defaults.get("steps") or 7,
         }
         self.zimage_prefs[chat_id] = prefs
         return prefs
@@ -3899,6 +3905,18 @@ class YouTubeTelegramBot:
                 seed = -1
             prompt = re.sub(r"\s*#\d+\s*$", "", prompt).strip()
         return prompt, seed
+
+    def _zimage_parse_resolution(self, value: str, default_w: int, default_h: int) -> Tuple[int, int]:
+        val = (value or "").strip().lower()
+        if "x" in val:
+            try:
+                w_str, h_str = val.split("x", 1)
+                w = int(w_str) or default_w
+                h = int(h_str) or default_h
+                return w, h
+            except Exception:
+                return default_w, default_h
+        return default_w, default_h
 
     async def _zimage_health_ok(self, base: str) -> bool:
         enable = (os.getenv("ENABLE_ZIMAGE_HEALTHCHECK", "1").strip().lower() in {"1", "true", "yes", "on"})
@@ -4203,11 +4221,15 @@ class YouTubeTelegramBot:
                 if entry.get("id") == lora_id:
                     lora_label = entry.get("display_name") or lora_id
                     break
+        res = prefs.get("resolution") or ""
+        steps = prefs.get("steps") or 7
         parts = [
             "Z-Image Options",
             f"Style: {style}",
             f"Enhance: {enhance}",
             f"LoRA: {lora_label}",
+            f"Resolution: {res or '512x512'}",
+            f"Steps: {steps}",
         ]
         return "\n".join(parts)
 
@@ -4233,6 +4255,10 @@ class YouTubeTelegramBot:
                 InlineKeyboardButton(f"{label}", callback_data="zimg:nop"),
                 InlineKeyboardButton("▶️ LoRA", callback_data="zimg:lora:next"),
             ])
+        rows.append([
+            InlineKeyboardButton(f"Resolution: {res or '512x512'}", callback_data="zimg:res:next"),
+            InlineKeyboardButton(f"Steps: {prefs.get('steps') or 7}", callback_data="zimg:steps:next"),
+        ])
         rows.append([
             InlineKeyboardButton("🤖 Random Photo", callback_data="zimg:random:photo"),
             InlineKeyboardButton("🤖 Random Illustration", callback_data="zimg:random:illustration"),
@@ -4973,7 +4999,25 @@ class YouTubeTelegramBot:
                     entry = loras[idx]
                     prefs["lora_id"] = entry.get("id")
                     rec = (entry.get("recommended") or {})
-                    prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                        prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                elif action == "res":
+                    presets = ["512x512", "768x768", "1024x1024"]
+                    cur = (prefs.get("resolution") or presets[0]).lower()
+                    try:
+                        idx = presets.index(cur)
+                    except ValueError:
+                        idx = 0
+                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
+                    prefs["resolution"] = presets[(idx + delta) % len(presets)]
+                elif action == "steps":
+                    presets = [5, 7, 9, 12]
+                    cur = int(prefs.get("steps") or presets[1])
+                    try:
+                        idx = presets.index(cur)
+                    except ValueError:
+                        idx = 1
+                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
+                    prefs["steps"] = presets[(idx + delta) % len(presets)]
                 elif action == "random" and len(parts) >= 3:
                     category = parts[2]
                     prompt = await self._zimage_quick_prompt(category, prefs.get("lora_id"))
@@ -4985,16 +5029,21 @@ class YouTubeTelegramBot:
                     if not base:
                         await query.answer("Set ZIMAGE_BASE_URL first", show_alert=True)
                         return
+                    width, height = self._zimage_parse_resolution(
+                        prefs.get("resolution"),
+                        defaults.get("width") or 512,
+                        defaults.get("height") or 512,
+                    )
                     job = {
                         "chat_id": chat_id,
                         "prompt": prompt,
                         "seed": -1,
                         "base": base,
                         "style": prefs.get("style") or defaults.get("style"),
-                        "steps": defaults.get("steps"),
+                        "steps": prefs.get("steps") or defaults.get("steps"),
                         "cfg_scale": defaults.get("cfg_scale"),
-                        "width": defaults.get("width"),
-                        "height": defaults.get("height"),
+                        "width": width,
+                        "height": height,
                         "queue_on_fail": True,
                         "enhance": bool(prefs.get("enhance")),
                         "lora_id": prefs.get("lora_id"),
