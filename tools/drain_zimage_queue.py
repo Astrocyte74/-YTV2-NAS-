@@ -52,6 +52,16 @@ def load_job(path: Path) -> Optional[Dict[str, Any]]:
     try:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
+    except json.JSONDecodeError as exc:
+        logging.error("Failed to read job %s: %s", path.name, exc)
+        # Try to salvage by stripping the trailing comma/None markers
+        try:
+            text = path.read_text(encoding="utf-8")
+            # Drop anything after the last closing brace
+            fixed = text.rsplit("}", 1)[0] + "}"
+            return json.loads(fixed)
+        except Exception:
+            return None
     except Exception as exc:
         logging.error("Failed to read job %s: %s", path.name, exc)
         return None
