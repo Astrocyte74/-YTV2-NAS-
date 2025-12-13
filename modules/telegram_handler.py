@@ -4336,6 +4336,7 @@ class YouTubeTelegramBot:
         parts = [
             "Z-Image Options" + (" (Advanced)" if view == "advanced" else ""),
             ruler,
+            "Legend: 🔄 = tap to cycle",
             f"Style: {style} | Quality: {quality}",
             f"Size: {res or '512x512'} | Steps: {steps} | Enhance: {enhance}",
         ]
