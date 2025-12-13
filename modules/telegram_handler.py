@@ -4447,13 +4447,9 @@ class YouTubeTelegramBot:
                 break
         rows.append([InlineKeyboardButton(f"🔄 Style: {style_label}", callback_data="zimg:style:next")])
 
-        # Quality presets (basic + advanced)
+        # Quality presets: single rotating button
         current_quality = _quality_name()
-        q_row: List[InlineKeyboardButton] = []
-        for key, label in [("fast", "Fast"), ("balanced", "Balanced"), ("high", "High")]:
-            mark = "✅ " if current_quality.lower() == label.lower() else ""
-            q_row.append(InlineKeyboardButton(f"{mark}{label}", callback_data=f"zimg:quality:set:{key}"))
-        rows.append(q_row)
+        rows.append([InlineKeyboardButton(f"🔄 Quality: {current_quality}", callback_data="zimg:quality:next")])
 
         # Prompt helper: choose category + generate prompt text
         prompt_cat_label = {
@@ -5280,6 +5276,41 @@ class YouTubeTelegramBot:
                         prefs["resolution"] = "1024x1024"
                         prefs["steps"] = 12
                         prefs["enhance"] = True
+                elif action == "quality" and len(parts) >= 3 and parts[2] == "next":
+                    def _current_quality() -> str:
+                        res_val = (prefs.get("resolution") or "512x512").lower()
+                        steps_val = int(prefs.get("steps") or 7)
+                        enhance_val = bool(prefs.get("enhance"))
+                        if res_val == "512x512" and steps_val == 5 and not enhance_val:
+                            return "fast"
+                        if res_val == "512x512" and steps_val == 7 and not enhance_val:
+                            return "balanced"
+                        if res_val == "1024x1024" and steps_val == 12 and enhance_val:
+                            return "high"
+                        return "custom"
+
+                    cycle = ["fast", "balanced", "high", "custom"]
+                    cur = _current_quality()
+                    try:
+                        idx = cycle.index(cur)
+                    except ValueError:
+                        idx = 0
+                    nxt = cycle[(idx + 1) % len(cycle)]
+                    if nxt == "fast":
+                        prefs["resolution"] = "512x512"
+                        prefs["steps"] = 5
+                        prefs["enhance"] = False
+                    elif nxt == "balanced":
+                        prefs["resolution"] = "512x512"
+                        prefs["steps"] = 7
+                        prefs["enhance"] = False
+                    elif nxt == "high":
+                        prefs["resolution"] = "1024x1024"
+                        prefs["steps"] = 12
+                        prefs["enhance"] = True
+                    else:
+                        # Custom: keep current user overrides
+                        pass
                 elif action == "promptcat":
                     categories = ["photo", "illustration", "concept", "design"]
                     cur = (prefs.get("prompt_category") or "photo").strip().lower()
