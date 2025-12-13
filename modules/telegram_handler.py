@@ -3843,6 +3843,8 @@ class YouTubeTelegramBot:
         try:
             job = dict(job)
             job["chat_id"] = chat_id
+            # Drop non-serializable fields
+            job.pop("status_message", None)
             zimage_queue.enqueue(job)
             if status_message:
                 try:
