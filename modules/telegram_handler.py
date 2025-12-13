@@ -2401,7 +2401,7 @@ class YouTubeTelegramBot:
                 job_copy = dict(job)
                 job_copy.pop("status_message", None)
                 zimage_queue.enqueue(job_copy)
-                await message.reply_text("🕒 Z-Image queued for later (queue-only mode).")
+                await message.reply_text(self._zimage_queue_receipt(job_copy, prefix="🕒 (queue-only)"))
             except Exception:
                 await message.reply_text("⚠️ Failed to queue Z-Image job.")
             return
@@ -2411,7 +2411,10 @@ class YouTubeTelegramBot:
                 return
             position = len(self.zimage_queue) + 1
             self.zimage_queue.append(job)
-            await message.reply_text(f"🕒 Queued image generation (position {position}). I’ll send it here when it’s ready.")
+            await message.reply_text(
+                f"🕒 Queued image generation (position {position}). I’ll send it here when it’s ready.\n"
+                f"Settings: {self._zimage_settings_summary(job)}"
+            )
             await self._zimage_start_next()
             return
 
@@ -3975,11 +3978,40 @@ class YouTubeTelegramBot:
             zimage_queue.enqueue(job)
             if status_message:
                 try:
-                    status_message.edit_text("🕒 Z-Image queued for later.")
+                    status_message.edit_text(
+                        "🕒 Z-Image queued for later.\n"
+                        f"Settings: {self._zimage_settings_summary(job)}"
+                    )
                 except Exception:
                     pass
         except Exception as exc:
             logging.warning("zimage: failed to enqueue for later: %s", exc)
+
+    def _zimage_clear_pending_queue(self, chat_id: int) -> Tuple[int, int]:
+        cleared_mem = 0
+        try:
+            before = len(self.zimage_queue or [])
+            self.zimage_queue = [job for job in (self.zimage_queue or []) if job.get("chat_id") != chat_id]
+            cleared_mem = before - len(self.zimage_queue or [])
+        except Exception:
+            cleared_mem = 0
+
+        cleared_disk = 0
+        try:
+            queue_dir = zimage_queue.QUEUE_DIR
+            cleared_dir = queue_dir / "cleared"
+            cleared_dir.mkdir(parents=True, exist_ok=True)
+            pattern = f"pending_*_{chat_id}_*.json"
+            for path in queue_dir.glob(pattern):
+                try:
+                    path.rename(cleared_dir / path.name)
+                    cleared_disk += 1
+                except Exception:
+                    pass
+        except Exception:
+            cleared_disk = 0
+
+        return cleared_disk, cleared_mem
 
     async def _zimage_start_next(self):
         while self.zimage_inflight < self.ZIMAGE_MAX_INFLIGHT and self.zimage_queue:
@@ -4253,6 +4285,7 @@ class YouTubeTelegramBot:
         lora_id = prefs.get("lora_id")
         lora_label = "None"
         if lora_id:
+            lora_label = str(lora_id)
             for entry in loras:
                 if entry.get("id") == lora_id:
                     lora_label = entry.get("display_name") or lora_id
@@ -4284,6 +4317,39 @@ class YouTubeTelegramBot:
         ]
         return "\n".join(parts)
 
+    def _zimage_settings_summary(self, job: Dict[str, Any], loras: Optional[List[Dict[str, Any]]] = None) -> str:
+        width = job.get("width") or 512
+        height = job.get("height") or 512
+        steps = job.get("steps") or 7
+        style = job.get("style") or "Cinematic photo"
+        seed = job.get("seed", -1)
+        enhance = bool(job.get("enhance"))
+        lora_id = job.get("lora_id")
+        lora_label = "None"
+        if lora_id:
+            lora_label = str(lora_id)
+            for entry in (loras or []):
+                if entry.get("id") == lora_id:
+                    lora_label = entry.get("display_name") or lora_label
+                    break
+        seed_label = f"#{int(seed)}" if isinstance(seed, int) and seed >= 0 else "random"
+        enh_label = "On" if enhance else "Off"
+        return f"{width}x{height} • {steps} steps • {style} • seed {seed_label} • Enhance {enh_label} • LoRA {lora_label}"
+
+    def _zimage_queue_receipt(
+        self,
+        job: Dict[str, Any],
+        *,
+        loras: Optional[List[Dict[str, Any]]] = None,
+        prefix: str = "🕒",
+    ) -> str:
+        prompt = (job.get("prompt") or "").strip()
+        preview = prompt
+        if len(preview) > 180:
+            preview = preview[:180] + "…"
+        settings = self._zimage_settings_summary(job, loras=loras)
+        return f"{prefix} Queued Z-Image job.\nPrompt: {preview or '—'}\nSettings: {settings}"
+
     def _zimage_options_keyboard(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
         styles = [
             ("None", "None"),
@@ -4312,6 +4378,7 @@ class YouTubeTelegramBot:
                 callback_data="zimg:queue:toggle",
             ),
         ])
+        rows.append([InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear")])
         # Style chips
         style_row1: List[InlineKeyboardButton] = []
         style_row2: List[InlineKeyboardButton] = []
@@ -5096,7 +5163,34 @@ class YouTubeTelegramBot:
                 elif action == "enhance":
                     prefs["enhance"] = not prefs.get("enhance")
                 elif action == "queue":
-                    prefs["queue_only"] = not prefs.get("queue_only")
+                    sub = parts[2] if len(parts) >= 3 else "toggle"
+                    if sub == "clear":
+                        import time as _time
+                        now = _time.time()
+                        try:
+                            armed_until = float(prefs.get("queue_clear_armed_until") or 0.0)
+                        except Exception:
+                            armed_until = 0.0
+                        if now < armed_until:
+                            prefs["queue_clear_armed_until"] = 0.0
+                            cleared_disk, cleared_mem = self._zimage_clear_pending_queue(chat_id)
+                            total = cleared_disk + cleared_mem
+                            try:
+                                await query.message.reply_text(
+                                    f"🧹 Cleared {total} queued Z-Image job(s) "
+                                    f"(disk={cleared_disk}, memory={cleared_mem})."
+                                )
+                            except Exception:
+                                pass
+                        else:
+                            prefs["queue_clear_armed_until"] = now + 10.0
+                            try:
+                                await query.answer("Press again within 10s to confirm clearing queued jobs.", show_alert=True)
+                            except Exception:
+                                pass
+                            # Keep panel displayed
+                    else:
+                        prefs["queue_only"] = not prefs.get("queue_only")
                 elif action == "lora":
                     if not loras:
                         await query.answer("No LoRAs available", show_alert=False)
@@ -5239,7 +5333,10 @@ class YouTubeTelegramBot:
                     if prefs.get("queue_only"):
                         try:
                             zimage_queue.enqueue(job)
-                            await query.answer("Queued", show_alert=False)
+                            try:
+                                await query.message.reply_text(self._zimage_queue_receipt(job, loras=loras, prefix="🕒 (queue-only)"))
+                            except Exception:
+                                await query.answer("Queued", show_alert=False)
                         except Exception:
                             await query.answer("Queue failed", show_alert=False)
                         # keep panel
