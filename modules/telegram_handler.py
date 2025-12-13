@@ -320,6 +320,9 @@ class YouTubeTelegramBot:
         self.ZIMAGE_MAX_INFLIGHT = 2
         self.ZIMAGE_MAX_QUEUE = 5
         self.ZIMAGE_DEFAULT_NEGATIVE = "blurry, distorted, watermark, logo"
+        self.zimage_loras: List[Dict[str, Any]] = []
+        self.zimage_loras_ts: float = 0.0
+        self.zimage_prefs: Dict[int, Dict[str, Any]] = {}
         # Auto-process scheduler for idle URLs (keyed by (chat_id, message_id))
         self._auto_tasks: Dict[tuple, asyncio.Task] = {}
 
@@ -811,6 +814,8 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("zimage", self.zimage_command))
         self.application.add_handler(CommandHandler("z", self.zimage_command))
         self.application.add_handler(CommandHandler("image", self.zimage_command))
+        self.application.add_handler(CommandHandler("zoptions", self.zimage_options_command))
+        self.application.add_handler(CommandHandler("zopts", self.zimage_options_command))
         # Ollama chat commands (aliases: /o, /o_stop, /stop)
         self.application.add_handler(CommandHandler("ollama", self.ollama_command))
         self.application.add_handler(CommandHandler("o", self.ollama_command))
@@ -2367,17 +2372,21 @@ class YouTubeTelegramBot:
             await message.reply_text("Set ZIMAGE_BASE_URL (e.g., http://10.0.4.x:8000) to use /zimage.")
             return
         prompt, seed = self._zimage_parse_seed(prompt)
+        prefs = self._zimage_prefs_for_chat(message.chat_id)
         job = {
             "chat_id": message.chat_id,
             "prompt": prompt,
             "seed": seed,
             "base": base,
-            "style": defaults.get("style"),
+            "style": prefs.get("style") or defaults.get("style"),
             "steps": defaults.get("steps"),
             "cfg_scale": defaults.get("cfg_scale"),
             "width": defaults.get("width"),
             "height": defaults.get("height"),
             "queue_on_fail": True,
+            "enhance": bool(prefs.get("enhance")),
+            "lora_id": prefs.get("lora_id"),
+            "lora_scale": prefs.get("lora_scale") or 1.0,
         }
         if self.zimage_inflight >= self.ZIMAGE_MAX_INFLIGHT:
             if len(self.zimage_queue) >= self.ZIMAGE_MAX_QUEUE:
@@ -2392,6 +2401,20 @@ class YouTubeTelegramBot:
         status_msg = await message.reply_text("🖼️ Generating image…")
         job["status_message"] = status_msg
         asyncio.create_task(self._zimage_start_job(job))
+
+    async def zimage_options_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            message = update.effective_message
+            if message:
+                await message.reply_text("❌ You are not authorized to use this bot.")
+            return
+        chat_id = update.effective_chat.id
+        prefs = self._zimage_prefs_for_chat(chat_id)
+        loras = await self._zimage_load_loras()
+        text = self._zimage_panel_text(prefs, loras)
+        kb = self._zimage_options_keyboard(prefs, loras)
+        await update.effective_message.reply_text(text, reply_markup=kb)
 
     async def _refresh_draw_prompt(self, query, session: Dict[str, Any]) -> None:
         text = self._format_draw_prompt(session)
@@ -3805,6 +3828,66 @@ class YouTubeTelegramBot:
             "height": height,
         }
 
+    async def _zimage_load_loras(self) -> List[Dict[str, Any]]:
+        # Cache for 10 minutes
+        import time as _time
+        now = _time.time()
+        if self.zimage_loras and (now - self.zimage_loras_ts) < 600:
+            return self.zimage_loras
+        base = (os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
+        if not base:
+            return []
+        url = f"{base}/api/loras"
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, timeout=8.0)
+                if resp.status_code != 200:
+                    return []
+                data = resp.json()
+                if isinstance(data, list):
+                    self.zimage_loras = data
+                    self.zimage_loras_ts = now
+                    return data
+        except Exception as exc:
+            logging.debug("zimage loras fetch failed: %s", exc)
+        return []
+
+    def _zimage_prefs_for_chat(self, chat_id: int) -> Dict[str, Any]:
+        prefs = self.zimage_prefs.get(chat_id)
+        if prefs:
+            return prefs
+        defaults = self._zimage_defaults()
+        prefs = {
+            "style": defaults.get("style") or "Cinematic photo",
+            "enhance": False,
+            "lora_id": None,
+            "lora_scale": 1.0,
+            "resolution": f"{defaults.get('width')}x{defaults.get('height')}",
+        }
+        self.zimage_prefs[chat_id] = prefs
+        return prefs
+
+    async def _zimage_quick_prompt(self, category: str, lora_id: Optional[str]) -> Optional[str]:
+        base = (os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
+        if not base:
+            return None
+        url = f"{base}/api/quick_prompt"
+        body = {"category": category}
+        if lora_id:
+            body["lora_id"] = lora_id
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(url, json=body, timeout=20.0)
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                prompt = data.get("prompt")
+                if isinstance(prompt, str) and prompt.strip():
+                    return prompt.strip()
+        except Exception as exc:
+            logging.debug("zimage quick_prompt failed: %s", exc)
+        return None
+
     def _zimage_parse_seed(self, prompt: str) -> Tuple[str, int]:
         seed = -1
         prompt = (prompt or "").strip()
@@ -3879,6 +3962,9 @@ class YouTubeTelegramBot:
         height = job.get("height") or 512
         status_message = job.get("status_message")
         queue_on_fail = bool(job.get("queue_on_fail"))
+        enhance = bool(job.get("enhance"))
+        lora_id = job.get("lora_id")
+        lora_scale = job.get("lora_scale", 1.0)
         bot = self.application.bot if self.application else None
         async def _mark(text: str):
             if status_message and bot:
@@ -3900,6 +3986,29 @@ class YouTubeTelegramBot:
             else:
                 await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; queued for later.")
             return
+        # Optional prompt enhance
+        if enhance:
+            enh_url = f"{base}/api/enhance_prompt"
+            enh_body = {
+                "prompt": prompt,
+                "negative_prompt": self.ZIMAGE_DEFAULT_NEGATIVE,
+                "style_preset": style,
+            }
+            if lora_id:
+                enh_body["lora_id"] = lora_id
+            try:
+                async with httpx.AsyncClient() as client:
+                    enh_resp = await client.post(enh_url, json=enh_body, timeout=20.0)
+                    if enh_resp.status_code == 200:
+                        enh_json = enh_resp.json()
+                        new_prompt = enh_json.get("prompt")
+                        if isinstance(new_prompt, str) and new_prompt.strip():
+                            prompt = new_prompt.strip()
+                            await _mark("✨ Enhanced prompt; generating…")
+                    else:
+                        logging.info("zimage enhance failed (%s): %s", enh_resp.status_code, enh_resp.text[:200])
+            except Exception as exc:
+                logging.info("zimage enhance exception: %s", exc)
         payload = {
             "prompt": prompt,
             "negative_prompt": self.ZIMAGE_DEFAULT_NEGATIVE,
@@ -3910,9 +4019,9 @@ class YouTubeTelegramBot:
                 "width": width,
                 "height": height,
                 "seed": seed,
-                "use_lora": False,
-                "lora_id": None,
-                "lora_scale": 1.0,
+                "use_lora": bool(lora_id),
+                "lora_id": lora_id,
+                "lora_scale": lora_scale if lora_id else 1.0,
             },
             "stealth": False,
             "model": None,
@@ -4083,6 +4192,57 @@ class YouTubeTelegramBot:
     ) -> List[List[InlineKeyboardButton]]:
         from modules.telegram.ui.keyboards import ai2ai_persona_list_rows
         return ai2ai_persona_list_rows(slot, session or {}, page_size, categories, self._persona_parse)
+
+    def _zimage_panel_text(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> str:
+        style = prefs.get("style") or "Cinematic photo"
+        enhance = "On" if prefs.get("enhance") else "Off"
+        lora_id = prefs.get("lora_id")
+        lora_label = "None"
+        if lora_id:
+            for entry in loras:
+                if entry.get("id") == lora_id:
+                    lora_label = entry.get("display_name") or lora_id
+                    break
+        parts = [
+            "Z-Image Options",
+            f"Style: {style}",
+            f"Enhance: {enhance}",
+            f"LoRA: {lora_label}",
+        ]
+        return "\n".join(parts)
+
+    def _zimage_options_keyboard(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+        styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
+        style = prefs.get("style") or styles[1]
+        rows: List[List[InlineKeyboardButton]] = []
+        rows.append([
+            InlineKeyboardButton(f"Style: {style}", callback_data="zimg:style:next"),
+            InlineKeyboardButton("Enhance: On" if prefs.get("enhance") else "Enhance: Off", callback_data="zimg:enhance:toggle"),
+        ])
+        if loras:
+            lora_id = prefs.get("lora_id")
+            label = "None"
+            current_idx = -1
+            for idx, entry in enumerate(loras):
+                if entry.get("id") == lora_id:
+                    label = entry.get("display_name") or entry.get("id") or "LoRA"
+                    current_idx = idx
+                    break
+            rows.append([
+                InlineKeyboardButton("◀️ LoRA", callback_data="zimg:lora:prev"),
+                InlineKeyboardButton(f"{label}", callback_data="zimg:nop"),
+                InlineKeyboardButton("▶️ LoRA", callback_data="zimg:lora:next"),
+            ])
+        rows.append([
+            InlineKeyboardButton("🤖 Random Photo", callback_data="zimg:random:photo"),
+            InlineKeyboardButton("🤖 Random Illustration", callback_data="zimg:random:illustration"),
+        ])
+        rows.append([
+            InlineKeyboardButton("🤖 Random Concept", callback_data="zimg:random:concept"),
+            InlineKeyboardButton("🤖 Random Design", callback_data="zimg:random:design"),
+        ])
+        rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
+        return InlineKeyboardMarkup(rows)
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
         # Determine mode
@@ -4778,6 +4938,86 @@ class YouTubeTelegramBot:
         
         callback_data = query.data
         logging.info(f"🔔 Callback received: user={user_id} data={callback_data}")
+
+        # Z-Image option callbacks
+        if callback_data.startswith("zimg:"):
+            chat_id = query.message.chat.id
+            prefs = self._zimage_prefs_for_chat(chat_id)
+            loras = await self._zimage_load_loras()
+            parts = callback_data.split(":")
+            if len(parts) >= 2:
+                action = parts[1]
+                if action == "style":
+                    styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
+                    cur = prefs.get("style") or styles[1]
+                    try:
+                        idx = styles.index(cur)
+                    except ValueError:
+                        idx = 0
+                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
+                    prefs["style"] = styles[(idx + delta) % len(styles)]
+                elif action == "enhance":
+                    prefs["enhance"] = not prefs.get("enhance")
+                elif action == "lora":
+                    if not loras:
+                        await query.answer("No LoRAs available", show_alert=False)
+                        return
+                    cur_id = prefs.get("lora_id")
+                    idx = -1
+                    for i, entry in enumerate(loras):
+                        if entry.get("id") == cur_id:
+                            idx = i
+                            break
+                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
+                    idx = (idx + delta) % len(loras)
+                    entry = loras[idx]
+                    prefs["lora_id"] = entry.get("id")
+                    rec = (entry.get("recommended") or {})
+                    prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                elif action == "random" and len(parts) >= 3:
+                    category = parts[2]
+                    prompt = await self._zimage_quick_prompt(category, prefs.get("lora_id"))
+                    if not prompt:
+                        await query.answer("AI prompt helper unavailable", show_alert=False)
+                        return
+                    defaults = self._zimage_defaults()
+                    base = defaults.get("base") or ""
+                    if not base:
+                        await query.answer("Set ZIMAGE_BASE_URL first", show_alert=True)
+                        return
+                    job = {
+                        "chat_id": chat_id,
+                        "prompt": prompt,
+                        "seed": -1,
+                        "base": base,
+                        "style": prefs.get("style") or defaults.get("style"),
+                        "steps": defaults.get("steps"),
+                        "cfg_scale": defaults.get("cfg_scale"),
+                        "width": defaults.get("width"),
+                        "height": defaults.get("height"),
+                        "queue_on_fail": True,
+                        "enhance": bool(prefs.get("enhance")),
+                        "lora_id": prefs.get("lora_id"),
+                        "lora_scale": prefs.get("lora_scale") or 1.0,
+                    }
+                    status_msg = await query.message.reply_text(f"🤖 Random ({category}) → generating…")
+                    job["status_message"] = status_msg
+                    asyncio.create_task(self._zimage_start_job(job))
+                    return
+                elif action == "close":
+                    try:
+                        await query.edit_message_reply_markup(reply_markup=None)
+                    except Exception:
+                        pass
+                    return
+            self.zimage_prefs[chat_id] = prefs
+            text = self._zimage_panel_text(prefs, loras)
+            kb = self._zimage_options_keyboard(prefs, loras)
+            try:
+                await query.edit_message_text(text, reply_markup=kb)
+            except Exception as exc:
+                logging.debug("zimg: edit failed: %s", exc)
+            return
 
         # Status quick actions
         if callback_data.startswith("status:image_catchup:"):

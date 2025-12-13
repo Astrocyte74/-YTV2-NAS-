@@ -131,6 +131,12 @@ async def process_job(path: Path) -> bool:
         cfg_scale = 0.0
     width = int(job.get("width", 0)) or _resolution_default()[0]
     height = int(job.get("height", 0)) or _resolution_default()[1]
+    lora_id = job.get("lora_id")
+    try:
+        lora_scale = float(job.get("lora_scale", 1.0))
+    except Exception:
+        lora_scale = 1.0
+    enhance = bool(job.get("enhance"))
 
     payload = {
         "prompt": prompt,
@@ -142,9 +148,9 @@ async def process_job(path: Path) -> bool:
             "width": width,
             "height": height,
             "seed": seed,
-            "use_lora": False,
-            "lora_id": None,
-            "lora_scale": 1.0,
+            "use_lora": bool(lora_id),
+            "lora_id": lora_id,
+            "lora_scale": lora_scale if lora_id else 1.0,
         },
         "stealth": False,
         "model": None,
@@ -171,6 +177,26 @@ async def process_job(path: Path) -> bool:
             except Exception as exc:
                 logging.info("Z-Image health unreachable: %s; leaving job pending", exc)
                 return False
+        if enhance:
+            try:
+                enh_resp = await client.post(
+                    f"{base}/api/enhance_prompt",
+                    json={
+                        "prompt": prompt,
+                        "negative_prompt": payload.get("negative_prompt"),
+                        "style_preset": style,
+                        "lora_id": lora_id,
+                    },
+                    timeout=20.0,
+                )
+                if enh_resp.status_code == 200:
+                    enh_json = enh_resp.json()
+                    new_prompt = enh_json.get("prompt")
+                    if isinstance(new_prompt, str) and new_prompt.strip():
+                        payload["prompt"] = new_prompt.strip()
+                        prompt = new_prompt.strip()
+            except Exception as exc:
+                logging.info("Z-Image enhance failed: %s", exc)
         try:
             resp = await client.post(gen_url, json=payload, timeout=post_timeout)
         except Exception as exc:
@@ -211,6 +237,8 @@ async def process_job(path: Path) -> bool:
     h_used = data.get("height") or height
     dur = data.get("duration_sec")
     cap_parts = ["Z-Image"]
+    if lora_id:
+        cap_parts.append(f"LoRA {lora_id}")
     if seed_used is not None:
         cap_parts.append(f"Seed {seed_used}")
     if w_used and h_used:
