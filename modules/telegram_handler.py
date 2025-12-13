@@ -4254,11 +4254,17 @@ class YouTubeTelegramBot:
             lora_id = prefs.get("lora_id")
             label = "None"
             current_idx = -1
+            label_full = label
             for idx, entry in enumerate(loras):
                 if entry.get("id") == lora_id:
-                    label = entry.get("display_name") or entry.get("id") or "LoRA"
+                    label_full = entry.get("display_name") or entry.get("id") or "LoRA"
+                    label = label_full
                     current_idx = idx
                     break
+            # Keep button label short; full name is shown in the panel text
+            max_len = 18
+            if len(label) > max_len:
+                label = label[: max_len - 1] + "…"
             rows.append([
                 InlineKeyboardButton("◀️ LoRA", callback_data="zimg:lora:prev"),
                 InlineKeyboardButton(f"{label}", callback_data="zimg:nop"),
