@@ -3885,9 +3885,9 @@ class YouTubeTelegramBot:
         async def _mark(text: str):
             if status_message and bot:
                 try:
-            await status_message.edit_text(text)
-        except Exception:
-            pass
+                    await status_message.edit_text(text)
+                except Exception:
+                    pass
         if not bot:
             return
         if not base:
