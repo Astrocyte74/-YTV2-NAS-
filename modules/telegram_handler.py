@@ -4022,7 +4022,16 @@ class YouTubeTelegramBot:
                         new_prompt = enh_json.get("prompt")
                         if isinstance(new_prompt, str) and new_prompt.strip():
                             prompt = new_prompt.strip()
-                            await _mark("✨ Enhanced prompt; generating…")
+                            preview = prompt
+                            if len(preview) > 400:
+                                preview = preview[:400] + "…"
+                            msg = f"✨ Enhanced prompt:\n{preview}"
+                            await _mark(msg)
+                            if not status_message and bot:
+                                try:
+                                    await bot.send_message(chat_id=chat_id, text=msg)
+                                except Exception:
+                                    pass
                     else:
                         logging.info("zimage enhance failed (%s): %s", enh_resp.status_code, enh_resp.text[:200])
             except Exception as exc:
