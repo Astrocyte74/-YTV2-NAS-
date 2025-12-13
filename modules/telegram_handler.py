@@ -4451,6 +4451,17 @@ class YouTubeTelegramBot:
         current_quality = _quality_name()
         rows.append([InlineKeyboardButton(f"🔄 Quality: {current_quality}", callback_data="zimg:quality:next")])
 
+        # Core quality knobs (also affected by Quality presets)
+        res_display = prefs.get("resolution") or "512x512"
+        try:
+            steps_display = str(int(prefs.get("steps") or 7))
+        except Exception:
+            steps_display = "7"
+        rows.append([
+            InlineKeyboardButton(f"🔄 Size: {res_display}", callback_data="zimg:res:next"),
+            InlineKeyboardButton(f"🔄 Steps: {steps_display}", callback_data="zimg:steps:next"),
+        ])
+
         # Prompt helper: choose category + generate prompt text
         prompt_cat_label = {
             "photo": "Photo",
