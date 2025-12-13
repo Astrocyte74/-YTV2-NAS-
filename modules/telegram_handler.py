@@ -2373,6 +2373,8 @@ class YouTubeTelegramBot:
             return
         prompt, seed = self._zimage_parse_seed(prompt)
         prefs = self._zimage_prefs_for_chat(message.chat_id)
+        prefs["last_prompt"] = prompt
+        prefs["last_seed"] = seed
         width, height = self._zimage_parse_resolution(
             prefs.get("resolution"),
             defaults.get("width") or 512,
@@ -2393,6 +2395,16 @@ class YouTubeTelegramBot:
             "lora_id": prefs.get("lora_id"),
             "lora_scale": prefs.get("lora_scale") or 1.0,
         }
+        # Queue-only mode: always persist for later instead of attempting live generation
+        if prefs.get("queue_only"):
+            try:
+                job_copy = dict(job)
+                job_copy.pop("status_message", None)
+                zimage_queue.enqueue(job_copy)
+                await message.reply_text("🕒 Z-Image queued for later (queue-only mode).")
+            except Exception:
+                await message.reply_text("⚠️ Failed to queue Z-Image job.")
+            return
         if self.zimage_inflight >= self.ZIMAGE_MAX_INFLIGHT:
             if len(self.zimage_queue) >= self.ZIMAGE_MAX_QUEUE:
                 await message.reply_text("Z-Image queue is full; please try again in a moment.")
@@ -3865,10 +3877,13 @@ class YouTubeTelegramBot:
         prefs = {
             "style": defaults.get("style") or "Cinematic photo",
             "enhance": False,
+            "queue_only": False,
             "lora_id": None,
             "lora_scale": 1.0,
             "resolution": f"{defaults.get('width')}x{defaults.get('height')}",
             "steps": defaults.get("steps") or 7,
+            "last_prompt": "",
+            "last_seed": -1,
         }
         self.zimage_prefs[chat_id] = prefs
         return prefs
@@ -4223,6 +4238,7 @@ class YouTubeTelegramBot:
     def _zimage_panel_text(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> str:
         style = prefs.get("style") or "Cinematic photo"
         enhance = "On" if prefs.get("enhance") else "Off"
+        queue_only = "On" if prefs.get("queue_only") else "Off"
         lora_id = prefs.get("lora_id")
         lora_label = "None"
         if lora_id:
@@ -4232,36 +4248,77 @@ class YouTubeTelegramBot:
                     break
         res = prefs.get("resolution") or ""
         steps = prefs.get("steps") or 7
+        last_prompt = (prefs.get("last_prompt") or "").strip()
+        last_seed = prefs.get("last_seed", -1)
         # Force a stable message bubble width in Telegram by including a long,
         # unbroken separator line (Telegram sizes the bubble based on line widths).
         ruler = "────────────────────────────────"
+        prompt_preview = last_prompt
+        if len(prompt_preview) > 240:
+            prompt_preview = prompt_preview[:240] + "…"
+        if not prompt_preview:
+            prompt_preview = "—"
+        seed_label = f"#{int(last_seed)}" if isinstance(last_seed, int) and last_seed >= 0 else "random"
         parts = [
             "Z-Image Options",
             ruler,
             f"Style: {style}",
             f"Enhance: {enhance}",
+            f"Queue-only: {queue_only}",
             f"LoRA: {lora_label}",
             f"Resolution: {res or '512x512'}",
             f"Steps: {steps}",
+            ruler,
+            f"Prompt ({seed_label}): {prompt_preview}",
         ]
         return "\n".join(parts)
 
     def _zimage_options_keyboard(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
-        styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
-        style = prefs.get("style") or styles[1]
+        styles = [
+            ("None", "None"),
+            ("Cinematic", "Cinematic photo"),
+            ("Illustration", "Digital illustration"),
+            ("Anime", "Anime"),
+            ("Product", "Product render"),
+        ]
+        style = (prefs.get("style") or "Cinematic photo").strip()
         rows: List[List[InlineKeyboardButton]] = []
         rows.append([
-            InlineKeyboardButton(f"Style: {style}", callback_data="zimg:style:next"),
-            InlineKeyboardButton("Enhance: On" if prefs.get("enhance") else "Enhance: Off", callback_data="zimg:enhance:toggle"),
+            InlineKeyboardButton("🎬 Generate", callback_data="zimg:generate"),
+            InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
         ])
+        rows.append([
+            InlineKeyboardButton("✨ Enhance Now", callback_data="zimg:prompt:enhance"),
+            InlineKeyboardButton("♻️ Reset", callback_data="zimg:reset"),
+        ])
+        rows.append([
+            InlineKeyboardButton(
+                "Enhance: On" if prefs.get("enhance") else "Enhance: Off",
+                callback_data="zimg:enhance:toggle",
+            ),
+            InlineKeyboardButton(
+                "Queue-only: On" if prefs.get("queue_only") else "Queue-only: Off",
+                callback_data="zimg:queue:toggle",
+            ),
+        ])
+        # Style chips
+        style_row1: List[InlineKeyboardButton] = []
+        style_row2: List[InlineKeyboardButton] = []
+        for idx, (label, full) in enumerate(styles):
+            mark = "✅ " if full == style else ""
+            btn = InlineKeyboardButton(f"{mark}{label}", callback_data=f"zimg:style:set:{idx}")
+            if idx < 3:
+                style_row1.append(btn)
+            else:
+                style_row2.append(btn)
+        rows.append(style_row1)
+        if style_row2:
+            rows.append(style_row2)
         if loras:
             lora_id = prefs.get("lora_id")
-            label = "None"
             current_idx = -1
-            label_full = label
             for idx, entry in enumerate(loras):
                 if entry.get("id") == lora_id:
-                    label_full = entry.get("display_name") or entry.get("id") or "LoRA"
                     current_idx = idx
                     break
             total = len(loras)
@@ -4274,18 +4331,31 @@ class YouTubeTelegramBot:
                 InlineKeyboardButton(center, callback_data="zimg:nop"),
                 InlineKeyboardButton("Next LoRA ▶️", callback_data="zimg:lora:next"),
             ])
+            rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
+        else:
+            rows.append([InlineKeyboardButton("LoRA: (unavailable)", callback_data="zimg:nop")])
         res_val = prefs.get("resolution") or "512x512"
+        # Resolution chips
+        res_cur = (res_val or "512x512").lower()
+        res_row: List[InlineKeyboardButton] = []
+        for r in ["512x512", "768x768", "1024x1024"]:
+            mark = "✅ " if res_cur == r else ""
+            res_row.append(InlineKeyboardButton(f"{mark}{r}", callback_data=f"zimg:res:set:{r}"))
+        rows.append(res_row)
+        # Steps chips
+        steps_cur = int(prefs.get("steps") or 7)
+        step_row: List[InlineKeyboardButton] = []
+        for s in [5, 7, 9, 12]:
+            mark = "✅ " if steps_cur == s else ""
+            step_row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"zimg:steps:set:{s}"))
+        rows.append(step_row)
         rows.append([
-            InlineKeyboardButton(f"Resolution: {res_val}", callback_data="zimg:res:next"),
-            InlineKeyboardButton(f"Steps: {prefs.get('steps') or 7}", callback_data="zimg:steps:next"),
+            InlineKeyboardButton("🤖 Random Photo", callback_data="zimg:random:set:photo"),
+            InlineKeyboardButton("🤖 Random Illustration", callback_data="zimg:random:set:illustration"),
         ])
         rows.append([
-            InlineKeyboardButton("🤖 Random Photo", callback_data="zimg:random:photo"),
-            InlineKeyboardButton("🤖 Random Illustration", callback_data="zimg:random:illustration"),
-        ])
-        rows.append([
-            InlineKeyboardButton("🤖 Random Concept", callback_data="zimg:random:concept"),
-            InlineKeyboardButton("🤖 Random Design", callback_data="zimg:random:design"),
+            InlineKeyboardButton("🤖 Random Concept", callback_data="zimg:random:set:concept"),
+            InlineKeyboardButton("🤖 Random Design", callback_data="zimg:random:set:design"),
         ])
         rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
         return InlineKeyboardMarkup(rows)
@@ -4994,61 +5064,147 @@ class YouTubeTelegramBot:
             if len(parts) >= 2:
                 action = parts[1]
                 if action == "style":
-                    styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
-                    cur = prefs.get("style") or styles[1]
-                    try:
-                        idx = styles.index(cur)
-                    except ValueError:
-                        idx = 0
-                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
-                    prefs["style"] = styles[(idx + delta) % len(styles)]
+                    # Backward compat: zimg:style:next
+                    if len(parts) >= 3 and parts[2] == "next":
+                        styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
+                        cur = prefs.get("style") or styles[1]
+                        try:
+                            idx = styles.index(cur)
+                        except ValueError:
+                            idx = 0
+                        prefs["style"] = styles[(idx + 1) % len(styles)]
+                    # New: zimg:style:set:<idx>
+                    elif len(parts) >= 4 and parts[2] == "set":
+                        styles = ["None", "Cinematic photo", "Digital illustration", "Anime", "Product render"]
+                        try:
+                            idx = int(parts[3])
+                        except Exception:
+                            idx = -1
+                        if 0 <= idx < len(styles):
+                            prefs["style"] = styles[idx]
                 elif action == "enhance":
                     prefs["enhance"] = not prefs.get("enhance")
+                elif action == "queue":
+                    prefs["queue_only"] = not prefs.get("queue_only")
                 elif action == "lora":
                     if not loras:
                         await query.answer("No LoRAs available", show_alert=False)
                         return
-                    cur_id = prefs.get("lora_id")
-                    idx = -1
-                    for i, entry in enumerate(loras):
-                        if entry.get("id") == cur_id:
-                            idx = i
-                            break
-                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
-                    idx = (idx + delta) % len(loras)
-                    entry = loras[idx]
-                    prefs["lora_id"] = entry.get("id")
-                    rec = (entry.get("recommended") or {})
-                    prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                    if len(parts) >= 3 and parts[2] == "clear":
+                        prefs["lora_id"] = None
+                    else:
+                        cur_id = prefs.get("lora_id")
+                        idx = -1
+                        for i, entry in enumerate(loras):
+                            if entry.get("id") == cur_id:
+                                idx = i
+                                break
+                        delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
+                        idx = (idx + delta) % len(loras)
+                        entry = loras[idx]
+                        prefs["lora_id"] = entry.get("id")
+                        rec = (entry.get("recommended") or {})
+                        prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
                 elif action == "res":
-                    presets = ["512x512", "768x768", "1024x1024"]
-                    cur = (prefs.get("resolution") or presets[0]).lower()
-                    try:
-                        idx = presets.index(cur)
-                    except ValueError:
-                        idx = 0
-                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
-                    prefs["resolution"] = presets[(idx + delta) % len(presets)]
+                    # Backward compat: zimg:res:next
+                    if len(parts) >= 3 and parts[2] == "next":
+                        presets = ["512x512", "768x768", "1024x1024"]
+                        cur = (prefs.get("resolution") or presets[0]).lower()
+                        try:
+                            idx = presets.index(cur)
+                        except ValueError:
+                            idx = 0
+                        prefs["resolution"] = presets[(idx + 1) % len(presets)]
+                    # New: zimg:res:set:512x512
+                    elif len(parts) >= 4 and parts[2] == "set":
+                        prefs["resolution"] = parts[3]
                 elif action == "steps":
-                    presets = [5, 7, 9, 12]
-                    cur = int(prefs.get("steps") or presets[1])
-                    try:
-                        idx = presets.index(cur)
-                    except ValueError:
-                        idx = 1
-                    delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
-                    prefs["steps"] = presets[(idx + delta) % len(presets)]
-                elif action == "random" and len(parts) >= 3:
-                    category = parts[2]
+                    # Backward compat: zimg:steps:next
+                    if len(parts) >= 3 and parts[2] == "next":
+                        presets = [5, 7, 9, 12]
+                        cur = int(prefs.get("steps") or presets[1])
+                        try:
+                            idx = presets.index(cur)
+                        except ValueError:
+                            idx = 1
+                        prefs["steps"] = presets[(idx + 1) % len(presets)]
+                    # New: zimg:steps:set:7
+                    elif len(parts) >= 4 and parts[2] == "set":
+                        try:
+                            prefs["steps"] = int(parts[3])
+                        except Exception:
+                            pass
+                elif action == "random" and len(parts) >= 4 and parts[2] == "set":
+                    category = parts[3]
                     prompt = await self._zimage_quick_prompt(category, prefs.get("lora_id"))
                     if not prompt:
                         await query.answer("AI prompt helper unavailable", show_alert=False)
+                        return
+                    prefs["last_prompt"] = prompt
+                    prefs["last_seed"] = -1
+                    try:
+                        await query.answer(f"Random prompt set ({category})", show_alert=False)
+                    except Exception:
+                        pass
+                elif action == "prompt" and len(parts) >= 3:
+                    sub = parts[2]
+                    if sub == "send":
+                        txt = (prefs.get("last_prompt") or "").strip()
+                        if not txt:
+                            await query.answer("No prompt set yet", show_alert=False)
+                            return
+                        try:
+                            await query.message.reply_text(f"Prompt:\n{txt}")
+                        except Exception:
+                            pass
+                        return
+                    if sub == "enhance":
+                        txt = (prefs.get("last_prompt") or "").strip()
+                        if not txt:
+                            await query.answer("No prompt set yet", show_alert=False)
+                            return
+                        defaults = self._zimage_defaults()
+                        base = (defaults.get("base") or "").rstrip("/")
+                        if not base:
+                            await query.answer("Set ZIMAGE_BASE_URL first", show_alert=True)
+                            return
+                        if not await self._zimage_health_ok(base):
+                            await query.answer("Z-Image offline", show_alert=False)
+                            return
+                        enh_url = f"{base}/api/enhance_prompt"
+                        enh_body = {
+                            "prompt": txt,
+                            "negative_prompt": self.ZIMAGE_DEFAULT_NEGATIVE,
+                            "style_preset": prefs.get("style") or defaults.get("style") or "Cinematic photo",
+                        }
+                        if prefs.get("lora_id"):
+                            enh_body["lora_id"] = prefs.get("lora_id")
+                        try:
+                            async with httpx.AsyncClient() as client:
+                                resp = await client.post(enh_url, json=enh_body, timeout=20.0)
+                                if resp.status_code == 200:
+                                    data = resp.json()
+                                    new_prompt = data.get("prompt")
+                                    if isinstance(new_prompt, str) and new_prompt.strip():
+                                        prefs["last_prompt"] = new_prompt.strip()
+                                        prefs["last_seed"] = -1
+                                        await query.answer("Enhanced", show_alert=False)
+                                else:
+                                    await query.answer("Enhance unavailable", show_alert=False)
+                        except Exception:
+                            await query.answer("Enhance unavailable", show_alert=False)
+                elif action == "generate":
+                    txt = (prefs.get("last_prompt") or "").strip()
+                    if not txt:
+                        await query.answer("No prompt set yet", show_alert=False)
                         return
                     defaults = self._zimage_defaults()
                     base = defaults.get("base") or ""
                     if not base:
                         await query.answer("Set ZIMAGE_BASE_URL first", show_alert=True)
                         return
+                    prompt_txt, seed = self._zimage_parse_seed(txt)
+                    seed = prefs.get("last_seed") if isinstance(prefs.get("last_seed"), int) and prefs.get("last_seed", -1) >= 0 else seed
                     width, height = self._zimage_parse_resolution(
                         prefs.get("resolution"),
                         defaults.get("width") or 512,
@@ -5056,8 +5212,8 @@ class YouTubeTelegramBot:
                     )
                     job = {
                         "chat_id": chat_id,
-                        "prompt": prompt,
-                        "seed": -1,
+                        "prompt": prompt_txt,
+                        "seed": seed if isinstance(seed, int) else -1,
                         "base": base,
                         "style": prefs.get("style") or defaults.get("style"),
                         "steps": prefs.get("steps") or defaults.get("steps"),
@@ -5069,10 +5225,21 @@ class YouTubeTelegramBot:
                         "lora_id": prefs.get("lora_id"),
                         "lora_scale": prefs.get("lora_scale") or 1.0,
                     }
-                    status_msg = await query.message.reply_text(f"🤖 Random ({category}) → generating…")
-                    job["status_message"] = status_msg
-                    asyncio.create_task(self._zimage_start_job(job))
-                    return
+                    if prefs.get("queue_only"):
+                        try:
+                            zimage_queue.enqueue(job)
+                            await query.answer("Queued", show_alert=False)
+                        except Exception:
+                            await query.answer("Queue failed", show_alert=False)
+                        # keep panel
+                    else:
+                        status_msg = await query.message.reply_text("🖼️ Generating image…")
+                        job["status_message"] = status_msg
+                        asyncio.create_task(self._zimage_start_job(job))
+                    # keep panel displayed
+                elif action == "reset":
+                    self.zimage_prefs.pop(chat_id, None)
+                    prefs = self._zimage_prefs_for_chat(chat_id)
                 elif action == "close":
                     try:
                         await query.edit_message_reply_markup(reply_markup=None)

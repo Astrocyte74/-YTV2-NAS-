@@ -42,8 +42,11 @@
 
 Z‑Image Turbo (Mac)
 - Configure `ZIMAGE_BASE_URL` (prefer the Mac’s WireGuard IP, e.g., `http://10.0.4.x:8000`). Defaults: style `Cinematic photo`, 512×512, 7 steps, CFG 0.0. `ZIMAGE_DEFAULT_STYLE` accepts a comma list and uses the first entry (e.g., `Cinematic photo,Anime`). `ZIMAGE_DEFAULT_RESOLUTION` also accepts a comma list and uses the first entry (e.g., `512x512,768x768`).
-- Commands: `/zimage …` (`/z`, `/image` aliases). Optional seed suffix `#12345` to fix seed; otherwise random. `/zoptions` (`/zopts`) opens a small panel to pick style, toggle AI-enhance, pick a LoRA (if available via `/api/loras`), or trigger a random prompt by category (`/api/quick_prompt`). When enhance is on, prompts are preprocessed via `/api/enhance_prompt`.
-- Queueing: max 2 in-flight generations; up to 5 queued. Replies with position if queued; sends the PNG back as a photo when done. When offline, jobs are persisted to `data/zimage_queue/` and drained by `tools/drain_zimage_queue.py` (enable with `ENABLE_ZIMAGE_QUEUE_WORKER=1`, interval via `ZIMAGE_QUEUE_INTERVAL`). A preflight health check (`/health`) with a short timeout (`ZIMAGE_HEALTHCHECK_TIMEOUT`, default 5s; disable via `ENABLE_ZIMAGE_HEALTHCHECK=0`) avoids long waits when the service is down.
+- Commands: `/zimage …` (`/z`, `/image` aliases). Optional seed suffix `#12345` to fix seed; otherwise random.
+- Options UI: `/zoptions` (`/zopts`) opens a control panel that shows current settings + last prompt. Use buttons to set style, resolution, steps, LoRA (Prev/Next/Clear), toggle AI-enhance, toggle Queue-only, set a random prompt by category, enhance the current prompt, and Generate using the stored prompt.
+  - Notes: Random buttons set the prompt but do not auto-generate (press Generate). Settings are per-chat and in-memory; restarting the bot/container resets them to env defaults.
+- Queueing: max 2 in-flight generations; up to 5 queued. When Z-Image is offline/unreachable, jobs are persisted to `data/zimage_queue/` and drained by `tools/drain_zimage_queue.py` (enable with `ENABLE_ZIMAGE_QUEUE_WORKER=1`, interval via `ZIMAGE_QUEUE_INTERVAL`).
+  - Preflight: `GET /health` is probed first (short timeout via `ZIMAGE_HEALTHCHECK_TIMEOUT`, default 5s; disable via `ENABLE_ZIMAGE_HEALTHCHECK=0`) to avoid long waits when the service is down.
 
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
