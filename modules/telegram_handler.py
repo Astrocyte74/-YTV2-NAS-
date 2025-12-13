@@ -3897,6 +3897,7 @@ class YouTubeTelegramBot:
             "lora_scale": 1.0,
             "resolution": f"{defaults.get('width')}x{defaults.get('height')}",
             "steps": defaults.get("steps") or 7,
+            "prompt_category": "photo",
             "last_prompt": "",
             "last_seed": -1,
         }
@@ -4303,6 +4304,7 @@ class YouTubeTelegramBot:
         style = prefs.get("style") or "Cinematic photo"
         enhance = "On" if prefs.get("enhance") else "Off"
         queue_only = "On" if prefs.get("queue_only") else "Off"
+        prompt_cat = (prefs.get("prompt_category") or "photo").strip().lower()
         lora_id = prefs.get("lora_id")
         lora_label = "None"
         if lora_id:
@@ -4325,12 +4327,20 @@ class YouTubeTelegramBot:
             prompt_preview = "—"
         seed_label = f"#{int(last_seed)}" if isinstance(last_seed, int) and last_seed >= 0 else "random"
         quality = _quality_label()
+        prompt_cat_label = {
+            "photo": "Photo",
+            "illustration": "Illustration",
+            "concept": "Concept",
+            "design": "Design",
+        }.get(prompt_cat, prompt_cat.title() if prompt_cat else "Photo")
         parts = [
             "Z-Image Options" + (" (Advanced)" if view == "advanced" else ""),
             ruler,
             f"Style: {style} | Quality: {quality}",
             f"Size: {res or '512x512'} | Steps: {steps} | Enhance: {enhance}",
         ]
+        if view != "advanced":
+            parts.append(f"Prompt Type: {prompt_cat_label}")
         if view == "advanced" or prefs.get("queue_only"):
             parts.append(f"Queue-only: {queue_only}")
         if view == "advanced" or view == "basic" or prefs.get("lora_id"):
@@ -4390,6 +4400,7 @@ class YouTubeTelegramBot:
             return "Custom"
 
         view = (prefs.get("view") or "basic").strip().lower()
+        prompt_cat = (prefs.get("prompt_category") or "photo").strip().lower()
         styles = [
             ("None", "None"),
             ("Cinematic", "Cinematic photo"),
@@ -4443,35 +4454,31 @@ class YouTubeTelegramBot:
             q_row.append(InlineKeyboardButton(f"{mark}{label}", callback_data=f"zimg:quality:set:{key}"))
         rows.append(q_row)
 
-        # LoRA controls in Basic (keep on the first view)
-        if view != "advanced":
-            if loras:
-                lora_id = prefs.get("lora_id")
-                current_idx = -1
-                for idx, entry in enumerate(loras):
-                    if entry.get("id") == lora_id:
-                        current_idx = idx
-                        break
-                total = len(loras)
-                center = f"LoRA {current_idx + 1 if current_idx >= 0 else 1}/{total}" if total > 0 else "LoRA"
-                rows.append([
-                    InlineKeyboardButton("◀️ Prev LoRA", callback_data="zimg:lora:prev"),
-                    InlineKeyboardButton(center, callback_data="zimg:nop"),
-                    InlineKeyboardButton("Next LoRA ▶️", callback_data="zimg:lora:next"),
-                ])
-                rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
-            else:
-                rows.append([InlineKeyboardButton("LoRA: (unavailable)", callback_data="zimg:nop")])
+        # Prompt helper: choose category + generate prompt text
+        prompt_cat_label = {
+            "photo": "Photo",
+            "illustration": "Illustration",
+            "concept": "Concept",
+            "design": "Design",
+        }.get(prompt_cat, prompt_cat.title() if prompt_cat else "Photo")
+        rows.append([
+            InlineKeyboardButton(f"🧠 Prompt Type: {prompt_cat_label}", callback_data="zimg:promptcat:next"),
+            InlineKeyboardButton("🎲 Generate Prompt", callback_data="zimg:prompt:gen"),
+        ])
 
-        # Random prompt helpers (rename to clarify: sets prompt only)
-        rows.append([
-            InlineKeyboardButton("🤖 Random Photo Prompt", callback_data="zimg:random:set:photo"),
-            InlineKeyboardButton("🤖 Random Illustration Prompt", callback_data="zimg:random:set:illustration"),
-        ])
-        rows.append([
-            InlineKeyboardButton("🤖 Random Concept Prompt", callback_data="zimg:random:set:concept"),
-            InlineKeyboardButton("🤖 Random Design Prompt", callback_data="zimg:random:set:design"),
-        ])
+        # LoRA: single rotating button (includes None)
+        lora_label = "None"
+        lora_id = prefs.get("lora_id")
+        if lora_id:
+            lora_label = str(lora_id)
+            for entry in (loras or []):
+                if entry.get("id") == lora_id:
+                    lora_label = entry.get("display_name") or lora_label
+                    break
+        if loras:
+            rows.append([InlineKeyboardButton(f"🎭 LoRA: {lora_label}", callback_data="zimg:lora:next")])
+        else:
+            rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
         if view != "advanced":
             rows.append([
@@ -4484,24 +4491,12 @@ class YouTubeTelegramBot:
 
         # Advanced controls
         if loras:
-            lora_id = prefs.get("lora_id")
-            current_idx = -1
-            for idx, entry in enumerate(loras):
-                if entry.get("id") == lora_id:
-                    current_idx = idx
-                    break
-            total = len(loras)
-            center = "LoRA"
-            if total > 0:
-                center = f"LoRA {current_idx + 1 if current_idx >= 0 else 1}/{total}"
             rows.append([
-                InlineKeyboardButton("◀️ Prev LoRA", callback_data="zimg:lora:prev"),
-                InlineKeyboardButton(center, callback_data="zimg:nop"),
-                InlineKeyboardButton("Next LoRA ▶️", callback_data="zimg:lora:next"),
+                InlineKeyboardButton(f"🎭 LoRA: {lora_label}", callback_data="zimg:lora:next"),
+                InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear"),
             ])
-            rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
         else:
-            rows.append([InlineKeyboardButton("LoRA: (unavailable)", callback_data="zimg:nop")])
+            rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
         res_val = prefs.get("resolution") or "512x512"
         res_cur = (res_val or "512x512").lower()
@@ -5284,6 +5279,14 @@ class YouTubeTelegramBot:
                         prefs["resolution"] = "1024x1024"
                         prefs["steps"] = 12
                         prefs["enhance"] = True
+                elif action == "promptcat":
+                    categories = ["photo", "illustration", "concept", "design"]
+                    cur = (prefs.get("prompt_category") or "photo").strip().lower()
+                    try:
+                        idx = categories.index(cur)
+                    except ValueError:
+                        idx = 0
+                    prefs["prompt_category"] = categories[(idx + 1) % len(categories)]
                 elif action == "lora":
                     if not loras:
                         await query.answer("No LoRAs available", show_alert=False)
@@ -5297,12 +5300,21 @@ class YouTubeTelegramBot:
                             if entry.get("id") == cur_id:
                                 idx = i
                                 break
-                        delta = 1 if (len(parts) >= 3 and parts[2] == "next") else -1
-                        idx = (idx + delta) % len(loras)
-                        entry = loras[idx]
-                        prefs["lora_id"] = entry.get("id")
-                        rec = (entry.get("recommended") or {})
-                        prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                        # Rotate forward; include None at the start of the cycle.
+                        if idx == -1:
+                            idx = 0
+                            entry = loras[idx]
+                            prefs["lora_id"] = entry.get("id")
+                            rec = (entry.get("recommended") or {})
+                            prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                        else:
+                            if idx >= (len(loras) - 1):
+                                prefs["lora_id"] = None
+                            else:
+                                entry = loras[idx + 1]
+                                prefs["lora_id"] = entry.get("id")
+                                rec = (entry.get("recommended") or {})
+                                prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
                 elif action == "res":
                     # Backward compat: zimg:res:next
                     if len(parts) >= 3 and parts[2] == "next":
@@ -5346,6 +5358,18 @@ class YouTubeTelegramBot:
                         pass
                 elif action == "prompt" and len(parts) >= 3:
                     sub = parts[2]
+                    if sub == "gen":
+                        category = (prefs.get("prompt_category") or "photo").strip().lower()
+                        prompt = await self._zimage_quick_prompt(category, prefs.get("lora_id"))
+                        if not prompt:
+                            await query.answer("AI prompt helper unavailable", show_alert=False)
+                            return
+                        prefs["last_prompt"] = prompt
+                        prefs["last_seed"] = -1
+                        try:
+                            await query.answer(f"Prompt set ({category})", show_alert=False)
+                        except Exception:
+                            pass
                     if sub == "enhance":
                         txt = (prefs.get("last_prompt") or "").strip()
                         if not txt:
