@@ -2428,6 +2428,17 @@ class YouTubeTelegramBot:
             return
         chat_id = update.effective_chat.id
         prefs = self._zimage_prefs_for_chat(chat_id)
+        # Optional: `/zopts <prompt>` sets the stored prompt without generating.
+        message = update.effective_message
+        raw_text = (message.text or "").strip() if message else ""
+        parts = raw_text.split(" ", 1)
+        prompt = parts[1].strip() if len(parts) > 1 else ""
+        if prompt:
+            if len(prompt) > 400:
+                prompt = prompt[:400]
+            prompt, seed = self._zimage_parse_seed(prompt)
+            prefs["last_prompt"] = prompt
+            prefs["last_seed"] = seed
         loras = await self._zimage_load_loras()
         text = self._zimage_panel_text(prefs, loras)
         kb = self._zimage_options_keyboard(prefs, loras)
