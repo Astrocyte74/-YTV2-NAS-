@@ -3765,7 +3765,9 @@ class YouTubeTelegramBot:
 
     def _zimage_defaults(self) -> Dict[str, Any]:
         base = (os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
-        style = (os.getenv("ZIMAGE_DEFAULT_STYLE") or "Cinematic photo").strip() or "Cinematic photo"
+        style_raw = (os.getenv("ZIMAGE_DEFAULT_STYLE") or "Cinematic photo").strip()
+        style_options = [s.strip() for s in style_raw.split(",") if s.strip()]
+        style = style_options[0] if style_options else "Cinematic photo"
         try:
             steps = int(os.getenv("ZIMAGE_DEFAULT_STEPS", "7"))
         except Exception:
