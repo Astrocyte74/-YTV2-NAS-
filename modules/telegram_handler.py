@@ -7,8 +7,8 @@ It handles all Telegram bot interactions without embedded HTML generation.
 
 import asyncio
 import asyncio.subprocess as aio_subprocess
-import json
 import io
+import json
 import logging
 import os
 import re
@@ -25,6 +25,7 @@ try:
 except ImportError:
     requests = None
 
+import httpx
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import RetryAfter, BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -312,6 +313,12 @@ class YouTubeTelegramBot:
         self.summarizer_cache: Dict[str, YouTubeSummarizer] = {}
         # Ollama chat sessions keyed by chat_id
         self.ollama_sessions: Dict[int, Dict[str, Any]] = {}
+        # Z-Image queue (global) and concurrency control
+        self.zimage_queue: List[Dict[str, Any]] = []
+        self.zimage_inflight: int = 0
+        self.ZIMAGE_MAX_INFLIGHT = 2
+        self.ZIMAGE_MAX_QUEUE = 5
+        self.ZIMAGE_DEFAULT_NEGATIVE = "blurry, distorted, watermark, logo"
         # Auto-process scheduler for idle URLs (keyed by (chat_id, message_id))
         self._auto_tasks: Dict[tuple, asyncio.Task] = {}
 
@@ -800,6 +807,9 @@ class YouTubeTelegramBot:
         self.application.add_handler(CommandHandler("tts", self.tts_command))
         self.application.add_handler(CommandHandler("draw", self.draw_command))
         self.application.add_handler(CommandHandler("d", self.draw_command))
+        self.application.add_handler(CommandHandler("zimage", self.zimage_command))
+        self.application.add_handler(CommandHandler("z", self.zimage_command))
+        self.application.add_handler(CommandHandler("image", self.zimage_command))
         # Ollama chat commands (aliases: /o, /o_stop, /stop)
         self.application.add_handler(CommandHandler("ollama", self.ollama_command))
         self.application.add_handler(CommandHandler("o", self.ollama_command))
@@ -2328,6 +2338,59 @@ class YouTubeTelegramBot:
         )
         self._store_draw_session(prompt_message.chat_id, prompt_message.message_id, session)
 
+    async def zimage_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if not self._is_user_allowed(user_id):
+            message = update.effective_message
+            if message:
+                await message.reply_text("❌ You are not authorized to use this bot.")
+            return
+
+        message = update.effective_message
+        if not message:
+            return
+        raw_text = message.text or ""
+        parts = raw_text.split(" ", 1)
+        prompt = parts[1].strip() if len(parts) > 1 else ""
+        if not prompt:
+            await message.reply_text(
+                "🖼️ Usage: /zimage <prompt>\nOptional: add #12345 at the end to fix the seed.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        if len(prompt) > 400:
+            prompt = prompt[:400]
+        defaults = self._zimage_defaults()
+        base = defaults.get("base") or ""
+        if not base:
+            await message.reply_text("Set ZIMAGE_BASE_URL (e.g., http://10.0.4.x:8000) to use /zimage.")
+            return
+        prompt, seed = self._zimage_parse_seed(prompt)
+        job = {
+            "chat_id": message.chat_id,
+            "prompt": prompt,
+            "seed": seed,
+            "base": base,
+            "style": defaults.get("style"),
+            "steps": defaults.get("steps"),
+            "cfg_scale": defaults.get("cfg_scale"),
+            "width": defaults.get("width"),
+            "height": defaults.get("height"),
+        }
+        if self.zimage_inflight >= self.ZIMAGE_MAX_INFLIGHT:
+            if len(self.zimage_queue) >= self.ZIMAGE_MAX_QUEUE:
+                await message.reply_text("Z-Image queue is full; please try again in a moment.")
+                return
+            position = len(self.zimage_queue) + 1
+            self.zimage_queue.append(job)
+            await message.reply_text(f"🕒 Queued image generation (position {position}). I’ll send it here when it’s ready.")
+            await self._zimage_start_next()
+            return
+
+        status_msg = await message.reply_text("🖼️ Generating image…")
+        job["status_message"] = status_msg
+        asyncio.create_task(self._zimage_start_job(job))
+
     async def _refresh_draw_prompt(self, query, session: Dict[str, Any]) -> None:
         text = self._format_draw_prompt(session)
         try:
@@ -3699,6 +3762,158 @@ class YouTubeTelegramBot:
     def _ollama_persona_random_pair(self) -> Tuple[str, str]:
         neutral = self._no_persona_value()
         return neutral, neutral
+
+    def _zimage_defaults(self) -> Dict[str, Any]:
+        base = (os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
+        style = (os.getenv("ZIMAGE_DEFAULT_STYLE") or "Cinematic photo").strip() or "Cinematic photo"
+        try:
+            steps = int(os.getenv("ZIMAGE_DEFAULT_STEPS", "7"))
+        except Exception:
+            steps = 7
+        try:
+            cfg_scale = float(os.getenv("ZIMAGE_DEFAULT_CFG", "0.0"))
+        except Exception:
+            cfg_scale = 0.0
+        width = 512
+        height = 512
+        res_env = (os.getenv("ZIMAGE_DEFAULT_RESOLUTION") or "").lower().replace(" ", "")
+        if "x" in res_env:
+            try:
+                w_str, h_str = res_env.split("x", 1)
+                width = int(w_str) or width
+                height = int(h_str) or height
+            except Exception:
+                pass
+        else:
+            try:
+                width = int(os.getenv("ZIMAGE_DEFAULT_WIDTH", width))
+                height = int(os.getenv("ZIMAGE_DEFAULT_HEIGHT", height))
+            except Exception:
+                width, height = 512, 512
+        return {
+            "base": base,
+            "style": style,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "width": width,
+            "height": height,
+        }
+
+    def _zimage_parse_seed(self, prompt: str) -> Tuple[str, int]:
+        seed = -1
+        prompt = (prompt or "").strip()
+        matches = re.findall(r"#(\d+)", prompt)
+        if matches:
+            try:
+                seed = int(matches[-1])
+            except Exception:
+                seed = -1
+            prompt = re.sub(r"\s*#\d+\s*$", "", prompt).strip()
+        return prompt, seed
+
+    async def _zimage_start_next(self):
+        while self.zimage_inflight < self.ZIMAGE_MAX_INFLIGHT and self.zimage_queue:
+            job = self.zimage_queue.pop(0)
+            asyncio.create_task(self._zimage_start_job(job))
+
+    async def _zimage_start_job(self, job: Dict[str, Any]):
+        self.zimage_inflight += 1
+        try:
+            await self._zimage_run_job(job)
+        finally:
+            self.zimage_inflight -= 1
+            await self._zimage_start_next()
+
+    async def _zimage_run_job(self, job: Dict[str, Any]):
+        chat_id = job.get("chat_id")
+        prompt = job.get("prompt") or ""
+        seed = job.get("seed", -1)
+        base = (job.get("base") or "").rstrip("/")
+        style = job.get("style") or "Cinematic photo"
+        steps = job.get("steps") or 7
+        cfg_scale = job.get("cfg_scale") if job.get("cfg_scale") is not None else 0.0
+        width = job.get("width") or 512
+        height = job.get("height") or 512
+        status_message = job.get("status_message")
+        bot = self.application.bot if self.application else None
+        async def _mark(text: str):
+            if status_message and bot:
+                try:
+                    await status_message.edit_text(text)
+                except Exception:
+                    pass
+        if not bot:
+            return
+        if not base:
+            await bot.send_message(chat_id=chat_id, text="Z-Image base URL not set.")
+            return
+        payload = {
+            "prompt": prompt,
+            "negative_prompt": self.ZIMAGE_DEFAULT_NEGATIVE,
+            "style_preset": style,
+            "advanced": {
+                "steps": steps,
+                "cfg_scale": cfg_scale,
+                "width": width,
+                "height": height,
+                "seed": seed,
+                "use_lora": False,
+                "lora_id": None,
+                "lora_scale": 1.0,
+            },
+            "stealth": False,
+            "model": None,
+        }
+        gen_url = f"{base}/api/generate"
+        post_timeout = httpx.Timeout(120.0)
+        get_timeout = httpx.Timeout(60.0)
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(gen_url, json=payload, timeout=post_timeout)
+                if resp.status_code != 200:
+                    await _mark("❌ Z-Image generation failed.")
+                    await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+                    return
+                data = resp.json()
+                image_url = data.get("image_url")
+                if not image_url:
+                    await _mark("❌ Z-Image returned no image URL.")
+                    await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+                    return
+                full_url = image_url if image_url.startswith("http") else f"{base}{image_url}"
+                img_resp = await client.get(full_url, timeout=get_timeout)
+                if img_resp.status_code != 200:
+                    await _mark("❌ Z-Image fetch failed.")
+                    await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+                    return
+                png_bytes = img_resp.content
+        except Exception as exc:
+            logging.warning("zimage: request failed: %s", exc)
+            await _mark("❌ Z-Image request failed.")
+            await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+            return
+        # Build caption
+        seed_used = seed if seed != -1 else data.get("seed")
+        cap_parts = ["Z-Image"]
+        if seed_used is not None:
+            cap_parts.append(f"Seed {seed_used}")
+        w_used = data.get("width") or width
+        h_used = data.get("height") or height
+        if w_used and h_used:
+            cap_parts.append(f"{w_used}×{h_used}")
+        dur = data.get("duration_sec")
+        if isinstance(dur, (int, float)):
+            cap_parts.append(f"{dur:.1f}s")
+        caption = " • ".join(cap_parts)
+        bio = io.BytesIO(png_bytes)
+        bio.name = "zimage.png"
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=bio, caption=caption)
+            await _mark("✅ Z-Image ready.")
+        except Exception as exc:
+            logging.warning("zimage: send_photo failed: %s", exc)
+            await _mark("❌ Failed to send image.")
+            await bot.send_message(chat_id=chat_id, text="Generated image ready but sending failed.")
 
     def _ollama_start_ai2ai_task(self, chat_id: int, coro: Awaitable[Any]) -> bool:
         return ollama_service.start_ai2ai_task(self, chat_id, coro)

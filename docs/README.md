@@ -40,6 +40,11 @@
 - Telegram command: `/draw <prompt>` (`/d`) opens a menu to enhance the prompt via Local (Ollama) or Cloud LLMs, choose a preset/style/negative combination, and generate images using the preset’s size or manual Small/Medium/Large overrides. While a task runs, the inline keyboard collapses to a disabled “Working…” state, status text appears under the prompt, and the bot uploads the generated image bytes directly to Telegram (so LAN-only URLs are fine). All steps log under the `draw:` prefix in `bot.log`.
 - Note: some Draw Things builds return 404 for `sd-models`/`samplers`; the hub now translates that to `200 []`. Use the convenience endpoint to validate generation rather than the raw list calls.
 
+Z‑Image Turbo (Mac)
+- Configure `ZIMAGE_BASE_URL` (prefer the Mac’s WireGuard IP, e.g., `http://10.0.4.x:8000`). Defaults: style `Cinematic photo`, 512×512, 7 steps, CFG 0.0.
+- Commands: `/zimage …` (`/z`, `/image` aliases). Optional seed suffix `#12345` to fix seed; otherwise random.
+- Queueing: max 2 in-flight generations; up to 5 queued. Replies with position if queued; sends the PNG back as a photo when done.
+
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
 - Fetcher handles canonical URLs, `redd.it/<id>`, and the short `/r/<sub>/s/<token>` share links.
