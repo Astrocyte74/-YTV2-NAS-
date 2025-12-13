@@ -523,6 +523,15 @@ async def handle_callback(
             session[f"ai2ai_persona_category_{slot_lower}"] = cat_key
             session[f"ai2ai_view_{slot_lower}"] = "persona_list"
             session[f"ai2ai_persona_page_{slot_lower}"] = 0
+            if cat_key == "__NONE__":
+                none_label = categories.get(cat_key, {}).get("label")
+                names = categories.get(cat_key, {}).get("names") or []
+                no_persona_value = names[0] if names else "No persona"
+                session[f"persona_{slot_lower}"] = no_persona_value
+                session[f"persona_category_{slot_lower}"] = none_label
+                session[f"persona_{slot_lower}_custom"] = False
+                session[f"persona_{slot_lower}_intro_pending"] = False
+                handler._update_persona_session_fields(session, slot_lower, session.get(f"persona_{slot_lower}"))
             models = session.get("models") or []
             kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
             await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)

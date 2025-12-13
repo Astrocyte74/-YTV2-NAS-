@@ -3902,7 +3902,7 @@ class YouTubeTelegramBot:
                 model = session.get('model') or '—'
                 parts.append(f"Model: {model} (Local)")
             persona_single = session.get("persona_single")
-            if persona_single:
+            if persona_single and not self._is_no_persona(persona_single):
                 cat_single = session.get("persona_single_category")
                 single_disp, _ = self._persona_parse(persona_single)
                 persona_line = f"Persona: {single_disp}"

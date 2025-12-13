@@ -31,6 +31,11 @@ async def handle_callback(handler, query, callback_data: str, session: Dict[str,
         session["single_persona_page"] = 0
         session["single_view"] = "persona_list"
         session["persona_single_category"] = categories.get(cat_key, {}).get("label")
+        if cat_key == "__NONE__":
+            # Auto-apply "No persona" immediately to avoid leaving stale personas
+            session.pop("persona_single", None)
+            session["persona_single_custom"] = False
+            session["persona_single_intro_pending"] = False
         models = session.get("models") or []
         kb = handler._build_ollama_models_keyboard(models, session.get("page", 0), session=session)
         await query.edit_message_text(handler._ollama_status_text(session), reply_markup=kb)
