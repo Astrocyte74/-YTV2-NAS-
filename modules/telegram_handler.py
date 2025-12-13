@@ -4270,8 +4270,9 @@ class YouTubeTelegramBot:
                 InlineKeyboardButton(f"{label}", callback_data="zimg:nop"),
                 InlineKeyboardButton("▶️ LoRA", callback_data="zimg:lora:next"),
             ])
+        res_val = prefs.get("resolution") or "512x512"
         rows.append([
-            InlineKeyboardButton(f"Resolution: {res or '512x512'}", callback_data="zimg:res:next"),
+            InlineKeyboardButton(f"Resolution: {res_val}", callback_data="zimg:res:next"),
             InlineKeyboardButton(f"Steps: {prefs.get('steps') or 7}", callback_data="zimg:steps:next"),
         ])
         rows.append([
