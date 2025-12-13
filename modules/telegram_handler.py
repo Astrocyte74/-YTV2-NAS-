@@ -3967,7 +3967,7 @@ class YouTubeTelegramBot:
             logging.debug("zimage health failed: %s", exc)
             return False
 
-    def _zimage_enqueue_for_later(self, job: Dict[str, Any], chat_id: Optional[int], status_message: Any = None) -> None:
+    async def _zimage_enqueue_for_later(self, job: Dict[str, Any], chat_id: Optional[int], status_message: Any = None) -> None:
         if not job or not job.get("prompt") or not job.get("base"):
             return
         try:
@@ -3978,7 +3978,7 @@ class YouTubeTelegramBot:
             zimage_queue.enqueue(job)
             if status_message:
                 try:
-                    status_message.edit_text(
+                    await status_message.edit_text(
                         "🕒 Z-Image queued for later.\n"
                         f"Settings: {self._zimage_settings_summary(job)}"
                     )
@@ -4056,9 +4056,14 @@ class YouTubeTelegramBot:
         # Fast preflight: if offline, queue immediately
         health_ok = await self._zimage_health_ok(base)
         if not health_ok:
-            await _mark("🕒 Z-Image offline; queued for later.")
+            queued_text = "🕒 Z-Image offline; queued for later."
+            try:
+                queued_text = queued_text + "\n" + f"Settings: {self._zimage_settings_summary(job)}"
+            except Exception:
+                pass
+            await _mark(queued_text)
             if queue_on_fail:
-                self._zimage_enqueue_for_later(job, chat_id, status_message)
+                await self._zimage_enqueue_for_later(job, chat_id, status_message)
             else:
                 await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; queued for later.")
             return
@@ -4120,7 +4125,7 @@ class YouTubeTelegramBot:
                 if resp.status_code != 200:
                     await _mark("❌ Z-Image generation failed.")
                     if queue_on_fail:
-                        self._zimage_enqueue_for_later(job, chat_id, status_message)
+                        await self._zimage_enqueue_for_later(job, chat_id, status_message)
                     else:
                         await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
@@ -4129,7 +4134,7 @@ class YouTubeTelegramBot:
                 if not image_url:
                     await _mark("❌ Z-Image returned no image URL.")
                     if queue_on_fail:
-                        self._zimage_enqueue_for_later(job, chat_id, status_message)
+                        await self._zimage_enqueue_for_later(job, chat_id, status_message)
                     else:
                         await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
@@ -4138,7 +4143,7 @@ class YouTubeTelegramBot:
                 if img_resp.status_code != 200:
                     await _mark("❌ Z-Image fetch failed.")
                     if queue_on_fail:
-                        self._zimage_enqueue_for_later(job, chat_id, status_message)
+                        await self._zimage_enqueue_for_later(job, chat_id, status_message)
                     else:
                         await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
@@ -4147,7 +4152,7 @@ class YouTubeTelegramBot:
             logging.warning("zimage: request failed: %s", exc)
             await _mark("❌ Z-Image request failed.")
             if queue_on_fail:
-                self._zimage_enqueue_for_later(job, chat_id, status_message)
+                await self._zimage_enqueue_for_later(job, chat_id, status_message)
             else:
                 await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
             return
