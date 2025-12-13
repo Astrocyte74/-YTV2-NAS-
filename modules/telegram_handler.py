@@ -4506,21 +4506,6 @@ class YouTubeTelegramBot:
         else:
             rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
-        res_val = prefs.get("resolution") or "512x512"
-        res_cur = (res_val or "512x512").lower()
-        res_row: List[InlineKeyboardButton] = []
-        for r in ["512x512", "768x768", "1024x1024"]:
-            mark = "✅ " if res_cur == r else ""
-            res_row.append(InlineKeyboardButton(f"{mark}{r}", callback_data=f"zimg:res:set:{r}"))
-        rows.append(res_row)
-
-        steps_cur = int(prefs.get("steps") or 7)
-        step_row: List[InlineKeyboardButton] = []
-        for s in [5, 7, 9, 12]:
-            mark = "✅ " if steps_cur == s else ""
-            step_row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"zimg:steps:set:{s}"))
-        rows.append(step_row)
-
         rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
         return InlineKeyboardMarkup(rows)
 
