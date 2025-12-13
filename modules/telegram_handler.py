@@ -79,6 +79,7 @@ from modules.ollama_client import (
     pull as ollama_pull,
     health_summary as ollama_health_summary,
 )
+from modules import zimage_queue
 from modules.services import cloud_service, draw_service, summary_image_service
 from modules.services import ollama_service, summary_service, tts_service
 from modules.services.reachability import hub_ok as reach_hub_ok, hub_ollama_ok as reach_hub_ollama_ok
@@ -2376,6 +2377,7 @@ class YouTubeTelegramBot:
             "cfg_scale": defaults.get("cfg_scale"),
             "width": defaults.get("width"),
             "height": defaults.get("height"),
+            "queue_on_fail": True,
         }
         if self.zimage_inflight >= self.ZIMAGE_MAX_INFLIGHT:
             if len(self.zimage_queue) >= self.ZIMAGE_MAX_QUEUE:
@@ -3815,6 +3817,25 @@ class YouTubeTelegramBot:
             prompt = re.sub(r"\s*#\d+\s*$", "", prompt).strip()
         return prompt, seed
 
+    def _zimage_enqueue_for_later(self, job: Dict[str, Any], chat_id: Optional[int], status_message: Any = None) -> None:
+        if not job or not job.get("prompt") or not job.get("base"):
+            return
+        try:
+            job = dict(job)
+            job["chat_id"] = chat_id
+            zimage_queue.enqueue(job)
+            if status_message:
+                try:
+                    status_message.edit_text("🕒 Z-Image queued for later.")
+                except Exception:
+                    pass
+            if chat_id and self.application and self.application.bot:
+                asyncio.create_task(
+                    self.application.bot.send_message(chat_id=chat_id, text="🕒 Z-Image offline; queued for later.")
+                )
+        except Exception as exc:
+            logging.warning("zimage: failed to enqueue for later: %s", exc)
+
     async def _zimage_start_next(self):
         while self.zimage_inflight < self.ZIMAGE_MAX_INFLIGHT and self.zimage_queue:
             job = self.zimage_queue.pop(0)
@@ -3839,6 +3860,7 @@ class YouTubeTelegramBot:
         width = job.get("width") or 512
         height = job.get("height") or 512
         status_message = job.get("status_message")
+        queue_on_fail = bool(job.get("queue_on_fail"))
         bot = self.application.bot if self.application else None
         async def _mark(text: str):
             if status_message and bot:
@@ -3876,25 +3898,37 @@ class YouTubeTelegramBot:
                 resp = await client.post(gen_url, json=payload, timeout=post_timeout)
                 if resp.status_code != 200:
                     await _mark("❌ Z-Image generation failed.")
-                    await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+                    if queue_on_fail:
+                        self._zimage_enqueue_for_later(job, chat_id, status_message)
+                    else:
+                        await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
                 data = resp.json()
                 image_url = data.get("image_url")
                 if not image_url:
                     await _mark("❌ Z-Image returned no image URL.")
-                    await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+                    if queue_on_fail:
+                        self._zimage_enqueue_for_later(job, chat_id, status_message)
+                    else:
+                        await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
                 full_url = image_url if image_url.startswith("http") else f"{base}{image_url}"
                 img_resp = await client.get(full_url, timeout=get_timeout)
                 if img_resp.status_code != 200:
                     await _mark("❌ Z-Image fetch failed.")
-                    await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+                    if queue_on_fail:
+                        self._zimage_enqueue_for_later(job, chat_id, status_message)
+                    else:
+                        await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
                 png_bytes = img_resp.content
         except Exception as exc:
             logging.warning("zimage: request failed: %s", exc)
             await _mark("❌ Z-Image request failed.")
-            await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
+            if queue_on_fail:
+                self._zimage_enqueue_for_later(job, chat_id, status_message)
+            else:
+                await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
             return
         # Build caption
         seed_used = seed if seed != -1 else data.get("seed")

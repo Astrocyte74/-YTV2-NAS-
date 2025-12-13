@@ -6,8 +6,10 @@ ENABLE_TTS_QUEUE_WORKER="${ENABLE_TTS_QUEUE_WORKER:-1}"
 TTS_QUEUE_INTERVAL="${TTS_QUEUE_INTERVAL:-30}"
 ENABLE_IMAGE_QUEUE_WORKER="${ENABLE_IMAGE_QUEUE_WORKER:-1}"
 IMAGE_QUEUE_INTERVAL="${IMAGE_QUEUE_INTERVAL:-30}"
+ENABLE_ZIMAGE_QUEUE_WORKER="${ENABLE_ZIMAGE_QUEUE_WORKER:-1}"
+ZIMAGE_QUEUE_INTERVAL="${ZIMAGE_QUEUE_INTERVAL:-30}"
 
-echo "[entrypoint] Starting services (ENABLE_TTS_QUEUE_WORKER=${ENABLE_TTS_QUEUE_WORKER}, TTS_INTERVAL=${TTS_QUEUE_INTERVAL}s, ENABLE_IMAGE_QUEUE_WORKER=${ENABLE_IMAGE_QUEUE_WORKER}, IMG_INTERVAL=${IMAGE_QUEUE_INTERVAL}s)"
+echo "[entrypoint] Starting services (ENABLE_TTS_QUEUE_WORKER=${ENABLE_TTS_QUEUE_WORKER}, TTS_INTERVAL=${TTS_QUEUE_INTERVAL}s, ENABLE_IMAGE_QUEUE_WORKER=${ENABLE_IMAGE_QUEUE_WORKER}, IMG_INTERVAL=${IMAGE_QUEUE_INTERVAL}s, ENABLE_ZIMAGE_QUEUE_WORKER=${ENABLE_ZIMAGE_QUEUE_WORKER}, ZIMG_INTERVAL=${ZIMAGE_QUEUE_INTERVAL}s)"
 
 # Start Telegram bot
 ${PYTHON_BIN} telegram_bot.py &
@@ -16,6 +18,7 @@ echo "[entrypoint] Telegram bot PID=${BOT_PID}"
 
 WORKER_PID=""
 IMG_WORKER_PID=""
+ZIMG_WORKER_PID=""
 
 # Optionally start the TTS queue worker in watch mode
 if [ "${ENABLE_TTS_QUEUE_WORKER}" = "1" ]; then
@@ -31,17 +34,25 @@ if [ "${ENABLE_IMAGE_QUEUE_WORKER}" = "1" ]; then
   echo "[entrypoint] Image queue worker PID=${IMG_WORKER_PID}"
 fi
 
+# Optionally start the Z-Image queue worker in watch mode
+if [ "${ENABLE_ZIMAGE_QUEUE_WORKER}" = "1" ]; then
+  ${PYTHON_BIN} tools/drain_zimage_queue.py --watch --interval "${ZIMAGE_QUEUE_INTERVAL}" &
+  ZIMG_WORKER_PID=$!
+  echo "[entrypoint] Z-Image queue worker PID=${ZIMG_WORKER_PID}"
+fi
+
 term() {
   echo "[entrypoint] Caught signal, shutting down..."
   kill -TERM "${BOT_PID}" 2>/dev/null || true
   [ -n "${WORKER_PID}" ] && kill -TERM "${WORKER_PID}" 2>/dev/null || true
   [ -n "${IMG_WORKER_PID}" ] && kill -TERM "${IMG_WORKER_PID}" 2>/dev/null || true
+  [ -n "${ZIMG_WORKER_PID}" ] && kill -TERM "${ZIMG_WORKER_PID}" 2>/dev/null || true
   wait || true
 }
 trap term INT TERM
 
 # Wait for either process to exit, then terminate the other (POSIX sh, no wait -n)
-if [ -n "${WORKER_PID}" ] || [ -n "${IMG_WORKER_PID}" ]; then
+if [ -n "${WORKER_PID}" ] || [ -n "${IMG_WORKER_PID}" ] || [ -n "${ZIMG_WORKER_PID}" ]; then
   # Poll until one of the PIDs exits
   while :; do
     if ! kill -0 "${BOT_PID}" 2>/dev/null; then
@@ -54,6 +65,10 @@ if [ -n "${WORKER_PID}" ] || [ -n "${IMG_WORKER_PID}" ]; then
     fi
     if [ -n "${IMG_WORKER_PID}" ] && ! kill -0 "${IMG_WORKER_PID}" 2>/dev/null; then
       echo "[entrypoint] Image worker exited"
+      break
+    fi
+    if [ -n "${ZIMG_WORKER_PID}" ] && ! kill -0 "${ZIMG_WORKER_PID}" 2>/dev/null; then
+      echo "[entrypoint] Z-Image worker exited"
       break
     fi
     sleep 1
