@@ -3851,10 +3851,6 @@ class YouTubeTelegramBot:
                     status_message.edit_text("🕒 Z-Image queued for later.")
                 except Exception:
                     pass
-            if chat_id and self.application and self.application.bot:
-                asyncio.create_task(
-                    self.application.bot.send_message(chat_id=chat_id, text="🕒 Z-Image offline; queued for later.")
-                )
         except Exception as exc:
             logging.warning("zimage: failed to enqueue for later: %s", exc)
 
