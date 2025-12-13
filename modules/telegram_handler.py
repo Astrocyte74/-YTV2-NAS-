@@ -3583,6 +3583,13 @@ class YouTubeTelegramBot:
             return False
         return str(name).strip().lower().startswith("no persona")
 
+    def _no_persona_value(self) -> str:
+        categories = self._ollama_persona_categories()
+        names = categories.get("__NONE__", {}).get("names") or []
+        if names and isinstance(names[0], str):
+            return names[0]
+        return NO_PERSONA_LABEL
+
     def _ollama_persona_categories(self) -> Dict[str, Dict[str, Any]]:
         categories: Dict[str, Dict[str, Any]] = {
             "__NONE__": {
@@ -3683,26 +3690,15 @@ class YouTubeTelegramBot:
             for name in names:
                 if isinstance(name, str) and name.strip() and not self._is_no_persona(name):
                     pool.append(name.strip())
-        if not pool:
-            pool = ["Albert Einstein", "Isaac Newton"]
         return pool
 
     def _ollama_persona_defaults(self) -> List[str]:
-        pool = self._ollama_persona_pool()
-        if len(pool) >= 2:
-            return pool[:2]
-        if len(pool) == 1:
-            return [pool[0], "Speaker B"]
-        return ["Albert Einstein", "Isaac Newton"]
+        neutral = self._no_persona_value()
+        return [neutral, neutral]
 
     def _ollama_persona_random_pair(self) -> Tuple[str, str]:
-        pool = self._ollama_persona_pool()
-        if len(pool) >= 2:
-            return tuple(random.sample(pool, 2))  # type: ignore[return-value]
-        if len(pool) == 1:
-            return pool[0], pool[0]
-        defaults = self._ollama_persona_defaults()
-        return defaults[0], defaults[1]
+        neutral = self._no_persona_value()
+        return neutral, neutral
 
     def _ollama_start_ai2ai_task(self, chat_id: int, coro: Awaitable[Any]) -> bool:
         return ollama_service.start_ai2ai_task(self, chat_id, coro)
@@ -3830,12 +3826,18 @@ class YouTubeTelegramBot:
             header += " · Streaming: On"
         parts = [header]
         if mode_key == 'ai-ai':
-            # Ensure personas exist for display
-            if not (session.get('persona_a') and session.get('persona_b')):
-                rand_a, rand_b = self._ollama_persona_random_pair()
-                session.setdefault('persona_a', rand_a)
-                session.setdefault('persona_b', rand_b)
+            # Ensure personas exist for display (default to neutral/no persona)
+            if not session.get('persona_a'):
+                session['persona_a'] = self._no_persona_value()
+                session['persona_category_a'] = "No persona"
+                session['persona_a_custom'] = False
+                session['persona_a_intro_pending'] = False
                 self._update_persona_session_fields(session, 'a', session.get('persona_a'))
+            if not session.get('persona_b'):
+                session['persona_b'] = self._no_persona_value()
+                session['persona_category_b'] = "No persona"
+                session['persona_b_custom'] = False
+                session['persona_b_intro_pending'] = False
                 self._update_persona_session_fields(session, 'b', session.get('persona_b'))
             defaults = self._ollama_persona_defaults()
             model_a = session.get('ai2ai_model_a') or session.get('model') or defaults[0]
@@ -3873,9 +3875,9 @@ class YouTubeTelegramBot:
 
             line_a = _slot_line("A", a, pa_disp, prov_a, cloud_opt_a)
             line_b = _slot_line("B", b, pb_disp, prov_b, cloud_opt_b)
-            if cat_a:
+            if cat_a and not self._is_no_persona(pa):
                 line_a = f"{line_a} ({cat_a})"
-            if cat_b:
+            if cat_b and not self._is_no_persona(pb):
                 line_b = f"{line_b} ({cat_b})"
             parts.append(line_a)
             parts.append(line_b)

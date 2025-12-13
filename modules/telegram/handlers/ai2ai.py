@@ -142,10 +142,10 @@ async def continue_exchange(
             pass
         return
     session["active"] = True
-    if not (session.get("persona_a") and session.get("persona_b")):
-        rand_a, rand_b = handler._ollama_persona_random_pair()
-        session.setdefault("persona_a", rand_a)
-        session.setdefault("persona_b", rand_b)
+    if not session.get("persona_a"):
+        session["persona_a"] = handler._no_persona_value()
+    if not session.get("persona_b"):
+        session["persona_b"] = handler._no_persona_value()
     defaults = handler._ollama_persona_defaults()
     persona_a = session.get("persona_a") or defaults[0]
     persona_b = session.get("persona_b") or defaults[1]
@@ -434,10 +434,10 @@ async def handle_callback(
             return True
         if action == "start":
             session["ai2ai_active"] = True
-            if not (session.get("persona_a") and session.get("persona_b")):
-                rand_a, rand_b = handler._ollama_persona_random_pair()
-                session.setdefault("persona_a", rand_a)
-                session.setdefault("persona_b", rand_b)
+            if not session.get("persona_a"):
+                session["persona_a"] = handler._no_persona_value()
+            if not session.get("persona_b"):
+                session["persona_b"] = handler._no_persona_value()
             handler._update_persona_session_fields(session, 'a', session.get('persona_a'))
             handler._update_persona_session_fields(session, 'b', session.get('persona_b'))
             session.setdefault("persona_a_custom", False)
