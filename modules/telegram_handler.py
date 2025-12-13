@@ -4260,14 +4260,14 @@ class YouTubeTelegramBot:
                     label_full = entry.get("display_name") or entry.get("id") or "LoRA"
                     current_idx = idx
                     break
-            # Keep button label short; full name is shown in the panel text
-            max_len = 24
-            short_label = label_full
-            if len(short_label) > max_len:
-                short_label = short_label[: max_len - 1] + "…"
-            rows.append([InlineKeyboardButton(f"LoRA: {short_label}", callback_data="zimg:nop")])
+            total = len(loras)
+            # Keep button labels short; full LoRA name is shown in the panel text above
+            center = "LoRA"
+            if total > 0:
+                center = f"LoRA {current_idx + 1 if current_idx >= 0 else 1}/{total}"
             rows.append([
                 InlineKeyboardButton("◀️ Prev", callback_data="zimg:lora:prev"),
+                InlineKeyboardButton(center, callback_data="zimg:nop"),
                 InlineKeyboardButton("Next ▶️", callback_data="zimg:lora:next"),
             ])
         res_val = prefs.get("resolution") or "512x512"
