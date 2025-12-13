@@ -3778,10 +3778,12 @@ class YouTubeTelegramBot:
             cfg_scale = 0.0
         width = 512
         height = 512
-        res_env = (os.getenv("ZIMAGE_DEFAULT_RESOLUTION") or "").lower().replace(" ", "")
-        if "x" in res_env:
+        res_env = (os.getenv("ZIMAGE_DEFAULT_RESOLUTION") or "")
+        res_candidates = [r.strip().lower() for r in res_env.split(",") if r.strip()]
+        res_val = res_candidates[0] if res_candidates else ""
+        if "x" in res_val:
             try:
-                w_str, h_str = res_env.split("x", 1)
+                w_str, h_str = res_val.split("x", 1)
                 width = int(w_str) or width
                 height = int(h_str) or height
             except Exception:

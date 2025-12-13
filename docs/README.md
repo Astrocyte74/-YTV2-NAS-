@@ -41,7 +41,7 @@
 - Note: some Draw Things builds return 404 for `sd-models`/`samplers`; the hub now translates that to `200 []`. Use the convenience endpoint to validate generation rather than the raw list calls.
 
 Z‑Image Turbo (Mac)
-- Configure `ZIMAGE_BASE_URL` (prefer the Mac’s WireGuard IP, e.g., `http://10.0.4.x:8000`). Defaults: style `Cinematic photo`, 512×512, 7 steps, CFG 0.0. `ZIMAGE_DEFAULT_STYLE` accepts a comma list and uses the first entry (e.g., `Cinematic photo,Anime`).
+- Configure `ZIMAGE_BASE_URL` (prefer the Mac’s WireGuard IP, e.g., `http://10.0.4.x:8000`). Defaults: style `Cinematic photo`, 512×512, 7 steps, CFG 0.0. `ZIMAGE_DEFAULT_STYLE` accepts a comma list and uses the first entry (e.g., `Cinematic photo,Anime`). `ZIMAGE_DEFAULT_RESOLUTION` also accepts a comma list and uses the first entry (e.g., `512x512,768x768`).
 - Commands: `/zimage …` (`/z`, `/image` aliases). Optional seed suffix `#12345` to fix seed; otherwise random.
 - Queueing: max 2 in-flight generations; up to 5 queued. Replies with position if queued; sends the PNG back as a photo when done.
 
