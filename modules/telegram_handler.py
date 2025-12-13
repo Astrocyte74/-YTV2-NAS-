@@ -3889,6 +3889,7 @@ class YouTubeTelegramBot:
             return prefs
         defaults = self._zimage_defaults()
         prefs = {
+            "view": "basic",
             "style": defaults.get("style") or "Cinematic photo",
             "enhance": False,
             "queue_only": False,
@@ -4284,6 +4285,21 @@ class YouTubeTelegramBot:
         return ai2ai_persona_list_rows(slot, session or {}, page_size, categories, self._persona_parse)
 
     def _zimage_panel_text(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> str:
+        def _quality_label() -> str:
+            res_val = (prefs.get("resolution") or "512x512").lower()
+            steps_val = int(prefs.get("steps") or 7)
+            enhance_val = bool(prefs.get("enhance"))
+            presets = {
+                "Fast": ("512x512", 5, False),
+                "Balanced": ("512x512", 7, False),
+                "High": ("1024x1024", 12, True),
+            }
+            for name, (r, s, e) in presets.items():
+                if res_val == r and steps_val == s and enhance_val == e:
+                    return name
+            return "Custom"
+
+        view = (prefs.get("view") or "basic").strip().lower()
         style = prefs.get("style") or "Cinematic photo"
         enhance = "On" if prefs.get("enhance") else "Off"
         queue_only = "On" if prefs.get("queue_only") else "Off"
@@ -4308,18 +4324,23 @@ class YouTubeTelegramBot:
         if not prompt_preview:
             prompt_preview = "—"
         seed_label = f"#{int(last_seed)}" if isinstance(last_seed, int) and last_seed >= 0 else "random"
+        quality = _quality_label()
         parts = [
-            "Z-Image Options",
+            "Z-Image Options" + (" (Advanced)" if view == "advanced" else ""),
             ruler,
-            f"Style: {style}",
-            f"Enhance: {enhance}",
-            f"Queue-only: {queue_only}",
-            f"LoRA: {lora_label}",
-            f"Resolution: {res or '512x512'}",
-            f"Steps: {steps}",
+            f"Style: {style} | Quality: {quality}",
+            f"Size: {res or '512x512'} | Steps: {steps} | Enhance: {enhance}",
+        ]
+        if view == "advanced" or prefs.get("queue_only"):
+            parts.append(f"Queue-only: {queue_only}")
+        if view == "advanced" or prefs.get("lora_id"):
+            parts.append(f"LoRA: {lora_label}")
+        parts.extend([
             ruler,
             f"Prompt ({seed_label}): {prompt_preview}",
-        ]
+        ])
+        if view != "advanced" and prompt_preview == "—":
+            parts.append("Tip: use /zopts <prompt> (sets) or /z <prompt> (generates).")
         return "\n".join(parts)
 
     def _zimage_settings_summary(self, job: Dict[str, Any], loras: Optional[List[Dict[str, Any]]] = None) -> str:
@@ -4356,6 +4377,19 @@ class YouTubeTelegramBot:
         return f"{prefix} Queued Z-Image job.\nPrompt: {preview or '—'}\nSettings: {settings}"
 
     def _zimage_options_keyboard(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> InlineKeyboardMarkup:
+        def _quality_name() -> str:
+            res_val = (prefs.get("resolution") or "512x512").lower()
+            steps_val = int(prefs.get("steps") or 7)
+            enhance_val = bool(prefs.get("enhance"))
+            if res_val == "512x512" and steps_val == 5 and not enhance_val:
+                return "Fast"
+            if res_val == "512x512" and steps_val == 7 and not enhance_val:
+                return "Balanced"
+            if res_val == "1024x1024" and steps_val == 12 and enhance_val:
+                return "High"
+            return "Custom"
+
+        view = (prefs.get("view") or "basic").strip().lower()
         styles = [
             ("None", "None"),
             ("Cinematic", "Cinematic photo"),
@@ -4365,25 +4399,37 @@ class YouTubeTelegramBot:
         ]
         style = (prefs.get("style") or "Cinematic photo").strip()
         rows: List[List[InlineKeyboardButton]] = []
-        rows.append([
-            InlineKeyboardButton("🎬 Generate", callback_data="zimg:generate"),
-            InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
-        ])
-        rows.append([
-            InlineKeyboardButton("✨ Enhance Now", callback_data="zimg:prompt:enhance"),
-            InlineKeyboardButton("♻️ Reset", callback_data="zimg:reset"),
-        ])
-        rows.append([
-            InlineKeyboardButton(
-                "Enhance: On" if prefs.get("enhance") else "Enhance: Off",
-                callback_data="zimg:enhance:toggle",
-            ),
-            InlineKeyboardButton(
-                "Queue-only: On" if prefs.get("queue_only") else "Queue-only: Off",
-                callback_data="zimg:queue:toggle",
-            ),
-        ])
-        rows.append([InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear")])
+        if view != "advanced":
+            rows.append([InlineKeyboardButton("🎬 Generate Image", callback_data="zimg:generate")])
+            rows.append([
+                InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
+                InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
+            ])
+        else:
+            rows.append([
+                InlineKeyboardButton("⬅️ Basic", callback_data="zimg:view:set:basic"),
+                InlineKeyboardButton("Close", callback_data="zimg:close"),
+            ])
+            rows.append([
+                InlineKeyboardButton("🎬 Generate", callback_data="zimg:generate"),
+                InlineKeyboardButton("📋 Send Prompt", callback_data="zimg:prompt:send"),
+            ])
+            rows.append([
+                InlineKeyboardButton("✨ Enhance Now", callback_data="zimg:prompt:enhance"),
+                InlineKeyboardButton("♻️ Reset", callback_data="zimg:reset"),
+            ])
+            rows.append([
+                InlineKeyboardButton(
+                    "Enhance: On" if prefs.get("enhance") else "Enhance: Off",
+                    callback_data="zimg:enhance:toggle",
+                ),
+                InlineKeyboardButton(
+                    "Queue-only: On" if prefs.get("queue_only") else "Queue-only: Off",
+                    callback_data="zimg:queue:toggle",
+                ),
+            ])
+            rows.append([InlineKeyboardButton("🧹 Clear queued jobs", callback_data="zimg:queue:clear")])
+
         # Style chips
         style_row1: List[InlineKeyboardButton] = []
         style_row2: List[InlineKeyboardButton] = []
@@ -4397,6 +4443,41 @@ class YouTubeTelegramBot:
         rows.append(style_row1)
         if style_row2:
             rows.append(style_row2)
+
+        # Quality presets (basic + advanced)
+        current_quality = _quality_name()
+        q_row: List[InlineKeyboardButton] = []
+        for key, label in [("fast", "Fast"), ("balanced", "Balanced"), ("high", "High")]:
+            mark = "✅ " if current_quality.lower() == label.lower() else ""
+            q_row.append(InlineKeyboardButton(f"{mark}{label}", callback_data=f"zimg:quality:set:{key}"))
+        rows.append(q_row)
+
+        # Random prompt helpers (rename to clarify: sets prompt only)
+        rows.append([
+            InlineKeyboardButton("🤖 Random Photo Prompt", callback_data="zimg:random:set:photo"),
+            InlineKeyboardButton("🤖 Random Illustration Prompt", callback_data="zimg:random:set:illustration"),
+        ])
+        rows.append([
+            InlineKeyboardButton("🤖 Random Concept Prompt", callback_data="zimg:random:set:concept"),
+            InlineKeyboardButton("🤖 Random Design Prompt", callback_data="zimg:random:set:design"),
+        ])
+
+        if view != "advanced":
+            # LoRA: only show when active; use Advanced for cycling/picking
+            if prefs.get("lora_id"):
+                rows.append([
+                    InlineKeyboardButton("🎭 Change LoRA", callback_data="zimg:view:set:advanced"),
+                    InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear"),
+                ])
+            else:
+                rows.append([InlineKeyboardButton("🎭 Choose LoRA", callback_data="zimg:view:set:advanced")])
+            rows.append([
+                InlineKeyboardButton("⚙️ Advanced Settings", callback_data="zimg:view:set:advanced"),
+                InlineKeyboardButton("Close", callback_data="zimg:close"),
+            ])
+            return InlineKeyboardMarkup(rows)
+
+        # Advanced controls
         if loras:
             lora_id = prefs.get("lora_id")
             current_idx = -1
@@ -4405,7 +4486,6 @@ class YouTubeTelegramBot:
                     current_idx = idx
                     break
             total = len(loras)
-            # Keep button labels short; full LoRA name is shown in the panel text above
             center = "LoRA"
             if total > 0:
                 center = f"LoRA {current_idx + 1 if current_idx >= 0 else 1}/{total}"
@@ -4417,29 +4497,22 @@ class YouTubeTelegramBot:
             rows.append([InlineKeyboardButton("🧹 Clear LoRA", callback_data="zimg:lora:clear")])
         else:
             rows.append([InlineKeyboardButton("LoRA: (unavailable)", callback_data="zimg:nop")])
+
         res_val = prefs.get("resolution") or "512x512"
-        # Resolution chips
         res_cur = (res_val or "512x512").lower()
         res_row: List[InlineKeyboardButton] = []
         for r in ["512x512", "768x768", "1024x1024"]:
             mark = "✅ " if res_cur == r else ""
             res_row.append(InlineKeyboardButton(f"{mark}{r}", callback_data=f"zimg:res:set:{r}"))
         rows.append(res_row)
-        # Steps chips
+
         steps_cur = int(prefs.get("steps") or 7)
         step_row: List[InlineKeyboardButton] = []
         for s in [5, 7, 9, 12]:
             mark = "✅ " if steps_cur == s else ""
             step_row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"zimg:steps:set:{s}"))
         rows.append(step_row)
-        rows.append([
-            InlineKeyboardButton("🤖 Random Photo", callback_data="zimg:random:set:photo"),
-            InlineKeyboardButton("🤖 Random Illustration", callback_data="zimg:random:set:illustration"),
-        ])
-        rows.append([
-            InlineKeyboardButton("🤖 Random Concept", callback_data="zimg:random:set:concept"),
-            InlineKeyboardButton("🤖 Random Design", callback_data="zimg:random:set:design"),
-        ])
+
         rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
         return InlineKeyboardMarkup(rows)
 
@@ -5196,6 +5269,25 @@ class YouTubeTelegramBot:
                             # Keep panel displayed
                     else:
                         prefs["queue_only"] = not prefs.get("queue_only")
+                elif action == "view" and len(parts) >= 4 and parts[2] == "set":
+                    target = (parts[3] or "").strip().lower()
+                    if target in {"basic", "advanced"}:
+                        prefs["view"] = target
+                elif action == "quality" and len(parts) >= 4 and parts[2] == "set":
+                    key = (parts[3] or "").strip().lower()
+                    if key == "fast":
+                        prefs["resolution"] = "512x512"
+                        prefs["steps"] = 5
+                        prefs["enhance"] = False
+                    elif key == "balanced":
+                        # Keep defaults: 512x512 + 7 steps
+                        prefs["resolution"] = "512x512"
+                        prefs["steps"] = 7
+                        prefs["enhance"] = False
+                    elif key == "high":
+                        prefs["resolution"] = "1024x1024"
+                        prefs["steps"] = 12
+                        prefs["enhance"] = True
                 elif action == "lora":
                     if not loras:
                         await query.answer("No LoRAs available", show_alert=False)
