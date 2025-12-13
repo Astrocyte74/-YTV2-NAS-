@@ -4999,7 +4999,7 @@ class YouTubeTelegramBot:
                     entry = loras[idx]
                     prefs["lora_id"] = entry.get("id")
                     rec = (entry.get("recommended") or {})
-                        prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
+                    prefs["lora_scale"] = rec.get("lora_scale") or prefs.get("lora_scale") or 1.0
                 elif action == "res":
                     presets = ["512x512", "768x768", "1024x1024"]
                     cur = (prefs.get("resolution") or presets[0]).lower()
