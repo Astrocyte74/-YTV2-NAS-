@@ -1673,6 +1673,15 @@ async def maybe_generate_summary_image(
             logger.warning("summary image could not be queued: %s", qexc)
         return None
 
+    try:
+        logger.info(
+            "summary image provider selected: %s (order=%s)",
+            selected_provider,
+            ",".join(providers),
+        )
+    except Exception:
+        pass
+
     summary_data = content.get("summary") or {}
     analysis = content.get("analysis")
     if not isinstance(analysis, dict):
@@ -1830,7 +1839,12 @@ async def maybe_generate_summary_image(
 
     public_url = _derive_public_url(output_path)
     created_at = _now_iso()
-    model_name = generation.get("model") or generation.get("engine") or (template.key if template else "default")
+    model_name = (
+        generation.get("model")
+        or generation.get("engine")
+        or generation.get("device")
+        or (template.key if template else "default")
+    )
     metadata = {
         "provider": selected_provider,
         "path": str(output_path),
@@ -1866,7 +1880,15 @@ async def maybe_generate_summary_image(
             public_url,
         ),
     }
-    logger.info("summary image saved to %s (template=%s)", output_path, template.key)
+    logger.info(
+        "summary image saved to %s (provider=%s model=%s size=%sx%s template=%s)",
+        output_path,
+        selected_provider,
+        model_name,
+        template.width,
+        template.height,
+        template.key,
+    )
     try:
         if cid:
             _LAST_IMAGE_GEN[cid] = __import__('time').time()
