@@ -2,7 +2,8 @@
 Summary Image Generation Service
 
 Builds prompt templates, optionally leverages the local prompt enhancer, and
-invokes the Draw Things hub to render a square illustration for a summary.
+invokes an image provider (Draw Things hub or Z-Image) to render a square
+illustration for a summary.
 
 Designed to be non-blocking and fail-safe: if anything goes wrong we simply
 return None and the caller continues without a generated image.
@@ -15,6 +16,8 @@ import logging
 import os
 import random
 import re
+import time
+import urllib.parse
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +40,166 @@ EXPORTS_DIR = Path(os.getenv("SUMMARY_IMAGE_EXPORT_DIR", "exports/images")).reso
 DEFAULT_SIZE = int(os.getenv("SUMMARY_IMAGE_SIZE", "384"))
 DEFAULT_PRESET = os.getenv("SUMMARY_IMAGE_PRESET", "flux_balanced")
 DEFAULT_STYLE = os.getenv("SUMMARY_IMAGE_STYLE", "cinematic_warm")
+
+_SUMMARY_IMAGE_ZIMAGE_DEFAULT_STYLE = "Cinematic photo"
+_SUMMARY_IMAGE_ZIMAGE_DEFAULT_STEPS = 7
+_SUMMARY_IMAGE_ZIMAGE_DEFAULT_CFG_SCALE = 0.0
+_SUMMARY_IMAGE_ZIMAGE_NEGATIVE_PROMPT = "blurry, distorted, watermark, logo, text, lettering"
+
+_ZIMAGE_HEALTH_CACHE: Dict[str, Tuple[float, bool]] = {}
+
+
+def _csv_list_env(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default)
+    value = str(raw or "")
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _summary_image_providers() -> List[str]:
+    """
+    Return provider preference order for summary images.
+    Supported providers: drawthings, zimage
+    """
+    raw = _csv_list_env("SUMMARY_IMAGE_PROVIDERS", "drawthings")
+    normalized: List[str] = []
+    for entry in raw:
+        key = entry.strip().lower()
+        if key in {"draw", "drawthings", "hub"}:
+            key = "drawthings"
+        elif key in {"zimage", "z-image"}:
+            key = "zimage"
+        else:
+            continue
+        if key not in normalized:
+            normalized.append(key)
+    return normalized or ["drawthings"]
+
+
+def _map_style_preset_to_zimage(style_preset: Optional[str]) -> str:
+    s = (style_preset or "").strip().lower()
+    if not s or s == "none":
+        return _SUMMARY_IMAGE_ZIMAGE_DEFAULT_STYLE
+    if "anime" in s or "manga" in s:
+        return "Anime"
+    if "product" in s or "render" in s:
+        return "Product render"
+    if any(
+        token in s
+        for token in (
+            "illustration",
+            "watercolor",
+            "pastel",
+            "retro",
+            "poster",
+            "pixar",
+            "cartoon",
+            "comic",
+            "sketch",
+            "vector",
+        )
+    ):
+        return "Digital illustration"
+    return "Cinematic photo"
+
+
+async def _zimage_is_reachable(
+    base_url: str,
+    *,
+    ttl: int = 30,
+    timeout: float = 5.0,
+) -> bool:
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        return False
+
+    now = time.monotonic()
+    cached = _ZIMAGE_HEALTH_CACHE.get(base)
+    if cached and ttl > 0:
+        cached_ts, cached_ok = cached
+        if now - cached_ts <= ttl:
+            return cached_ok
+
+    url = f"{base}/health"
+    loop = asyncio.get_running_loop()
+
+    def _call() -> bool:
+        try:
+            resp = requests.get(url, timeout=timeout)
+            if resp.status_code != 200:
+                return False
+            try:
+                data = resp.json() or {}
+                status = str(data.get("status") or "").strip().lower()
+                return status == "ok" if status else True
+            except Exception:
+                return True
+        except Exception:
+            return False
+
+    ok = await loop.run_in_executor(None, _call)
+    _ZIMAGE_HEALTH_CACHE[base] = (now, ok)
+    return ok
+
+
+async def _zimage_generate_image(
+    base_url: str,
+    prompt: str,
+    *,
+    width: int,
+    height: int,
+    seed: int = -1,
+    steps: int = _SUMMARY_IMAGE_ZIMAGE_DEFAULT_STEPS,
+    cfg_scale: float = _SUMMARY_IMAGE_ZIMAGE_DEFAULT_CFG_SCALE,
+    style_preset: str = _SUMMARY_IMAGE_ZIMAGE_DEFAULT_STYLE,
+    negative_prompt: str = _SUMMARY_IMAGE_ZIMAGE_NEGATIVE_PROMPT,
+    timeout: float = 120.0,
+) -> Dict[str, Any]:
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("Z-Image base URL is not configured.")
+
+    url = f"{base}/api/generate"
+    payload: Dict[str, Any] = {
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        "style_preset": style_preset,
+        "advanced": {
+            "steps": int(steps),
+            "cfg_scale": float(cfg_scale),
+            "width": int(width),
+            "height": int(height),
+            "seed": int(seed),
+            "use_lora": False,
+            "lora_id": None,
+            "lora_scale": 1.0,
+        },
+        "stealth": False,
+        "model": None,
+    }
+
+    loop = asyncio.get_running_loop()
+
+    def _call() -> Dict[str, Any]:
+        resp = requests.post(url, json=payload, timeout=timeout)
+        if resp.status_code >= 400:
+            snippet = (resp.text or "").strip()
+            snippet = snippet[:400] if snippet else f"HTTP {resp.status_code}"
+            raise RuntimeError(f"Z-Image returned {resp.status_code}: {snippet}")
+        data = resp.json() or {}
+        return data
+
+    data = await loop.run_in_executor(None, _call)
+    image_url = data.get("image_url")
+    if not isinstance(image_url, str) or not image_url.strip():
+        raise RuntimeError("Z-Image did not return image_url")
+
+    absolute = urllib.parse.urljoin(base.rstrip("/") + "/", image_url.lstrip("/"))
+    out = dict(data)
+    out["url"] = image_url
+    out["absolute_url"] = absolute
+    out.setdefault("width", width)
+    out.setdefault("height", height)
+    return out
 
 
 CATEGORY_KEYWORDS: Dict[str, List[str]] = {
@@ -1439,57 +1602,71 @@ async def maybe_generate_summary_image(
     freestyle_mode = mode_key in {"ai2", "freestyle", "ai2_freestyle", "free"}
     image_mode = "ai2" if freestyle_mode else "ai1"
 
+    # Provider selection (priority list): drawthings,zimage
+    providers = _summary_image_providers()
     tts_base = (os.getenv("TTSHUB_API_BASE") or "").strip()
-    if not tts_base:
-        logger.debug("summary image skipped: TTSHUB_API_BASE not configured")
-        return None
+    zimage_base = (os.getenv("ZIMAGE_BASE_URL") or "").strip()
 
-    # Quick health probe; if offline, enqueue a job and return gracefully
-    # Allow drain context to bypass per-call health when a preflight has passed
+    selected_provider: Optional[str] = None
+    any_configured = False
+
+    # Quick health probe; if offline, optionally enqueue and return gracefully.
+    # Allow drain context to bypass per-call health when a preflight has passed.
     bypass_health = str(os.getenv("SUMMARY_IMAGE_HEALTH_BYPASS","0")).strip().lower() in ("1","true","yes","on")
     health_ttl = 0 if bypass_health else int(os.getenv("SUMMARY_IMAGE_HEALTH_TTL","30") or "30")
-    try:
-        health = await draw_service.fetch_drawthings_health(tts_base, ttl=health_ttl)
-        if not isinstance(health, dict) or not health:
-            raise RuntimeError("empty health")
-        # Treat non-reachable hub as offline and enqueue for later
-        if not bool(health.get("reachable", False)):
-            if _suppress_enqueue():
-                logger.info("summary image: hub not reachable; enqueue suppressed (drain context)")
-                return None
+    probe_errors: List[str] = []
+    for provider in providers:
+        if provider == "drawthings":
+            if not tts_base:
+                continue
+            any_configured = True
+            if bypass_health:
+                selected_provider = "drawthings"
+                break
             try:
-                from modules import image_queue
-                job = {
-                    "mode": "summary_image",
-                    "image_mode": image_mode,
-                    "content": content,
-                    "reason": "hub_not_reachable",
-                }
-                cid = str(content.get("id") or content.get("video_id") or "")
-                if not _pending_job_exists(cid) and _should_enqueue(cid):
-                    path = image_queue.enqueue(job)
-                    logger.info("summary image queued (hub not reachable): %s", path.name)
-                else:
-                    logger.info("summary image enqueue suppressed (recent enqueue) for %s", cid)
-            except Exception as qexc:
-                logger.warning("summary image could not be queued (not reachable): %s", qexc)
+                health = await draw_service.fetch_drawthings_health(tts_base, ttl=health_ttl)
+                if bool((health or {}).get("reachable", False)):
+                    selected_provider = "drawthings"
+                    break
+                probe_errors.append("drawthings:not_reachable")
+            except Exception as exc:
+                probe_errors.append(f"drawthings:{type(exc).__name__}")
+        elif provider == "zimage":
+            if not zimage_base:
+                continue
+            any_configured = True
+            if bypass_health:
+                selected_provider = "zimage"
+                break
+            ok = await _zimage_is_reachable(zimage_base, ttl=health_ttl)
+            if ok:
+                selected_provider = "zimage"
+                break
+            probe_errors.append("zimage:offline")
+
+    if not selected_provider:
+        if not any_configured:
+            logger.debug(
+                "summary image skipped: no providers configured (set SUMMARY_IMAGE_PROVIDERS and TTSHUB_API_BASE and/or ZIMAGE_BASE_URL)"
+            )
             return None
-    except Exception as exc:
         if _suppress_enqueue():
-            logger.info("summary image: hub offline; enqueue suppressed (drain context)")
+            logger.info("summary image: all providers offline; enqueue suppressed (drain context)")
             return None
         try:
             from modules import image_queue
+
             job = {
                 "mode": "summary_image",
                 "image_mode": image_mode,
                 "content": content,
-                "reason": f"hub_offline:{str(exc)[:80]}",
+                "reason": "providers_offline:" + ",".join(probe_errors[:4]),
+                "providers": providers,
             }
             cid = str(content.get("id") or content.get("video_id") or "")
             if not _pending_job_exists(cid) and _should_enqueue(cid):
                 path = image_queue.enqueue(job)
-                logger.info("summary image queued (hub offline): %s", path.name)
+                logger.info("summary image queued (providers offline): %s", path.name)
             else:
                 logger.info("summary image enqueue suppressed (recent enqueue) for %s", cid)
         except Exception as qexc:
@@ -1574,14 +1751,23 @@ async def maybe_generate_summary_image(
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        generation = await draw_service.generate_image(
-            tts_base,
-            prompt,
-            width=template.width,
-            height=template.height,
-            preset=template.preset,
-            style_preset=template.style_preset,
-        )
+        if selected_provider == "zimage":
+            generation = await _zimage_generate_image(
+                zimage_base,
+                prompt,
+                width=template.width,
+                height=template.height,
+                style_preset=_map_style_preset_to_zimage(template.style_preset),
+            )
+        else:
+            generation = await draw_service.generate_image(
+                tts_base,
+                prompt,
+                width=template.width,
+                height=template.height,
+                preset=template.preset,
+                style_preset=template.style_preset,
+            )
     except Exception as exc:
         # Enqueue for later if generation path failed (likely offline), unless suppressed
         if _suppress_enqueue():
@@ -1593,7 +1779,8 @@ async def maybe_generate_summary_image(
                     "mode": "summary_image",
                     "image_mode": image_mode,
                     "content": content,
-                    "reason": f"gen_failed:{str(exc)[:120]}",
+                    "reason": f"{selected_provider or 'provider'}_gen_failed:{str(exc)[:120]}",
+                    "providers": providers,
                 }
                 cid = str(content.get("id") or content.get("video_id") or "")
                 if not _pending_job_exists(cid) and _should_enqueue(cid):
@@ -1645,6 +1832,7 @@ async def maybe_generate_summary_image(
     created_at = _now_iso()
     model_name = generation.get("model") or generation.get("engine") or (template.key if template else "default")
     metadata = {
+        "provider": selected_provider,
         "path": str(output_path),
         "relative_path": str(output_path.relative_to(Path.cwd())),
         "public_url": public_url,

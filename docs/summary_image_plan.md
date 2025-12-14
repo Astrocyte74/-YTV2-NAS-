@@ -3,7 +3,7 @@
 ## Why
 - Enhance summaries with bespoke visuals that reflect our AI-written take instead of relying solely on source thumbnails.
 - Provide richer assets for dashboards, Telegram shares, and future social repost tooling (two-image layout: source + summary graphic).
-- Reuse the Draw Things hub we already operate, keeping control of style, latency, and cost.
+- Reuse our existing image providers (Draw Things hub and/or Z-Image), keeping control of style, latency, and cost.
 
 ## Current Status (2025-11)
 - Pipeline is live on NAS: summaries now generate 384×384 PNGs and upload them to the dashboard via `/api/upload-image` (see `docs/dashboard_summary_image_memo.md` for operations/reset steps).
@@ -24,7 +24,11 @@
    - Optionally pass through existing prompt enhancers (local vs. cloud) with a “summary card” style hint.
 
 3. **Image generation**  
-   - Reuse `modules/services/draw_service.generate_image()`.  
+   - Default provider is Draw Things via `modules/services/draw_service.generate_image()`.  
+   - Provider selection is configurable (priority order) via `SUMMARY_IMAGE_PROVIDERS`:
+     - `SUMMARY_IMAGE_PROVIDERS=drawthings` (default)
+     - `SUMMARY_IMAGE_PROVIDERS=zimage,drawthings` (prefer Z-Image, fall back to Draw Things when offline)
+     - Requires `TTSHUB_API_BASE` for `drawthings`, and `ZIMAGE_BASE_URL` for `zimage`.
    - Target Flux preset (Balanced or Detail) at 384×384; capture the hub seed for reproducibility.  
    - 1 retry with fallback settings (same logic as Telegram bot).
 
