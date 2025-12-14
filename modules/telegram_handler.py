@@ -2432,14 +2432,18 @@ class YouTubeTelegramBot:
             prompt, seed = self._zimage_parse_seed(prompt)
             prefs["last_prompt"] = prompt
             prefs["last_seed"] = seed
+        loras = await self._zimage_load_loras()
         q_total, q_disk, q_mem = self._zimage_pending_queue_counts(chat_id)
         prefs["_queue_total"] = q_total
         prefs["_queue_disk"] = q_disk
         prefs["_queue_mem"] = q_mem
-        loras = await self._zimage_load_loras()
         text = self._zimage_panel_text(prefs, loras)
         kb = self._zimage_options_keyboard(prefs, loras)
-        await update.effective_message.reply_text(text, reply_markup=kb)
+        panel_msg = await update.effective_message.reply_text(text, reply_markup=kb)
+        try:
+            prefs["_panel_message_id"] = int(panel_msg.message_id)
+        except Exception:
+            pass
 
     async def _refresh_draw_prompt(self, query, session: Dict[str, Any]) -> None:
         text = self._format_draw_prompt(session)
@@ -4035,6 +4039,36 @@ class YouTubeTelegramBot:
         finally:
             self.zimage_inflight -= 1
             await self._zimage_start_next()
+            try:
+                chat_id = job.get("chat_id")
+                if chat_id is not None:
+                    prefs = self._zimage_prefs_for_chat(int(chat_id))
+                    if prefs.get("busy"):
+                        prefs["busy"] = False
+                        prefs.pop("busy_started_at", None)
+                        asyncio.create_task(self._zimage_refresh_panel_message(int(chat_id)))
+            except Exception:
+                pass
+
+    async def _zimage_refresh_panel_message(self, chat_id: int) -> None:
+        bot = self.application.bot if self.application else None
+        if not bot:
+            return
+        prefs = self._zimage_prefs_for_chat(chat_id)
+        message_id = prefs.get("_panel_message_id")
+        if not isinstance(message_id, int) or message_id <= 0:
+            return
+        loras = await self._zimage_load_loras()
+        q_total, q_disk, q_mem = self._zimage_pending_queue_counts(chat_id)
+        prefs["_queue_total"] = q_total
+        prefs["_queue_disk"] = q_disk
+        prefs["_queue_mem"] = q_mem
+        text = self._zimage_panel_text(prefs, loras)
+        kb = self._zimage_options_keyboard(prefs, loras)
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=kb)
+        except Exception:
+            pass
 
     async def _zimage_run_job(self, job: Dict[str, Any]):
         chat_id = job.get("chat_id")
@@ -4342,12 +4376,15 @@ class YouTubeTelegramBot:
         }.get(prompt_cat, prompt_cat.title() if prompt_cat else "Photo")
         q_total = prefs.get("_queue_total")
         queue_line = f"Queue: {q_total} pending" if isinstance(q_total, int) else None
+        busy = bool(prefs.get("busy"))
+        busy_line = "Status: ⏳ Generating…" if busy else None
 
         parts = [
             "Z-Image Options" + (" (Advanced)" if view == "advanced" else ""),
             ruler,
             "Legend: 🔄 = tap to cycle",
             queue_line,
+            busy_line,
             f"Style: {style} | Quality: {quality}",
             f"Size: {res or '512x512'} | Steps: {steps} | Enhance: {enhance}",
         ]
@@ -4421,13 +4458,16 @@ class YouTubeTelegramBot:
             ("Product", "Product render"),
         ]
         style = (prefs.get("style") or "Cinematic photo").strip()
+        busy = bool(prefs.get("busy"))
+        def _cb(data: str) -> str:
+            return "zimg:nop" if busy else data
         rows: List[List[InlineKeyboardButton]] = []
 
         rows.append([
-            InlineKeyboardButton("✨ Enhance Prompt", callback_data="zimg:prompt:enhance"),
+            InlineKeyboardButton("✨ Enhance Prompt", callback_data=_cb("zimg:prompt:enhance")),
             InlineKeyboardButton(
                 "🔄 Auto-Enhance: On" if prefs.get("enhance") else "🔄 Auto-Enhance: Off",
-                callback_data="zimg:enhance:toggle",
+                callback_data=_cb("zimg:enhance:toggle"),
             ),
         ])
 
@@ -4437,11 +4477,11 @@ class YouTubeTelegramBot:
             if full == style:
                 style_label = short
                 break
-        rows.append([InlineKeyboardButton(f"🔄 Style: {style_label}", callback_data="zimg:style:next")])
+        rows.append([InlineKeyboardButton(f"🔄 Style: {style_label}", callback_data=_cb("zimg:style:next"))])
 
         # Quality presets: single rotating button
         current_quality = _quality_name()
-        rows.append([InlineKeyboardButton(f"🔄 Quality: {current_quality}", callback_data="zimg:quality:next")])
+        rows.append([InlineKeyboardButton(f"🔄 Quality: {current_quality}", callback_data=_cb("zimg:quality:next"))])
 
         # Core quality knobs (also affected by Quality presets)
         res_display = prefs.get("resolution") or "512x512"
@@ -4450,8 +4490,8 @@ class YouTubeTelegramBot:
         except Exception:
             steps_display = "7"
         rows.append([
-            InlineKeyboardButton(f"🔄 Size: {res_display}", callback_data="zimg:res:next"),
-            InlineKeyboardButton(f"🔄 Steps: {steps_display}", callback_data="zimg:steps:next"),
+            InlineKeyboardButton(f"🔄 Size: {res_display}", callback_data=_cb("zimg:res:next")),
+            InlineKeyboardButton(f"🔄 Steps: {steps_display}", callback_data=_cb("zimg:steps:next")),
         ])
 
         # Prompt helper: choose category + generate prompt text
@@ -4462,8 +4502,8 @@ class YouTubeTelegramBot:
             "design": "Design",
         }.get(prompt_cat, prompt_cat.title() if prompt_cat else "Photo")
         rows.append([
-            InlineKeyboardButton(f"🔄 Prompt Type: {prompt_cat_label}", callback_data="zimg:promptcat:next"),
-            InlineKeyboardButton("🎲 Generate Prompt", callback_data="zimg:prompt:gen"),
+            InlineKeyboardButton(f"🔄 Prompt Type: {prompt_cat_label}", callback_data=_cb("zimg:promptcat:next")),
+            InlineKeyboardButton("🎲 Generate Prompt", callback_data=_cb("zimg:prompt:gen")),
         ])
 
         # LoRA: single rotating button (includes None)
@@ -4476,7 +4516,7 @@ class YouTubeTelegramBot:
                     lora_label = entry.get("display_name") or lora_label
                     break
         if loras:
-            rows.append([InlineKeyboardButton(f"🔄 LoRA: {lora_label}", callback_data="zimg:lora:next")])
+            rows.append([InlineKeyboardButton(f"🔄 LoRA: {lora_label}", callback_data=_cb("zimg:lora:next"))])
         else:
             rows.append([InlineKeyboardButton("🎭 LoRA: (unavailable)", callback_data="zimg:nop")])
 
@@ -4485,12 +4525,12 @@ class YouTubeTelegramBot:
         if isinstance(q_total, int):
             clear_label = f"🧹 Clear queued jobs ({q_total})"
         rows.append([
-            InlineKeyboardButton(clear_label, callback_data="zimg:queue:clear"),
-            InlineKeyboardButton("♻️ Reset", callback_data="zimg:reset"),
+            InlineKeyboardButton(clear_label, callback_data=_cb("zimg:queue:clear")),
+            InlineKeyboardButton("♻️ Reset", callback_data=_cb("zimg:reset")),
         ])
         rows.append([InlineKeyboardButton("Close", callback_data="zimg:close")])
         # Primary action at the bottom (more obvious)
-        rows.append([InlineKeyboardButton("🎬 GENERATE IMAGE", callback_data="zimg:generate")])
+        rows.append([InlineKeyboardButton("⏳ Generating…" if busy else "🎬 GENERATE IMAGE", callback_data=_cb("zimg:generate"))])
         return InlineKeyboardMarkup(rows)
 
     def _ollama_status_text(self, session: Dict[str, Any]) -> str:
@@ -5192,10 +5232,17 @@ class YouTubeTelegramBot:
         if callback_data.startswith("zimg:"):
             chat_id = query.message.chat.id
             prefs = self._zimage_prefs_for_chat(chat_id)
+            try:
+                prefs["_panel_message_id"] = int(query.message.message_id)
+            except Exception:
+                pass
             loras = await self._zimage_load_loras()
             parts = callback_data.split(":")
             if len(parts) >= 2:
                 action = parts[1]
+                if action == "nop":
+                    await query.answer("Working…" if prefs.get("busy") else "OK", show_alert=False)
+                    return
                 if action == "style":
                     # Backward compat: zimg:style:next
                     if len(parts) >= 3 and parts[2] == "next":
@@ -5425,14 +5472,24 @@ class YouTubeTelegramBot:
                         except Exception:
                             await query.answer("Enhance unavailable", show_alert=False)
                 elif action == "generate":
+                    if prefs.get("busy"):
+                        await query.answer("Already generating…", show_alert=False)
+                        return
                     txt = (prefs.get("last_prompt") or "").strip()
                     if not txt:
                         await query.answer("No prompt set yet", show_alert=False)
                         return
+                    prefs["busy"] = True
+                    try:
+                        import time as _time
+                        prefs["busy_started_at"] = float(_time.time())
+                    except Exception:
+                        pass
                     defaults = self._zimage_defaults()
                     base = defaults.get("base") or ""
                     if not base:
                         await query.answer("Set ZIMAGE_BASE_URL first", show_alert=True)
+                        prefs["busy"] = False
                         return
                     prompt_txt, seed = self._zimage_parse_seed(txt)
                     seed = prefs.get("last_seed") if isinstance(prefs.get("last_seed"), int) and prefs.get("last_seed", -1) >= 0 else seed

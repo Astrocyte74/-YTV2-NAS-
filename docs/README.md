@@ -48,6 +48,7 @@ Z‑Image Turbo (Mac)
   - UX: `/zopts` is a single-screen menu (prompt helpers + Style/Quality/Size/Steps/LoRA + Generate). Settings are per-chat and reset on bot/container restart.
 - Queueing: max 2 in-flight generations; up to 5 queued. When Z-Image is offline/unreachable, jobs are persisted to `data/zimage_queue/` and drained by `tools/drain_zimage_queue.py` (enable with `ENABLE_ZIMAGE_QUEUE_WORKER=1`, interval via `ZIMAGE_QUEUE_INTERVAL`).
   - Preflight: `GET /health` is probed first (short timeout via `ZIMAGE_HEALTHCHECK_TIMEOUT`, default 5s; disable via `ENABLE_ZIMAGE_HEALTHCHECK=0`) to avoid long waits when the service is down.
+  - UX: while a `/zopts` generation is running, the menu shows “⏳ Generating…” and disables most buttons to prevent accidental double-submits; it re-enables when the job finishes.
 
 ## Reddit Integration
 - Credentials required: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` (blank for installed app), `REDDIT_REFRESH_TOKEN`, `REDDIT_USER_AGENT`.
