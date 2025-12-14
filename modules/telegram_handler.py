@@ -3901,10 +3901,12 @@ class YouTubeTelegramBot:
         if prefs:
             return prefs
         defaults = self._zimage_defaults()
+        enhance_default_raw = (os.getenv("ZIMAGE_AUTO_ENHANCE_DEFAULT", "0") or "").strip().lower()
+        enhance_default = enhance_default_raw in {"1", "true", "yes", "on"}
         prefs = {
             "view": "basic",
             "style": defaults.get("style") or "Cinematic photo",
-            "enhance": False,
+            "enhance": enhance_default,
             "lora_id": None,
             "lora_scale": 1.0,
             "resolution": f"{defaults.get('width')}x{defaults.get('height')}",
