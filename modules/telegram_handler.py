@@ -2410,72 +2410,9 @@ class YouTubeTelegramBot:
         self._store_draw_session(prompt_message.chat_id, prompt_message.message_id, session)
 
     async def zimage_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user_id = update.effective_user.id
-        if not self._is_user_allowed(user_id):
-            message = update.effective_message
-            if message:
-                await message.reply_text("❌ You are not authorized to use this bot.")
-            return
-
-        message = update.effective_message
-        if not message:
-            return
-        raw_text = message.text or ""
-        parts = raw_text.split(" ", 1)
-        prompt = parts[1].strip() if len(parts) > 1 else ""
-        if not prompt:
-            await message.reply_text(
-                "🖼️ Usage: /zimage <prompt>\nOptional: add #12345 at the end to fix the seed.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-            return
-        if len(prompt) > 400:
-            prompt = prompt[:400]
-        defaults = self._zimage_defaults()
-        base = defaults.get("base") or ""
-        if not base:
-            await message.reply_text("Set ZIMAGE_BASE_URL (e.g., http://10.0.4.x:8000) to use /zimage.")
-            return
-        prompt, seed = self._zimage_parse_seed(prompt)
-        prefs = self._zimage_prefs_for_chat(message.chat_id)
-        prefs["last_prompt"] = prompt
-        prefs["last_seed"] = seed
-        width, height = self._zimage_parse_resolution(
-            prefs.get("resolution"),
-            defaults.get("width") or 512,
-            defaults.get("height") or 512,
-        )
-        job = {
-            "chat_id": message.chat_id,
-            "prompt": prompt,
-            "seed": seed,
-            "base": base,
-            "style": prefs.get("style") or defaults.get("style"),
-            "steps": prefs.get("steps") or defaults.get("steps"),
-            "cfg_scale": defaults.get("cfg_scale"),
-            "width": width,
-            "height": height,
-            "queue_on_fail": True,
-            "enhance": bool(prefs.get("enhance")),
-            "lora_id": prefs.get("lora_id"),
-            "lora_scale": prefs.get("lora_scale") or 1.0,
-        }
-        if self.zimage_inflight >= self.ZIMAGE_MAX_INFLIGHT:
-            if len(self.zimage_queue) >= self.ZIMAGE_MAX_QUEUE:
-                await message.reply_text("Z-Image queue is full; please try again in a moment.")
-                return
-            position = len(self.zimage_queue) + 1
-            self.zimage_queue.append(job)
-            await message.reply_text(
-                f"🕒 Queued image generation (position {position}). I’ll send it here when it’s ready.\n"
-                f"Settings: {self._zimage_settings_summary(job)}"
-            )
-            await self._zimage_start_next()
-            return
-
-        status_msg = await message.reply_text("🖼️ Generating image…")
-        job["status_message"] = status_msg
-        asyncio.create_task(self._zimage_start_job(job))
+        # /zimage (/z, /image) is now an alias for /zopts to keep one consistent
+        # gateway UI for Z-Image generation.
+        await self.zimage_options_command(update, context)
 
     async def zimage_options_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
