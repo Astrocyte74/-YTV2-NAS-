@@ -4451,6 +4451,9 @@ class YouTubeTelegramBot:
             page_size = self._zimage_recipes_page_size()
             data = prefs.get("_recipes_data") if isinstance(prefs.get("_recipes_data"), dict) else {}
             recipes = data.get("recipes") if isinstance(data, dict) else None
+            groups = data.get("groups") if isinstance(data, dict) else None
+            if not isinstance(groups, list):
+                groups = []
             if not isinstance(recipes, list):
                 recipes = []
             total = len(recipes)
@@ -4459,7 +4462,31 @@ class YouTubeTelegramBot:
             title = "Z-Image Recipes"
             if view == "recipes_detail":
                 title = "Z-Image Recipe"
-            parts: List[str] = [title, ruler, f"Mode: {mode}"]
+            group_labels: List[str] = ["All"]
+            try:
+                # Sort groups by (order, label) if provided.
+                sorted_groups = []
+                for g in groups:
+                    if not isinstance(g, dict):
+                        continue
+                    gid = str(g.get("id") or "").strip()
+                    if not gid:
+                        continue
+                    try:
+                        order = int(g.get("order") or 0)
+                    except Exception:
+                        order = 0
+                    label = str(g.get("label") or gid).strip()
+                    sorted_groups.append((order, label, gid))
+                sorted_groups.sort(key=lambda t: (t[0], t[1].lower(), t[2]))
+                group_labels.extend([label for _, label, _ in sorted_groups])
+            except Exception:
+                pass
+            groups_line = ", ".join([g for g in group_labels if g])
+            if len(groups_line) > 220:
+                groups_line = groups_line[:220] + "…"
+
+            parts: List[str] = [title, ruler, f"Mode: {mode}", f"Groups: {groups_line or '—'}"]
             if view == "recipes_search":
                 parts.append("Search: reply with text to search recipes (or send 'cancel').")
             elif view == "recipes_fill":
@@ -4669,20 +4696,19 @@ class YouTubeTelegramBot:
                 return InlineKeyboardMarkup(rows)
 
             # List view (recipes)
-            group_row: List[InlineKeyboardButton] = [
-                InlineKeyboardButton("All", callback_data=_cb("zimg:recipes:group:")),
-            ]
-            for g in groups[:3]:
-                if not isinstance(g, dict):
-                    continue
-                gid = str(g.get("id") or "").strip()
-                glabel = str(g.get("label") or gid).strip()
-                if not gid:
-                    continue
-                group_row.append(InlineKeyboardButton(glabel[:18], callback_data=_cb(f"zimg:recipes:group:{gid}")))
-                if len(group_row) >= 4:
-                    break
-            rows.append(group_row)
+            # Group selector: rotate through the groups returned by the API (dynamic).
+            current_group = str(prefs.get("recipes_group") or "").strip()
+            current_group_label = "All"
+            try:
+                for g in groups:
+                    if not isinstance(g, dict):
+                        continue
+                    if str(g.get("id") or "").strip() == current_group and current_group:
+                        current_group_label = str(g.get("label") or current_group).strip() or current_group_label
+                        break
+            except Exception:
+                pass
+            rows.append([InlineKeyboardButton(f"🔄 Group: {current_group_label}", callback_data=_cb("zimg:recipes:group_next"))])
 
             search_row = [InlineKeyboardButton("🔍 Search", callback_data=_cb("zimg:recipes:search"))]
             if (prefs.get("recipes_q") or "").strip():
@@ -5525,6 +5551,41 @@ class YouTubeTelegramBot:
                     elif sub == "group":
                         gid = parts[3] if len(parts) >= 4 else ""
                         prefs["recipes_group"] = gid
+                        prefs["recipes_page"] = 0
+                        prefs["view"] = "recipes"
+                    elif sub == "group_next":
+                        # Rotate through available groups (including All).
+                        try:
+                            data = await self._zimage_load_recipes(
+                                chat_id=chat_id,
+                                group=None,
+                                q=(prefs.get("recipes_q") or "").strip() or None,
+                            )
+                            groups = data.get("groups") if isinstance(data, dict) else []
+                            items: List[str] = [""]
+                            sortable = []
+                            for g in groups or []:
+                                if not isinstance(g, dict):
+                                    continue
+                                gid = str(g.get("id") or "").strip()
+                                if not gid:
+                                    continue
+                                try:
+                                    order = int(g.get("order") or 0)
+                                except Exception:
+                                    order = 0
+                                label = str(g.get("label") or gid).strip()
+                                sortable.append((order, label, gid))
+                            sortable.sort(key=lambda t: (t[0], t[1].lower(), t[2]))
+                            items.extend([gid for _, _, gid in sortable])
+                            cur = str(prefs.get("recipes_group") or "").strip()
+                            try:
+                                idx = items.index(cur)
+                            except ValueError:
+                                idx = 0
+                            prefs["recipes_group"] = items[(idx + 1) % len(items)] if items else ""
+                        except Exception:
+                            prefs["recipes_group"] = ""
                         prefs["recipes_page"] = 0
                         prefs["view"] = "recipes"
                     elif sub == "pick":
