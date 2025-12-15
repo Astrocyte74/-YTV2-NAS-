@@ -323,6 +323,10 @@ class YouTubeTelegramBot:
         self.zimage_loras: List[Dict[str, Any]] = []
         self.zimage_loras_ts: float = 0.0
         self.zimage_prefs: Dict[int, Dict[str, Any]] = {}
+        # Z-Image recipes cache (short TTL; source-of-truth is on the Mac service)
+        # Keyed by (mode, group, q) -> (ts, data)
+        self.zimage_recipes_cache: Dict[tuple, Any] = {}
+        self.ZIMAGE_RECIPES_CACHE_TTL = 60
         # Auto-process scheduler for idle URLs (keyed by (chat_id, message_id))
         self._auto_tasks: Dict[tuple, asyncio.Task] = {}
 
@@ -1476,6 +1480,67 @@ class YouTubeTelegramBot:
             if session and (session.get("active") or session.get("mode") == "ai-ai"):
                 await self._ollama_handle_user_text(update, session, message_text)
                 return
+            # Z-Image recipes: handle token replacement / recipe search replies
+            try:
+                prefs = self.zimage_prefs.get(chat_id) or {}
+                view = str(prefs.get("view") or "").strip().lower()
+                if view in {"recipes_fill", "recipes_search"}:
+                    txt = (message_text or "").strip()
+                    if txt.lower() == "cancel":
+                        prefs.pop("recipes_focus_token", None)
+                        prefs.pop("recipes_pending_prompt", None)
+                        prefs["view"] = "recipes" if view == "recipes_search" else "recipes_detail"
+                        await update.message.reply_text("✅ Canceled.")
+                        asyncio.create_task(self._zimage_refresh_panel_message(chat_id))
+                        return
+                    if view == "recipes_search":
+                        prefs["recipes_q"] = txt
+                        prefs["recipes_page"] = 0
+                        prefs["view"] = "recipes"
+                        await update.message.reply_text(f"🔍 Searching recipes for: {txt or '—'}")
+                        asyncio.create_task(self._zimage_refresh_panel_message(chat_id))
+                        return
+                    if view == "recipes_fill":
+                        token = (prefs.get("recipes_focus_token") or "").strip()
+                        base_prompt = (prefs.get("recipes_pending_prompt") or "").strip()
+                        if not token or not base_prompt:
+                            prefs["view"] = "recipes_detail"
+                            asyncio.create_task(self._zimage_refresh_panel_message(chat_id))
+                            return
+                        if not txt:
+                            await update.message.reply_text("❌ Please send a non-empty replacement (or 'cancel').")
+                            return
+                        updated_prompt = base_prompt.replace(token, txt)
+                        prefs["last_prompt"] = updated_prompt
+                        prefs["last_seed"] = -1
+                        # Apply recipe LoRA if provided and available on backend
+                        pending_lora = prefs.get("recipes_pending_lora") if isinstance(prefs.get("recipes_pending_lora"), dict) else {}
+                        lora_id = str(pending_lora.get("id") or "").strip()
+                        lora_scale = pending_lora.get("scale", 1.0)
+                        if lora_id:
+                            try:
+                                loras = await self._zimage_load_loras()
+                                if any(isinstance(e, dict) and e.get("id") == lora_id for e in (loras or [])):
+                                    prefs["lora_id"] = lora_id
+                                    try:
+                                        prefs["lora_scale"] = float(lora_scale)
+                                    except Exception:
+                                        prefs["lora_scale"] = 1.0
+                                else:
+                                    await update.message.reply_text(
+                                        f"⚠️ Recipe LoRA '{lora_id}' not available on server; applying prompt without LoRA."
+                                    )
+                            except Exception:
+                                pass
+                        prefs.pop("recipes_focus_token", None)
+                        prefs.pop("recipes_pending_prompt", None)
+                        prefs.pop("recipes_pending_lora", None)
+                        prefs["view"] = "basic"
+                        await update.message.reply_text("✅ Recipe applied to /zopts prompt.")
+                        asyncio.create_task(self._zimage_refresh_panel_message(chat_id))
+                        return
+            except Exception:
+                pass
             # Early dashboard storage gate (optional; only when token + base present)
             try:
                 base = (os.getenv('RENDER_DASHBOARD_URL') or os.getenv('RENDER_API_URL') or '').strip().rstrip('/')
@@ -3881,6 +3946,114 @@ class YouTubeTelegramBot:
             logging.debug("zimage loras fetch failed: %s", exc)
         return []
 
+    def _zimage_recipes_mode(self, chat_id: Optional[int] = None) -> str:
+        # Default to "default" to avoid exposing secure recipes.
+        mode = (os.getenv("ZIMAGE_RECIPES_MODE") or "default").strip().lower()
+        if mode not in {"default", "stealth"}:
+            mode = "default"
+        # Optional: allow a comma-separated allowlist of chat IDs to use stealth
+        # (keeps secure recipes hidden for everyone else).
+        if mode == "stealth" and chat_id is not None:
+            allow = (os.getenv("ZIMAGE_RECIPES_STEALTH_CHAT_IDS") or "").strip()
+            if allow:
+                allowed_ids = set()
+                for part in allow.split(","):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    try:
+                        allowed_ids.add(int(part))
+                    except Exception:
+                        continue
+                if chat_id not in allowed_ids:
+                    mode = "default"
+        return mode
+
+    async def _zimage_load_recipes(
+        self,
+        *,
+        chat_id: Optional[int] = None,
+        group: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        import time as _time
+        base = (os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
+        if not base:
+            return {"version": 0, "groups": [], "recipes": []}
+        mode = self._zimage_recipes_mode(chat_id)
+        group_key = (group or "").strip()
+        q_key = (q or "").strip()
+        cache_key = (mode, group_key, q_key)
+        try:
+            cached = self.zimage_recipes_cache.get(cache_key)
+            if cached:
+                ts, data = cached
+                if (_time.time() - float(ts or 0.0)) <= float(self.ZIMAGE_RECIPES_CACHE_TTL or 60):
+                    if isinstance(data, dict):
+                        return data
+        except Exception:
+            pass
+
+        url = f"{base}/api/recipes"
+        params: Dict[str, Any] = {"mode": mode}
+        if group_key:
+            params["group"] = group_key
+        if q_key:
+            params["q"] = q_key
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, params=params, timeout=10.0)
+                if resp.status_code != 200:
+                    return {"version": 0, "groups": [], "recipes": []}
+                data = resp.json()
+                if not isinstance(data, dict):
+                    return {"version": 0, "groups": [], "recipes": []}
+                self.zimage_recipes_cache[cache_key] = (_time.time(), data)
+                return data
+        except Exception as exc:
+            logging.debug("zimage recipes fetch failed: %s", exc)
+            return {"version": 0, "groups": [], "recipes": []}
+
+    async def _zimage_recipes_enhance(
+        self,
+        prompt: str,
+        *,
+        chat_id: Optional[int] = None,
+        focus_token: Optional[str] = None,
+        lora_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        base = (os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
+        if not base:
+            return None
+        url = f"{base}/api/recipes/enhance"
+        body: Dict[str, Any] = {"prompt": (prompt or "").strip()}
+        if focus_token:
+            body["focus_token"] = focus_token
+        else:
+            body["focus_token"] = None
+        if lora_id:
+            body["lora_id"] = lora_id
+        else:
+            body["lora_id"] = None
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(url, json=body, timeout=60.0)
+                if resp.status_code != 200:
+                    return {"error": True, "status": resp.status_code, "detail": (resp.text or "")[:300]}
+                data = resp.json()
+                if isinstance(data, dict):
+                    return data
+        except Exception as exc:
+            logging.debug("zimage recipes enhance failed: %s", exc)
+        return None
+
+    def _zimage_recipes_page_size(self) -> int:
+        try:
+            n = int(os.getenv("ZIMAGE_RECIPES_PAGE_SIZE", "10"))
+        except Exception:
+            n = 10
+        return max(5, min(12, n))
+
     def _zimage_pending_queue_counts(self, chat_id: int) -> Tuple[int, int, int]:
         """Return (total, disk_pending, mem_pending) for this chat's Z-Image jobs."""
         disk = 0
@@ -4330,6 +4503,56 @@ class YouTubeTelegramBot:
         return ai2ai_persona_list_rows(slot, session or {}, page_size, categories, self._persona_parse)
 
     def _zimage_panel_text(self, prefs: Dict[str, Any], loras: List[Dict[str, Any]]) -> str:
+        view = (prefs.get("view") or "basic").strip().lower()
+        if view.startswith("recipes"):
+            # Keep bubble width stable with an unbroken line.
+            ruler = "────────────────────────────────"
+            mode = (prefs.get("recipes_mode") or "default").strip().lower()
+            group_label = (prefs.get("recipes_group_label") or "All").strip()
+            q = (prefs.get("recipes_q") or "").strip()
+            page = int(prefs.get("recipes_page") or 0)
+            page_size = self._zimage_recipes_page_size()
+            data = prefs.get("_recipes_data") if isinstance(prefs.get("_recipes_data"), dict) else {}
+            recipes = data.get("recipes") if isinstance(data, dict) else None
+            if not isinstance(recipes, list):
+                recipes = []
+            total = len(recipes)
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = max(0, min(page, total_pages - 1))
+            title = "Z-Image Recipes"
+            if view == "recipes_detail":
+                title = "Z-Image Recipe"
+            parts: List[str] = [title, ruler, f"Mode: {mode}"]
+            if view == "recipes_search":
+                parts.append("Search: reply with text to search recipes (or send 'cancel').")
+            elif view == "recipes_fill":
+                token = (prefs.get("recipes_focus_token") or "").strip()
+                parts.append(f"Token: {token or '—'}")
+                parts.append("Replace token: reply with replacement text (or send 'cancel').")
+            else:
+                parts.append(f"Group: {group_label}")
+                if q:
+                    parts.append(f"Search: {q}")
+                parts.append(f"Results: {total} • Page {page + 1}/{total_pages}")
+            if view == "recipes_detail":
+                sel = prefs.get("recipes_selected") if isinstance(prefs.get("recipes_selected"), dict) else {}
+                r_title = (sel.get("title") or "").strip() or "—"
+                r_sub = (sel.get("subtitle") or "").strip()
+                focus = sel.get("focus_token")
+                prompt = (sel.get("prompt") or "").strip()
+                if len(prompt) > 500:
+                    prompt = prompt[:500] + "…"
+                parts.extend([ruler, r_title])
+                if r_sub:
+                    parts.append(r_sub)
+                if focus:
+                    parts.append(f"Focus token: {focus}")
+                lora = sel.get("lora") if isinstance(sel.get("lora"), dict) else None
+                if lora and lora.get("id"):
+                    parts.append(f"LoRA: {lora.get('id')} @ {lora.get('scale', 1.0)}")
+                parts.extend([ruler, f"Prompt: {prompt or '—'}"])
+            return "\n".join([p for p in parts if p])
+
         def _quality_label() -> str:
             res_val = (prefs.get("resolution") or "512x512").lower()
             steps_val = int(prefs.get("steps") or 7)
@@ -4344,7 +4567,6 @@ class YouTubeTelegramBot:
                     return name
             return "Custom"
 
-        view = (prefs.get("view") or "basic").strip().lower()
         style = prefs.get("style") or "Cinematic photo"
         enhance = "On" if prefs.get("enhance") else "Off"
         prompt_cat = (prefs.get("prompt_category") or "photo").strip().lower()
@@ -4450,7 +4672,11 @@ class YouTubeTelegramBot:
             return "Custom"
 
         # Advanced view has been intentionally removed; keep this as a single-screen UI.
-        prefs["view"] = "basic"
+        # (But allow special sub-views like recipes.)
+        view = (prefs.get("view") or "basic").strip().lower()
+        if view not in {"basic", "recipes", "recipes_detail", "recipes_search", "recipes_fill"}:
+            view = "basic"
+        prefs["view"] = view
         prompt_cat = (prefs.get("prompt_category") or "photo").strip().lower()
         styles = [
             ("None", "None"),
@@ -4464,6 +4690,95 @@ class YouTubeTelegramBot:
         def _cb(data: str) -> str:
             return "zimg:nop" if busy else data
         rows: List[List[InlineKeyboardButton]] = []
+
+        if view.startswith("recipes"):
+            data = prefs.get("_recipes_data") if isinstance(prefs.get("_recipes_data"), dict) else {}
+            groups = data.get("groups") if isinstance(data, dict) else None
+            recipes = data.get("recipes") if isinstance(data, dict) else None
+            if not isinstance(groups, list):
+                groups = []
+            if not isinstance(recipes, list):
+                recipes = []
+            page_size = self._zimage_recipes_page_size()
+            total = len(recipes)
+            total_pages = max(1, (total + page_size - 1) // page_size)
+            page = int(prefs.get("recipes_page") or 0)
+            page = max(0, min(page, total_pages - 1))
+
+            if view == "recipes_search":
+                rows.append([
+                    InlineKeyboardButton("⬅️ Back", callback_data=_cb("zimg:recipes:back")),
+                    InlineKeyboardButton("Close", callback_data="zimg:close"),
+                ])
+                return InlineKeyboardMarkup(rows)
+            if view == "recipes_fill":
+                rows.append([
+                    InlineKeyboardButton("❌ Cancel", callback_data=_cb("zimg:recipes:cancel_fill")),
+                    InlineKeyboardButton("Close", callback_data="zimg:close"),
+                ])
+                return InlineKeyboardMarkup(rows)
+            if view == "recipes_detail":
+                sel = prefs.get("recipes_selected") if isinstance(prefs.get("recipes_selected"), dict) else {}
+                focus = sel.get("focus_token")
+                prompt = (sel.get("prompt") or "").strip()
+                if focus and (focus in prompt):
+                    rows.append([InlineKeyboardButton(f"✍️ Fill {focus}", callback_data=_cb("zimg:recipes:fill"))])
+                rows.append([InlineKeyboardButton("✅ Use as /zopts prompt", callback_data=_cb("zimg:recipes:use"))])
+                rows.append([InlineKeyboardButton("✨ Enhance (AI)", callback_data=_cb("zimg:recipes:enhance"))])
+                rows.append([
+                    InlineKeyboardButton("⬅️ Back", callback_data=_cb("zimg:recipes:back")),
+                    InlineKeyboardButton("Close", callback_data="zimg:close"),
+                ])
+                return InlineKeyboardMarkup(rows)
+
+            # List view (recipes)
+            group_row: List[InlineKeyboardButton] = [
+                InlineKeyboardButton("All", callback_data=_cb("zimg:recipes:group:")),
+            ]
+            for g in groups[:3]:
+                if not isinstance(g, dict):
+                    continue
+                gid = str(g.get("id") or "").strip()
+                glabel = str(g.get("label") or gid).strip()
+                if not gid:
+                    continue
+                group_row.append(InlineKeyboardButton(glabel[:18], callback_data=_cb(f"zimg:recipes:group:{gid}")))
+                if len(group_row) >= 4:
+                    break
+            rows.append(group_row)
+
+            search_row = [InlineKeyboardButton("🔍 Search", callback_data=_cb("zimg:recipes:search"))]
+            if (prefs.get("recipes_q") or "").strip():
+                search_row.append(InlineKeyboardButton("❌ Clear search", callback_data=_cb("zimg:recipes:clear_search")))
+            rows.append(search_row)
+
+            start = page * page_size
+            end = start + page_size
+            for r in recipes[start:end]:
+                if not isinstance(r, dict):
+                    continue
+                rid = str(r.get("id") or "").strip()
+                if not rid:
+                    continue
+                title = str(r.get("title") or rid).strip()
+                subtitle = str(r.get("subtitle") or "").strip()
+                label = title
+                if subtitle:
+                    label = f"{title} — {subtitle}"
+                rows.append([InlineKeyboardButton(label[:64], callback_data=_cb(f"zimg:recipes:pick:{rid}"))])
+
+            prev_page = max(0, page - 1)
+            next_page = min(total_pages - 1, page + 1)
+            rows.append([
+                InlineKeyboardButton("◀︎ Prev", callback_data=_cb(f"zimg:recipes:page:{prev_page}")),
+                InlineKeyboardButton(f"Page {page + 1}/{total_pages}", callback_data="zimg:nop"),
+                InlineKeyboardButton("Next ▶︎", callback_data=_cb(f"zimg:recipes:page:{next_page}")),
+            ])
+            rows.append([
+                InlineKeyboardButton("⬅️ Back to /zopts", callback_data=_cb("zimg:recipes:back")),
+                InlineKeyboardButton("Close", callback_data="zimg:close"),
+            ])
+            return InlineKeyboardMarkup(rows)
 
         rows.append([
             InlineKeyboardButton("✨ Enhance Prompt", callback_data=_cb("zimg:prompt:enhance")),
@@ -4507,6 +4822,9 @@ class YouTubeTelegramBot:
             InlineKeyboardButton(f"🔄 Prompt Type: {prompt_cat_label}", callback_data=_cb("zimg:promptcat:next")),
             InlineKeyboardButton("🎲 Generate Prompt", callback_data=_cb("zimg:prompt:gen")),
         ])
+
+        # Recipes (separate screen; keeps the main panel from growing too much)
+        rows.append([InlineKeyboardButton("📚 Recipes", callback_data=_cb("zimg:recipes:open"))])
 
         # LoRA: single rotating button (includes None)
         lora_label = "None"
@@ -5245,6 +5563,158 @@ class YouTubeTelegramBot:
                 if action == "nop":
                     await query.answer("Working…" if prefs.get("busy") else "OK", show_alert=False)
                     return
+                if action == "recipes":
+                    sub = parts[2] if len(parts) >= 3 else ""
+                    # Enter recipes view
+                    if sub == "open":
+                        prefs["view"] = "recipes"
+                        prefs["recipes_page"] = 0
+                        prefs["recipes_group"] = prefs.get("recipes_group") or ""
+                        prefs["recipes_q"] = (prefs.get("recipes_q") or "").strip()
+                    elif sub == "back":
+                        prefs["view"] = "basic"
+                    elif sub == "search":
+                        prefs["view"] = "recipes_search"
+                    elif sub == "clear_search":
+                        prefs["recipes_q"] = ""
+                        prefs["recipes_page"] = 0
+                        prefs["view"] = "recipes"
+                    elif sub == "page":
+                        try:
+                            prefs["recipes_page"] = int(parts[3]) if len(parts) >= 4 else 0
+                        except Exception:
+                            prefs["recipes_page"] = 0
+                        prefs["view"] = "recipes"
+                    elif sub == "group":
+                        gid = parts[3] if len(parts) >= 4 else ""
+                        prefs["recipes_group"] = gid
+                        prefs["recipes_page"] = 0
+                        prefs["view"] = "recipes"
+                    elif sub == "pick":
+                        rid = parts[3] if len(parts) >= 4 else ""
+                        # Ensure list is loaded then select
+                        prefs["recipes_selected_id"] = rid
+                        prefs["view"] = "recipes_detail"
+                    elif sub == "fill":
+                        sel = prefs.get("recipes_selected") if isinstance(prefs.get("recipes_selected"), dict) else {}
+                        focus = (sel.get("focus_token") or "").strip()
+                        prompt = (sel.get("prompt") or "").strip()
+                        if not focus or focus not in prompt:
+                            await query.answer("No focus token for this recipe.", show_alert=False)
+                        else:
+                            prefs["recipes_focus_token"] = focus
+                            prefs["recipes_pending_prompt"] = prompt
+                            lora = sel.get("lora") if isinstance(sel.get("lora"), dict) else None
+                            if lora and lora.get("id"):
+                                prefs["recipes_pending_lora"] = {"id": lora.get("id"), "scale": lora.get("scale", 1.0)}
+                            prefs["view"] = "recipes_fill"
+                            try:
+                                await query.message.reply_text(f"✍️ Send replacement text for {focus} (or type 'cancel').")
+                            except Exception:
+                                pass
+                    elif sub == "cancel_fill":
+                        prefs.pop("recipes_focus_token", None)
+                        prefs.pop("recipes_pending_prompt", None)
+                        prefs.pop("recipes_pending_lora", None)
+                        prefs["view"] = "recipes_detail"
+                    elif sub == "use":
+                        sel = prefs.get("recipes_selected") if isinstance(prefs.get("recipes_selected"), dict) else {}
+                        prompt = (sel.get("prompt") or "").strip()
+                        focus = (sel.get("focus_token") or "").strip()
+                        if focus and focus in prompt:
+                            await query.answer(f"Fill {focus} first.", show_alert=True)
+                        else:
+                            if prompt:
+                                prefs["last_prompt"] = prompt
+                                prefs["last_seed"] = -1
+                            # Apply recipe LoRA if present and available
+                            lora_meta = sel.get("lora") if isinstance(sel.get("lora"), dict) else None
+                            if lora_meta and lora_meta.get("id"):
+                                rid = str(lora_meta.get("id") or "").strip()
+                                try:
+                                    scale = float(lora_meta.get("scale", 1.0))
+                                except Exception:
+                                    scale = 1.0
+                                if rid and any(isinstance(e, dict) and e.get("id") == rid for e in (loras or [])):
+                                    prefs["lora_id"] = rid
+                                    prefs["lora_scale"] = scale
+                                else:
+                                    try:
+                                        await query.message.reply_text(
+                                            f"⚠️ Recipe LoRA '{rid}' not available on server; applying prompt without LoRA."
+                                        )
+                                    except Exception:
+                                        pass
+                            prefs["view"] = "basic"
+                            try:
+                                await query.message.reply_text("✅ Recipe applied to /zopts prompt.")
+                            except Exception:
+                                pass
+                    elif sub == "enhance":
+                        sel = prefs.get("recipes_selected") if isinstance(prefs.get("recipes_selected"), dict) else {}
+                        prompt = (sel.get("prompt") or "").strip()
+                        focus = (sel.get("focus_token") or "").strip() or None
+                        # Only enforce focus token if it still exists in the prompt.
+                        if focus and focus not in prompt:
+                            focus = None
+                        lora_meta = sel.get("lora") if isinstance(sel.get("lora"), dict) else None
+                        lora_id = str(lora_meta.get("id") or "").strip() if lora_meta else None
+                        if not prompt:
+                            await query.answer("No recipe prompt.", show_alert=False)
+                        else:
+                            result = await self._zimage_recipes_enhance(
+                                prompt,
+                                chat_id=chat_id,
+                                focus_token=focus,
+                                lora_id=lora_id or None,
+                            )
+                            if isinstance(result, dict) and result.get("prompt"):
+                                new_prompt = str(result.get("prompt") or "").strip()
+                                sel = dict(sel)
+                                sel["prompt"] = new_prompt
+                                prefs["recipes_selected"] = sel
+                                try:
+                                    await query.message.reply_text(
+                                        "✨ Enhanced prompt:\n" + (new_prompt[:3000] + ("…" if len(new_prompt) > 3000 else ""))
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                detail = ""
+                                if isinstance(result, dict):
+                                    detail = str(result.get("detail") or "").strip()
+                                await query.answer("Enhance failed" + (f": {detail[:80]}" if detail else ""), show_alert=True)
+
+                    # Refresh recipes data for list/detail views
+                    view = (prefs.get("view") or "").strip().lower()
+                    if view in {"recipes", "recipes_detail"}:
+                        group = (prefs.get("recipes_group") or "").strip() or None
+                        q = (prefs.get("recipes_q") or "").strip() or None
+                        data = await self._zimage_load_recipes(chat_id=chat_id, group=group, q=q)
+                        prefs["_recipes_data"] = data
+                        # derive group label for header
+                        try:
+                            groups = data.get("groups") if isinstance(data, dict) else []
+                            label = "All"
+                            if group:
+                                for g in groups or []:
+                                    if isinstance(g, dict) and str(g.get("id") or "") == group:
+                                        label = str(g.get("label") or group)
+                                        break
+                            prefs["recipes_group_label"] = label
+                        except Exception:
+                            prefs["recipes_group_label"] = "All"
+                        prefs["recipes_mode"] = self._zimage_recipes_mode(chat_id)
+                        if view == "recipes_detail":
+                            rid = str(prefs.get("recipes_selected_id") or "").strip()
+                            selected = None
+                            for r in (data.get("recipes") or []) if isinstance(data, dict) else []:
+                                if isinstance(r, dict) and str(r.get("id") or "").strip() == rid:
+                                    selected = r
+                                    break
+                            if isinstance(selected, dict):
+                                prefs["recipes_selected"] = selected
+                    # fall through to render panel below
                 if action == "style":
                     # Backward compat: zimg:style:next
                     if len(parts) >= 3 and parts[2] == "next":
