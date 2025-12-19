@@ -563,12 +563,21 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     method = str(notes.get("final_method") or "").strip().lower()
                 else:
                     method = ""
+                show_cost = str(os.getenv("WEB_URL_CONTEXT_SHOW_COST", "0") or "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
                 show_all = str(os.getenv("WEB_EXTRACT_SHOW_METHOD", "0") or "").strip().lower() in (
                     "1",
                     "true",
                     "yes",
                     "on",
                 )
+                if show_cost:
+                    show_all = True
+
                 if method and (show_all or method in ("url_context", "playwright")):
                     labels = {
                         "url_context": "Gemini URL context",
@@ -579,30 +588,31 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     }
                     label = labels.get(method, method)
                     extra_bits = []
-                    if method == "url_context" and isinstance(notes, dict):
-                        model = str(notes.get("url_context_model") or "").strip()
-                        if model:
-                            extra_bits.append(model)
+                    if isinstance(notes, dict) and show_cost:
+                        urlctx_model = str(notes.get("url_context_model") or "").strip()
+                        urlctx_cost = str(notes.get("url_context_est_cost_usd") or "").strip()
+                        urlctx_calls_per_usd = str(notes.get("url_context_est_calls_per_usd") or "").strip()
 
-                        show_cost = str(os.getenv("WEB_URL_CONTEXT_SHOW_COST", "0") or "").strip().lower() in (
-                            "1",
-                            "true",
-                            "yes",
-                            "on",
-                        )
-                        if show_cost:
-                            cost = str(notes.get("url_context_est_cost_usd") or "").strip()
-                            calls_per_usd = str(notes.get("url_context_est_calls_per_usd") or "").strip()
-                            if cost:
-                                try:
-                                    cost_f = float(cost)
-                                    cost_fmt = f"${cost_f:.6f}".rstrip("0").rstrip(".")
-                                except Exception:
-                                    cost_fmt = f"${cost}"
-                                if calls_per_usd.isdigit():
-                                    extra_bits.append(f"Est: {cost_fmt} (~{calls_per_usd}/$1)")
-                                else:
-                                    extra_bits.append(f"Est: {cost_fmt}")
+                        urlctx_bits = []
+                        if urlctx_model:
+                            urlctx_bits.append(urlctx_model)
+                        if urlctx_cost:
+                            try:
+                                cost_f = float(urlctx_cost)
+                                cost_fmt = f"${cost_f:.6f}".rstrip("0").rstrip(".")
+                            except Exception:
+                                cost_fmt = f"${urlctx_cost}"
+                            if urlctx_calls_per_usd.isdigit():
+                                urlctx_bits.append(f"{cost_fmt} (~{urlctx_calls_per_usd}/$1)")
+                            else:
+                                urlctx_bits.append(cost_fmt)
+
+                        if urlctx_bits:
+                            prefix = "URLCtx" if method != "url_context" else ""
+                            if prefix:
+                                extra_bits.append(f"{prefix}: {' • '.join(urlctx_bits)}")
+                            else:
+                                extra_bits.extend(urlctx_bits)
 
                     suffix = f" ({' • '.join(extra_bits)})" if extra_bits else ""
                     extraction_line = f"🔎 Extraction: {label}{suffix}"
