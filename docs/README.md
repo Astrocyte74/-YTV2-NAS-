@@ -5,7 +5,9 @@
 - Optional web extraction fallback: Gemini URL Context tool (off by default). Enable with:
   - `WEB_URL_CONTEXT_MODE=auto` (only when local extraction quality is poor) or `WEB_URL_CONTEXT_MODE=always` (also supports CSV like `auto,off` and uses the first entry)
   - `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY=...`)
-  - Optional: `WEB_URL_CONTEXT_MODEL=gemini-2.5-flash`, `WEB_URL_CONTEXT_TIMEOUT=20`, `WEB_URL_CONTEXT_MAX_CHARS=40000`
+  - Optional: `WEB_URL_CONTEXT_MODEL=gemini-2.5-flash` (also supports CSV; first entry wins), `WEB_URL_CONTEXT_TIMEOUT=20`, `WEB_URL_CONTEXT_MAX_CHARS=40000`
+  - Optional: `WEB_URL_CONTEXT_SHOW_COST=1` to append an estimated per-call URL-context cost (and an “~N/$1” estimate) in the Telegram summary header when URL-context is the chosen method.
+  - Reports also record `source_metadata.web.extractor_notes.url_context_*` token counts, elapsed time, and an estimated cost (best-effort, depends on model pricing).
 - Optional header diagnostics: set `WEB_EXTRACT_SHOW_METHOD=1` to show the chosen extraction method (e.g., Readability vs Gemini URL context) in the Telegram summary header for web URLs.
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).

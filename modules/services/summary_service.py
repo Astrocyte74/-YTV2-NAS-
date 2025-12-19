@@ -577,7 +577,35 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                         "trafilatura": "Trafilatura",
                         "static": "Static HTML",
                     }
-                    extraction_line = f"🔎 Extraction: {labels.get(method, method)}"
+                    label = labels.get(method, method)
+                    extra_bits = []
+                    if method == "url_context" and isinstance(notes, dict):
+                        model = str(notes.get("url_context_model") or "").strip()
+                        if model:
+                            extra_bits.append(model)
+
+                        show_cost = str(os.getenv("WEB_URL_CONTEXT_SHOW_COST", "0") or "").strip().lower() in (
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        )
+                        if show_cost:
+                            cost = str(notes.get("url_context_est_cost_usd") or "").strip()
+                            calls_per_usd = str(notes.get("url_context_est_calls_per_usd") or "").strip()
+                            if cost:
+                                try:
+                                    cost_f = float(cost)
+                                    cost_fmt = f"${cost_f:.6f}".rstrip("0").rstrip(".")
+                                except Exception:
+                                    cost_fmt = f"${cost}"
+                                if calls_per_usd.isdigit():
+                                    extra_bits.append(f"Est: {cost_fmt} (~{calls_per_usd}/$1)")
+                                else:
+                                    extra_bits.append(f"Est: {cost_fmt}")
+
+                    suffix = f" ({' • '.join(extra_bits)})" if extra_bits else ""
+                    extraction_line = f"🔎 Extraction: {label}{suffix}"
         except Exception:
             extraction_line = None
 

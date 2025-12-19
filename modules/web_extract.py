@@ -158,7 +158,45 @@ class WebPageExtractor:
         return key or None
 
     def _url_context_model(self) -> str:
-        return (os.getenv("WEB_URL_CONTEXT_MODEL") or "gemini-2.5-flash").strip()
+        raw = (os.getenv("WEB_URL_CONTEXT_MODEL") or "gemini-2.5-flash").strip()
+        candidates = [part.strip() for part in raw.split(",") if part.strip()]
+        return candidates[0] if candidates else "gemini-2.5-flash"
+
+    @staticmethod
+    def _gemini_model_pricing_usd_per_1m_tokens(model: str) -> Optional[Tuple[float, float]]:
+        """Return (input_usd_per_1m, output_usd_per_1m) for Gemini Developer API models.
+
+        This is best-effort, based on https://ai.google.dev/gemini-api/docs/pricing.
+        """
+
+        normalized = (model or "").strip().lower()
+        if normalized.startswith("gemini-2.5-flash-lite"):
+            return 0.10, 0.40
+        if normalized.startswith("gemini-2.5-flash"):
+            return 0.30, 2.50
+        if normalized.startswith("gemini-3-flash-preview"):
+            return 0.50, 3.00
+        return None
+
+    @staticmethod
+    def _safe_int(value: object) -> Optional[int]:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value)
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                return int(float(s))
+            return None
+        except Exception:
+            return None
 
     def _url_context_timeout(self) -> float:
         try:
@@ -183,6 +221,7 @@ class WebPageExtractor:
             return None
 
         model = self._url_context_model()
+        notes["url_context_model"] = model
         timeout = self._url_context_timeout()
         max_chars = self._url_context_max_chars()
 
@@ -226,6 +265,71 @@ class WebPageExtractor:
         except Exception as exc:
             notes["url_context"] = f"bad_json ({type(exc).__name__})"
             return None
+
+        # Usage metadata (if present). We store numbers as strings to keep
+        # extractor_notes JSON-friendly and consistent with other note values.
+        usage = data.get("usageMetadata") or data.get("usage_metadata") or {}
+        if isinstance(usage, dict):
+            prompt_tokens = self._safe_int(
+                usage.get("promptTokenCount") if "promptTokenCount" in usage else usage.get("prompt_token_count")
+            )
+            tool_tokens = self._safe_int(
+                usage.get("toolUsePromptTokenCount")
+                if "toolUsePromptTokenCount" in usage
+                else usage.get("tool_use_prompt_token_count")
+            )
+            candidates_tokens = self._safe_int(
+                usage.get("candidatesTokenCount")
+                if "candidatesTokenCount" in usage
+                else usage.get("candidates_token_count")
+            )
+            thoughts_tokens = self._safe_int(
+                usage.get("thoughtsTokenCount") if "thoughtsTokenCount" in usage else usage.get("thoughts_token_count")
+            )
+            total_tokens = self._safe_int(
+                usage.get("totalTokenCount") if "totalTokenCount" in usage else usage.get("total_token_count")
+            )
+
+            if prompt_tokens is not None:
+                notes["url_context_prompt_tokens"] = str(prompt_tokens)
+            if tool_tokens is not None:
+                notes["url_context_tool_tokens"] = str(tool_tokens)
+            if candidates_tokens is not None:
+                notes["url_context_output_tokens"] = str(candidates_tokens)
+            if thoughts_tokens is not None:
+                notes["url_context_thoughts_tokens"] = str(thoughts_tokens)
+            if total_tokens is not None:
+                notes["url_context_total_tokens"] = str(total_tokens)
+
+            billed_input_tokens = None
+            if prompt_tokens is not None and tool_tokens is not None:
+                billed_input_tokens = prompt_tokens + tool_tokens
+            elif prompt_tokens is not None:
+                billed_input_tokens = prompt_tokens
+
+            billed_output_tokens = None
+            if candidates_tokens is not None and thoughts_tokens is not None:
+                billed_output_tokens = candidates_tokens + thoughts_tokens
+            elif candidates_tokens is not None:
+                billed_output_tokens = candidates_tokens
+            elif thoughts_tokens is not None:
+                billed_output_tokens = thoughts_tokens
+
+            if billed_input_tokens is not None:
+                notes["url_context_billed_input_tokens"] = str(billed_input_tokens)
+            if billed_output_tokens is not None:
+                notes["url_context_billed_output_tokens"] = str(billed_output_tokens)
+
+            pricing = self._gemini_model_pricing_usd_per_1m_tokens(model)
+            if pricing and billed_input_tokens is not None and billed_output_tokens is not None:
+                in_usd_per_1m, out_usd_per_1m = pricing
+                notes["url_context_pricing_input_usd_per_1m"] = str(in_usd_per_1m)
+                notes["url_context_pricing_output_usd_per_1m"] = str(out_usd_per_1m)
+                est_cost = (billed_input_tokens * in_usd_per_1m + billed_output_tokens * out_usd_per_1m) / 1_000_000.0
+                notes["url_context_est_cost_usd"] = f"{est_cost:.8f}".rstrip("0").rstrip(".")
+                if est_cost > 0:
+                    est_calls_per_usd = int(round(1.0 / est_cost))
+                    notes["url_context_est_calls_per_usd"] = str(est_calls_per_usd)
 
         raw_text = ""
         try:
