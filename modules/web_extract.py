@@ -137,12 +137,16 @@ class WebPageExtractor:
         return session
 
     def _url_context_mode(self) -> str:
-        mode = (os.getenv("WEB_URL_CONTEXT_MODE") or "off").strip().lower()
-        if mode in {"0", "false", "no", "disabled"}:
-            mode = "off"
-        if mode not in {"off", "auto", "always"}:
-            mode = "off"
-        return mode
+        raw = (os.getenv("WEB_URL_CONTEXT_MODE") or "off").strip()
+        candidates = [part.strip().lower() for part in raw.split(",") if part.strip()]
+        if not candidates:
+            candidates = ["off"]
+        for cand in candidates:
+            if cand in {"0", "false", "no", "disabled", "off"}:
+                return "off"
+            if cand in {"auto", "always"}:
+                return cand
+        return "off"
 
     def _gemini_api_key(self) -> Optional[str]:
         # Prefer GEMINI_API_KEY (as documented by ai.google.dev examples), but

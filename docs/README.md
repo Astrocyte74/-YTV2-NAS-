@@ -3,7 +3,7 @@
 ## Telegram Bot Content Flow
 - Unified pipeline supports YouTube videos, Reddit threads, and generic web articles (layered extractor with Readability/Trafilatura fallbacks).
 - Optional web extraction fallback: Gemini URL Context tool (off by default). Enable with:
-  - `WEB_URL_CONTEXT_MODE=auto` (only when local extraction quality is poor) or `WEB_URL_CONTEXT_MODE=always`
+  - `WEB_URL_CONTEXT_MODE=auto` (only when local extraction quality is poor) or `WEB_URL_CONTEXT_MODE=always` (also supports CSV like `auto,off` and uses the first entry)
   - `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY=...`)
   - Optional: `WEB_URL_CONTEXT_MODEL=gemini-2.5-flash`, `WEB_URL_CONTEXT_TIMEOUT=20`, `WEB_URL_CONTEXT_MAX_CHARS=40000`
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
