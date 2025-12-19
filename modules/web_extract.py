@@ -237,6 +237,29 @@ class WebPageExtractor:
         # PDFs frequently take longer than HTML pages to process via URL-context.
         return max(base, 60.0)
 
+    @staticmethod
+    def _rewrite_pmc_pdf_url_to_html(url: str) -> str:
+        """Rewrite PMC PDF URLs to their HTML article page.
+
+        Example:
+          https://pmc.ncbi.nlm.nih.gov/articles/PMC9331845/pdf/jpm-12-01194.pdf
+          -> https://pmc.ncbi.nlm.nih.gov/articles/PMC9331845/
+        """
+
+        try:
+            parsed = urlparse(url)
+            host = (parsed.netloc or "").lower()
+            if host != "pmc.ncbi.nlm.nih.gov":
+                return url
+            path = parsed.path or ""
+            match = re.match(r"^/articles/(PMC\d+)/pdf/[^/]+\.pdf$", path, flags=re.IGNORECASE)
+            if not match:
+                return url
+            pmc_id = match.group(1)
+            return f"{parsed.scheme}://{parsed.netloc}/articles/{pmc_id}/"
+        except Exception:
+            return url
+
     def _url_context_max_chars(self) -> int:
         try:
             return int(os.getenv("WEB_URL_CONTEXT_MAX_CHARS", "40000"))
@@ -430,12 +453,22 @@ class WebPageExtractor:
             "fetch_elapsed_ms": "0",
         }
 
+        requested_url = url
+        work_url = self._rewrite_pmc_pdf_url_to_html(url)
+        if work_url != url:
+            notes["pmc_rewrite"] = f"{url} -> {work_url}"
+            logger.info("PMC PDF URL rewritten to HTML: %s -> %s", url, work_url)
+
         # If it looks like a PDF, prefer URL-context first (avoids downloading large
         # binaries and avoids some anti-bot HTML interstitials).
-        if self._looks_like_pdf_url(url) and url_context_mode != "off":
-            logger.info("PDF URL detected; attempting Gemini URL context first for %s (mode=%s)", url, url_context_mode)
+        if self._looks_like_pdf_url(work_url) and url_context_mode != "off":
+            logger.info(
+                "PDF URL detected; attempting Gemini URL context first for %s (mode=%s)",
+                work_url,
+                url_context_mode,
+            )
             url_context_start = time.time()
-            result = self._extract_via_gemini_url_context(url, notes)
+            result = self._extract_via_gemini_url_context(work_url, notes)
             notes["url_context_elapsed_ms"] = str(int((time.time() - url_context_start) * 1000))
             if result:
                 cand_text, cand_meta = result
@@ -452,9 +485,9 @@ class WebPageExtractor:
                     notes["final_text_chars"] = str(len(cleaned))
                     notes["final_quality"] = cand_quality
                     return WebPageContent(
-                        source_url=url,
-                        canonical_url=final_meta.get("canonical_url") or url,
-                        title=final_meta.get("title") or url,
+                        source_url=requested_url,
+                        canonical_url=final_meta.get("canonical_url") or work_url,
+                        title=final_meta.get("title") or work_url,
                         text=cleaned,
                         language=final_meta.get("language"),
                         site_name=final_meta.get("site_name"),
@@ -476,7 +509,7 @@ class WebPageExtractor:
                     return wiki_content
 
         try:
-            response, final_url = self._fetch(url)
+            response, final_url = self._fetch(work_url)
         except Exception as exc:
             notes["fetch_elapsed_ms"] = f"{int((time.time() - fetch_start) * 1000)}"
             notes["fetch_error"] = type(exc).__name__
@@ -497,11 +530,11 @@ class WebPageExtractor:
             if url_context_mode != "off":
                 logger.info(
                     "Local fetch failed; attempting Gemini URL context fallback for %s (mode=%s)",
-                    url,
+                    work_url,
                     url_context_mode,
                 )
                 url_context_start = time.time()
-                result = self._extract_via_gemini_url_context(url, notes)
+                result = self._extract_via_gemini_url_context(work_url, notes)
                 notes["url_context_elapsed_ms"] = str(int((time.time() - url_context_start) * 1000))
                 if result:
                     cand_text, cand_meta = result
@@ -518,9 +551,9 @@ class WebPageExtractor:
                     notes["final_text_chars"] = str(len(cleaned))
                     notes["final_quality"] = cand_quality
                     return WebPageContent(
-                        source_url=url,
-                        canonical_url=final_meta.get("canonical_url") or url,
-                        title=final_meta.get("title") or url,
+                        source_url=requested_url,
+                        canonical_url=final_meta.get("canonical_url") or work_url,
+                        title=final_meta.get("title") or work_url,
                         text=cleaned,
                         language=final_meta.get("language"),
                         site_name=final_meta.get("site_name"),
@@ -586,7 +619,7 @@ class WebPageExtractor:
                 notes["final_text_chars"] = str(len(cleaned))
                 notes["final_quality"] = cand_quality
                 return WebPageContent(
-                    source_url=url,
+                    source_url=requested_url,
                     canonical_url=final_meta.get("canonical_url") or final_url,
                     title=final_meta.get("title") or final_url,
                     text=cleaned,
@@ -698,7 +731,7 @@ class WebPageExtractor:
         notes["final_quality"] = best_quality
 
         return WebPageContent(
-            source_url=url,
+            source_url=requested_url,
             canonical_url=final_meta.get("canonical_url") or final_url,
             title=final_meta.get("title") or final_meta.get("og:title") or final_url,
             text=cleaned,
