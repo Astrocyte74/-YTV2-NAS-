@@ -416,6 +416,14 @@ class WebPageExtractor:
                     notes["fetch_status"] = str(exc.response.status_code)
                 with contextlib.suppress(Exception):
                     notes["final_url"] = str(exc.response.url or url)
+                with contextlib.suppress(Exception):
+                    cf_mitigated = (exc.response.headers.get("cf-mitigated") or "").strip()
+                    if cf_mitigated:
+                        notes["cf_mitigated"] = cf_mitigated
+                with contextlib.suppress(Exception):
+                    server = (exc.response.headers.get("Server") or "").strip()
+                    if server:
+                        notes["server"] = server
 
             if url_context_mode != "off":
                 logger.info(
@@ -453,6 +461,24 @@ class WebPageExtractor:
                         html=None,
                         extractor_notes=notes,
                     )
+
+            # If we attempted URL context and it failed, raise a clearer error than the raw 403/blocked response.
+            url_context_note = (notes.get("url_context") or "").strip()
+            if url_context_mode != "off" and url_context_note:
+                fetch_status = (notes.get("fetch_status") or "").strip()
+                cf_hint = ""
+                if (notes.get("cf_mitigated") or "").strip():
+                    cf_hint = " (Cloudflare challenge)"
+                detail = (notes.get("url_context_detail") or "").strip()
+                detail = (detail[:140] + "…") if len(detail) > 140 else detail
+                msg = f"Blocked fetching URL{cf_hint}"
+                if fetch_status:
+                    msg += f" (HTTP {fetch_status})"
+                msg += f"; Gemini URL context fallback: {url_context_note}"
+                if detail:
+                    msg += f" ({detail})"
+                msg += "."
+                raise RuntimeError(msg) from exc
 
             raise
 
@@ -505,6 +531,11 @@ class WebPageExtractor:
                 )
 
             # Avoid attempting HTML parsers on binary documents (can yield garbage).
+            url_context_note = (notes.get("url_context") or "").strip()
+            if url_context_note:
+                raise RuntimeError(
+                    f"Non-HTML content-type ({content_type}) for {final_url}; Gemini URL context fallback: {url_context_note}."
+                )
             raise ValueError(f"Non-HTML content-type ({content_type}) for {final_url}")
 
         prepare_start = time.time()
