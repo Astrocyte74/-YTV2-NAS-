@@ -309,6 +309,7 @@ class WebPageExtractor:
 
         best_text = text
         best_meta = meta
+        best_method = "static"
         best_quality = self._assess_quality(text)
         notes["static_quality"] = best_quality
 
@@ -326,6 +327,7 @@ class WebPageExtractor:
                 notes["readability_quality"] = cand_quality
                 if self._is_better_quality(cand_quality, best_quality, cand_text, best_text):
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
+                    best_method = "readability"
 
         if best_quality != "good":
             logger.debug("Attempting trafilatura fallback for %s", final_url)
@@ -336,6 +338,7 @@ class WebPageExtractor:
                 notes["trafilatura_quality"] = cand_quality
                 if self._is_better_quality(cand_quality, best_quality, cand_text, best_text):
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
+                    best_method = "trafilatura"
 
         if best_quality != "good" and self.allow_dynamic:
             logger.info(
@@ -350,6 +353,7 @@ class WebPageExtractor:
                 notes["playwright_quality"] = cand_quality
                 if self._is_better_quality(cand_quality, best_quality, cand_text, best_text):
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
+                    best_method = "playwright"
 
         url_context_mode = self._url_context_mode()
         if url_context_mode == "always" or (url_context_mode == "auto" and best_quality != "good"):
@@ -361,6 +365,7 @@ class WebPageExtractor:
                 notes["url_context_quality"] = cand_quality
                 if self._is_better_quality(cand_quality, best_quality, cand_text, best_text):
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
+                    best_method = "url_context"
 
         if best_quality != "good":
             logger.warning("All extraction methods yielded suboptimal content (%s) for %s", best_quality, final_url)
@@ -371,6 +376,8 @@ class WebPageExtractor:
             cleaned = cleaned[:MAX_BODY_CHARACTERS]
 
         final_meta = {**metadata, **best_meta}
+        notes["final_method"] = best_method
+        notes["final_text_chars"] = str(len(cleaned))
         notes["final_quality"] = best_quality
 
         return WebPageContent(

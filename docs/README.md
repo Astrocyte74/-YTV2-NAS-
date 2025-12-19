@@ -6,6 +6,7 @@
   - `WEB_URL_CONTEXT_MODE=auto` (only when local extraction quality is poor) or `WEB_URL_CONTEXT_MODE=always` (also supports CSV like `auto,off` and uses the first entry)
   - `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY=...`)
   - Optional: `WEB_URL_CONTEXT_MODEL=gemini-2.5-flash`, `WEB_URL_CONTEXT_TIMEOUT=20`, `WEB_URL_CONTEXT_MAX_CHARS=40000`
+- Optional header diagnostics: set `WEB_EXTRACT_SHOW_METHOD=1` to show the chosen extraction method (e.g., Readability vs Gemini URL context) in the Telegram summary header for web URLs.
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
 - Audio variants are generated on the NAS, flagged in Postgres (`content.has_audio=true`), and then pulled by the dashboard from the synced exports share so Listen chips stream immediately.

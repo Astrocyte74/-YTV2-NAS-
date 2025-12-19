@@ -554,11 +554,39 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
         except Exception:
             gen_line = None
 
+        extraction_line = None
+        try:
+            if source == "web":
+                web_meta = (result.get("source_metadata") or {}).get("web") or {}
+                notes = web_meta.get("extractor_notes") or {}
+                if isinstance(notes, dict):
+                    method = str(notes.get("final_method") or "").strip().lower()
+                else:
+                    method = ""
+                show_all = str(os.getenv("WEB_EXTRACT_SHOW_METHOD", "0") or "").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+                if method and (show_all or method in ("url_context", "playwright")):
+                    labels = {
+                        "url_context": "Gemini URL context",
+                        "playwright": "Dynamic render",
+                        "readability": "Readability",
+                        "trafilatura": "Trafilatura",
+                        "static": "Static HTML",
+                    }
+                    extraction_line = f"🔎 Extraction: {labels.get(method, method)}"
+        except Exception:
+            extraction_line = None
+
         header_parts = [
             f"{source_icon} **{handler._escape_markdown(title)}**",
             f"{channel_icon} {handler._escape_markdown(channel)}",
             duration_info,
             gen_line or "",
+            extraction_line or "",
             "",
             f"📝 **{summary_type.replace('-', ' ').title()} Summary:**"
         ]
