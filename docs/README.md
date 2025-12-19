@@ -2,6 +2,10 @@
 
 ## Telegram Bot Content Flow
 - Unified pipeline supports YouTube videos, Reddit threads, and generic web articles (layered extractor with Readability/Trafilatura fallbacks).
+- Optional web extraction fallback: Gemini URL Context tool (off by default). Enable with:
+  - `WEB_URL_CONTEXT_MODE=auto` (only when local extraction quality is poor) or `WEB_URL_CONTEXT_MODE=always`
+  - `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY=...`)
+  - Optional: `WEB_URL_CONTEXT_MODEL=gemini-2.5-flash`, `WEB_URL_CONTEXT_TIMEOUT=20`, `WEB_URL_CONTEXT_MAX_CHARS=40000`
 - Telegram stores the active item context (`source`, `url`, `content_id`, etc.) so all summary types reuse the same keyboard.
 - Summaries are exported locally (JSON optional) and written directly to Postgres via UPSERTs; ledger keys use universal IDs (`yt:<id>`, `reddit:<id>`).
 - Audio variants are generated on the NAS, flagged in Postgres (`content.has_audio=true`), and then pulled by the dashboard from the synced exports share so Listen chips stream immediately.

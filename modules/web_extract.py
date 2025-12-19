@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import logging
 import re
 import time
@@ -135,6 +136,141 @@ class WebPageExtractor:
         session.max_redirects = MAX_REDIRECTS
         return session
 
+    def _url_context_mode(self) -> str:
+        mode = (os.getenv("WEB_URL_CONTEXT_MODE") or "off").strip().lower()
+        if mode in {"0", "false", "no", "disabled"}:
+            mode = "off"
+        if mode not in {"off", "auto", "always"}:
+            mode = "off"
+        return mode
+
+    def _gemini_api_key(self) -> Optional[str]:
+        # Prefer GEMINI_API_KEY (as documented by ai.google.dev examples), but
+        # support GOOGLE_API_KEY as a fallback for users already using that name.
+        key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        if key:
+            return key
+        key = (os.getenv("GOOGLE_API_KEY") or "").strip()
+        return key or None
+
+    def _url_context_model(self) -> str:
+        return (os.getenv("WEB_URL_CONTEXT_MODEL") or "gemini-2.5-flash").strip()
+
+    def _url_context_timeout(self) -> float:
+        try:
+            return float(os.getenv("WEB_URL_CONTEXT_TIMEOUT", "20"))
+        except Exception:
+            return 20.0
+
+    def _url_context_max_chars(self) -> int:
+        try:
+            return int(os.getenv("WEB_URL_CONTEXT_MAX_CHARS", "40000"))
+        except Exception:
+            return 40000
+
+    def _extract_via_gemini_url_context(
+        self,
+        url: str,
+        notes: Dict[str, str],
+    ) -> Optional[Tuple[str, Dict[str, str]]]:
+        api_key = self._gemini_api_key()
+        if not api_key:
+            notes["url_context"] = "skipped (no GEMINI_API_KEY/GOOGLE_API_KEY)"
+            return None
+
+        model = self._url_context_model()
+        timeout = self._url_context_timeout()
+        max_chars = self._url_context_max_chars()
+
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        prompt = (
+            "You are a web article extraction assistant.\n"
+            "Using the content at the URL, extract the main readable content for downstream summarization.\n\n"
+            "Return JSON only (no markdown, no code fences) with keys:\n"
+            "  title: string|null\n"
+            "  author: string|null\n"
+            "  published_at: string|null\n"
+            "  text: string (plain text, paragraphs separated by \\n\\n)\n\n"
+            f"Rules:\n- text must exclude navigation/ads/comments.\n- text must be at most {max_chars} characters; truncate if needed.\n\n"
+            f"URL: {url}"
+        )
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"url_context": {}}],
+        }
+
+        try:
+            resp = self.session.post(
+                endpoint,
+                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            notes["url_context"] = f"error ({type(exc).__name__})"
+            return None
+
+        if resp.status_code != 200:
+            snippet = (resp.text or "").strip().replace("\n", " ")
+            notes["url_context"] = f"bad_status ({resp.status_code})"
+            if snippet:
+                notes["url_context_detail"] = snippet[:180]
+            return None
+
+        try:
+            data = resp.json() or {}
+        except Exception as exc:
+            notes["url_context"] = f"bad_json ({type(exc).__name__})"
+            return None
+
+        raw_text = ""
+        try:
+            candidates = data.get("candidates") or []
+            if candidates and isinstance(candidates, list):
+                content = (candidates[0] or {}).get("content") or {}
+                parts = content.get("parts") or []
+                buf = []
+                for part in parts:
+                    if isinstance(part, dict) and isinstance(part.get("text"), str):
+                        buf.append(part["text"])
+                raw_text = "\n".join(buf).strip()
+        except Exception:
+            raw_text = ""
+
+        if not raw_text:
+            notes["url_context"] = "empty"
+            return None
+
+        meta: Dict[str, str] = {}
+        extracted_text: str = raw_text
+        try:
+            try_text = raw_text
+            if "{" in try_text and "}" in try_text:
+                try_text = try_text[try_text.find("{") : try_text.rfind("}") + 1]
+            obj = json.loads(try_text)
+            if isinstance(obj, dict):
+                title = obj.get("title")
+                author = obj.get("author")
+                published = obj.get("published_at")
+                text = obj.get("text")
+                if isinstance(title, str) and title.strip():
+                    meta["title"] = title.strip()
+                if isinstance(author, str) and author.strip():
+                    meta["author"] = author.strip()
+                if isinstance(published, str) and published.strip():
+                    meta["published"] = published.strip()
+                if isinstance(text, str) and text.strip():
+                    extracted_text = text.strip()
+        except Exception:
+            extracted_text = raw_text
+
+        extracted_text = extracted_text.strip()
+        if max_chars and len(extracted_text) > max_chars:
+            extracted_text = extracted_text[:max_chars]
+
+        notes["url_context"] = f"ok ({len(extracted_text)} chars)"
+        return extracted_text, meta
+
     # -- Public API ----------------------------------------------------- #
     def extract(self, url: str) -> WebPageContent:
         """Fetch, clean, and return article content for ``url``."""
@@ -208,6 +344,17 @@ class WebPageExtractor:
                 cand_text, cand_meta = result
                 cand_quality = self._assess_quality(cand_text)
                 notes["playwright_quality"] = cand_quality
+                if self._is_better_quality(cand_quality, best_quality, cand_text, best_text):
+                    best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
+
+        url_context_mode = self._url_context_mode()
+        if url_context_mode == "always" or (url_context_mode == "auto" and best_quality != "good"):
+            logger.info("Attempting Gemini URL context fallback for %s (mode=%s)", final_url, url_context_mode)
+            result = self._extract_via_gemini_url_context(final_url, notes)
+            if result:
+                cand_text, cand_meta = result
+                cand_quality = self._assess_quality(cand_text)
+                notes["url_context_quality"] = cand_quality
                 if self._is_better_quality(cand_quality, best_quality, cand_text, best_text):
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
 
