@@ -386,6 +386,16 @@ class WebPageExtractor:
         fetch_start = time.time()
         logger.info("WebExtractor: fetching %s", url)
 
+        url_context_mode = self._url_context_mode()
+
+        # Initialize notes early so we can fall back to URL-context even when the
+        # local HTTP fetch fails (e.g., 403 on PDFs or aggressive bot blocking).
+        notes: Dict[str, str] = {
+            "initial_method": "static",
+            "final_url": url,
+            "fetch_elapsed_ms": "0",
+        }
+
         # Wikipedia fast-path via official REST APIs (opt-in)
         with contextlib.suppress(Exception):
             wiki_mode = (os.getenv("WIKI_API_MODE") or "auto").strip().lower()
@@ -395,13 +405,108 @@ class WebPageExtractor:
                 wiki_content = self._maybe_extract_wikipedia(url, mode=wiki_mode)
                 if wiki_content:
                     return wiki_content
-        response, final_url = self._fetch(url)
+
+        try:
+            response, final_url = self._fetch(url)
+        except Exception as exc:
+            notes["fetch_elapsed_ms"] = f"{int((time.time() - fetch_start) * 1000)}"
+            notes["fetch_error"] = type(exc).__name__
+            if isinstance(exc, requests.HTTPError) and getattr(exc, "response", None) is not None:
+                with contextlib.suppress(Exception):
+                    notes["fetch_status"] = str(exc.response.status_code)
+                with contextlib.suppress(Exception):
+                    notes["final_url"] = str(exc.response.url or url)
+
+            if url_context_mode != "off":
+                logger.info(
+                    "Local fetch failed; attempting Gemini URL context fallback for %s (mode=%s)",
+                    url,
+                    url_context_mode,
+                )
+                url_context_start = time.time()
+                result = self._extract_via_gemini_url_context(url, notes)
+                notes["url_context_elapsed_ms"] = str(int((time.time() - url_context_start) * 1000))
+                if result:
+                    cand_text, cand_meta = result
+                    cand_quality = self._assess_quality(cand_text)
+                    notes["url_context_quality"] = cand_quality
+
+                    cleaned = self._clean_text(cand_text)
+                    if len(cleaned) > MAX_BODY_CHARACTERS:
+                        logger.info("Truncating article text at %s characters", MAX_BODY_CHARACTERS)
+                        cleaned = cleaned[:MAX_BODY_CHARACTERS]
+
+                    final_meta = {**cand_meta}
+                    notes["final_method"] = "url_context"
+                    notes["final_text_chars"] = str(len(cleaned))
+                    notes["final_quality"] = cand_quality
+                    return WebPageContent(
+                        source_url=url,
+                        canonical_url=final_meta.get("canonical_url") or url,
+                        title=final_meta.get("title") or url,
+                        text=cleaned,
+                        language=final_meta.get("language"),
+                        site_name=final_meta.get("site_name"),
+                        author=final_meta.get("author"),
+                        published_at=final_meta.get("published"),
+                        top_image=final_meta.get("top_image"),
+                        html=None,
+                        extractor_notes=notes,
+                    )
+
+            raise
+
         logger.debug(
             "WebExtractor: fetch done status=%s len=%s final_url=%s",
             getattr(response, "status_code", "-"),
             len(getattr(response, "content", b"")),
             final_url,
         )
+        notes["final_url"] = final_url
+        notes["fetch_elapsed_ms"] = f"{int((time.time() - fetch_start) * 1000)}"
+
+        # If the fetch returned a non-HTML document (e.g., PDF), prefer URL-context.
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "text/html" not in content_type and url_context_mode != "off":
+            logger.info(
+                "Non-HTML content-type detected; attempting Gemini URL context fallback for %s (content-type=%s mode=%s)",
+                final_url,
+                content_type or "unknown",
+                url_context_mode,
+            )
+            url_context_start = time.time()
+            result = self._extract_via_gemini_url_context(final_url, notes)
+            notes["url_context_elapsed_ms"] = str(int((time.time() - url_context_start) * 1000))
+            if result:
+                cand_text, cand_meta = result
+                cand_quality = self._assess_quality(cand_text)
+                notes["url_context_quality"] = cand_quality
+                cleaned = self._clean_text(cand_text)
+                if len(cleaned) > MAX_BODY_CHARACTERS:
+                    logger.info("Truncating article text at %s characters", MAX_BODY_CHARACTERS)
+                    cleaned = cleaned[:MAX_BODY_CHARACTERS]
+
+                final_meta = {**cand_meta}
+                notes["final_method"] = "url_context"
+                notes["final_text_chars"] = str(len(cleaned))
+                notes["final_quality"] = cand_quality
+                return WebPageContent(
+                    source_url=url,
+                    canonical_url=final_meta.get("canonical_url") or final_url,
+                    title=final_meta.get("title") or final_url,
+                    text=cleaned,
+                    language=final_meta.get("language"),
+                    site_name=final_meta.get("site_name"),
+                    author=final_meta.get("author"),
+                    published_at=final_meta.get("published"),
+                    top_image=final_meta.get("top_image"),
+                    html=None,
+                    extractor_notes=notes,
+                )
+
+            # Avoid attempting HTML parsers on binary documents (can yield garbage).
+            raise ValueError(f"Non-HTML content-type ({content_type}) for {final_url}")
+
         prepare_start = time.time()
         html, metadata = self._prepare_html(response)
         prepare_elapsed_ms = int((time.time() - prepare_start) * 1000)
@@ -409,14 +514,8 @@ class WebPageExtractor:
         static_start = time.time()
         text, meta = self._extract_static(html, final_url, metadata)
         static_elapsed_ms = int((time.time() - static_start) * 1000)
-
-        notes: Dict[str, str] = {
-            "initial_method": "static",
-            "final_url": final_url,
-            "fetch_elapsed_ms": f"{int((time.time() - fetch_start) * 1000)}",
-            "prepare_elapsed_ms": str(prepare_elapsed_ms),
-            "static_elapsed_ms": str(static_elapsed_ms),
-        }
+        notes["prepare_elapsed_ms"] = str(prepare_elapsed_ms)
+        notes["static_elapsed_ms"] = str(static_elapsed_ms)
 
         best_text = text
         best_meta = meta
@@ -472,7 +571,6 @@ class WebPageExtractor:
                     best_text, best_meta, best_quality = cand_text, cand_meta, cand_quality
                     best_method = "playwright"
 
-        url_context_mode = self._url_context_mode()
         if url_context_mode == "always" or (url_context_mode == "auto" and best_quality != "good"):
             logger.info("Attempting Gemini URL context fallback for %s (mode=%s)", final_url, url_context_mode)
             url_context_start = time.time()
