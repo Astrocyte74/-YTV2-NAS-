@@ -19,7 +19,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -104,6 +104,50 @@ def _resolution_default() -> tuple[int, int]:
     return width, height
 
 
+def _zimage_generate_endpoint_order() -> List[str]:
+    raw = _env_default("ZIMAGE_GENERATE_ENDPOINT", "generate_ephemeral,generate")
+    candidates = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not candidates:
+        candidates = ["generate_ephemeral", "generate"]
+    order: List[str] = []
+    for cand in candidates:
+        if cand in {"generate_ephemeral", "ephemeral"}:
+            order.append("generate_ephemeral")
+        elif cand in {"generate", "persistent", "normal"}:
+            order.append("generate")
+    if not order:
+        order = ["generate_ephemeral", "generate"]
+    return list(dict.fromkeys(order))
+
+
+def _as_int(val: Any) -> Optional[int]:
+    try:
+        if val is None:
+            return None
+        if isinstance(val, int):
+            return val
+        s = str(val).strip()
+        if not s:
+            return None
+        return int(float(s))
+    except Exception:
+        return None
+
+
+def _as_float(val: Any) -> Optional[float]:
+    try:
+        if val is None:
+            return None
+        if isinstance(val, (int, float)):
+            return float(val)
+        s = str(val).strip()
+        if not s:
+            return None
+        return float(s)
+    except Exception:
+        return None
+
+
 async def process_job(path: Path) -> bool:
     job = load_job(path)
     if not job:
@@ -156,11 +200,11 @@ async def process_job(path: Path) -> bool:
         "model": None,
     }
 
-    gen_url = f"{base}/api/generate"
     post_timeout = httpx.Timeout(120.0)
     get_timeout = httpx.Timeout(60.0)
-    data = None
-    image_bytes = None
+    data: Dict[str, Any] = {}
+    image_bytes: Optional[bytes] = None
+    used_endpoint: str = "unknown"
     async with httpx.AsyncClient() as client:
         enable_health = _env_bool("ENABLE_ZIMAGE_HEALTHCHECK", "1")
         try:
@@ -197,34 +241,71 @@ async def process_job(path: Path) -> bool:
                         prompt = new_prompt.strip()
             except Exception as exc:
                 logging.info("Z-Image enhance failed: %s", exc)
-        try:
-            resp = await client.post(gen_url, json=payload, timeout=post_timeout)
-        except Exception as exc:
-            logging.warning("POST %s failed: %s", gen_url, exc)
-            return False
-        if resp.status_code != 200:
-            logging.warning("POST %s returned %s: %s", gen_url, resp.status_code, resp.text[:200])
-            return False
-        try:
-            data = resp.json()
-        except Exception as exc:
-            logging.warning("Invalid JSON from Z-Image: %s", exc)
-            move_job(path, "failed")
-            return False
-        image_url = data.get("image_url")
-        if not image_url:
-            logging.warning("Z-Image response missing image_url")
-            move_job(path, "failed")
-            return False
-        full_url = image_url if image_url.startswith("http") else f"{base}{image_url}"
-        try:
-            img_resp = await client.get(full_url, timeout=get_timeout)
-            if img_resp.status_code != 200:
-                logging.warning("GET %s returned %s", full_url, img_resp.status_code)
+
+        last_error: Optional[str] = None
+        for endpoint in _zimage_generate_endpoint_order():
+            if endpoint == "generate_ephemeral":
+                gen_url = f"{base}/api/generate_ephemeral"
+                logging.info("zimage queue: generating via %s", gen_url)
+                try:
+                    resp = await client.post(gen_url, json=payload, timeout=post_timeout)
+                except Exception as exc:
+                    logging.warning("POST %s failed: %s", gen_url, exc)
+                    return False
+                if resp.status_code == 200:
+                    image_bytes = resp.content
+                    used_endpoint = "generate_ephemeral"
+                    data = {
+                        "seed": resp.headers.get("X-Zimage-Seed"),
+                        "duration_sec": resp.headers.get("X-Zimage-Duration-Sec"),
+                        "id": resp.headers.get("X-Zimage-Image-Id"),
+                        "width": width,
+                        "height": height,
+                    }
+                    break
+                if resp.status_code in (404, 405):
+                    last_error = f"{gen_url} returned {resp.status_code}"
+                    continue
+                last_error = f"{gen_url} returned {resp.status_code}: {resp.text[:200]}"
+                break
+
+            gen_url = f"{base}/api/generate"
+            logging.info("zimage queue: generating via %s", gen_url)
+            try:
+                resp = await client.post(gen_url, json=payload, timeout=post_timeout)
+            except Exception as exc:
+                logging.warning("POST %s failed: %s", gen_url, exc)
                 return False
-            image_bytes = img_resp.content
-        except Exception as exc:
-            logging.warning("GET %s failed: %s", full_url, exc)
+            if resp.status_code != 200:
+                last_error = f"{gen_url} returned {resp.status_code}: {resp.text[:200]}"
+                break
+            try:
+                data = resp.json() or {}
+            except Exception as exc:
+                logging.warning("Invalid JSON from Z-Image: %s", exc)
+                move_job(path, "failed")
+                return False
+            image_url = data.get("image_url")
+            if not image_url:
+                logging.warning("Z-Image response missing image_url")
+                move_job(path, "failed")
+                return False
+            full_url = image_url if image_url.startswith("http") else f"{base}{image_url}"
+            try:
+                img_resp = await client.get(full_url, timeout=get_timeout)
+                if img_resp.status_code != 200:
+                    last_error = f"GET {full_url} returned {img_resp.status_code}"
+                    break
+                image_bytes = img_resp.content
+                used_endpoint = "generate"
+                break
+            except Exception as exc:
+                last_error = f"GET {full_url} failed: {exc}"
+                break
+
+        if not image_bytes:
+            if last_error:
+                logging.warning("Z-Image generation failed: %s", last_error)
             return False
 
     token = _env_default("TELEGRAM_BOT_TOKEN", "")
@@ -232,10 +313,10 @@ async def process_job(path: Path) -> bool:
         logging.error("TELEGRAM_BOT_TOKEN not set; cannot deliver image")
         return False
 
-    seed_used = seed if seed != -1 else data.get("seed")
-    w_used = data.get("width") or width
-    h_used = data.get("height") or height
-    dur = data.get("duration_sec")
+    seed_used = seed if seed != -1 else _as_int(data.get("seed"))
+    w_used = _as_int(data.get("width")) or width
+    h_used = _as_int(data.get("height")) or height
+    dur = _as_float(data.get("duration_sec"))
     cap_parts = ["Z-Image"]
     if lora_id:
         cap_parts.append(f"LoRA {lora_id}")
@@ -243,8 +324,12 @@ async def process_job(path: Path) -> bool:
         cap_parts.append(f"Seed {seed_used}")
     if w_used and h_used:
         cap_parts.append(f"{w_used}×{h_used}")
-    if isinstance(dur, (int, float)):
+    if isinstance(dur, float):
         cap_parts.append(f"{dur:.1f}s")
+    if used_endpoint == "generate_ephemeral":
+        img_id = str(data.get("id") or "").strip()
+        if img_id:
+            cap_parts.append(f"ID {img_id}")
     caption = " • ".join(cap_parts)
 
     tg_url = f"https://api.telegram.org/bot{token}/sendPhoto"

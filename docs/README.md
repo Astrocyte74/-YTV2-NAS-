@@ -51,6 +51,7 @@
 
 Z‑Image Turbo (Mac)
 - Configure `ZIMAGE_BASE_URL` (prefer the Mac’s WireGuard IP, e.g., `http://10.0.4.x:8000`). Defaults: style `Cinematic photo`, 512×512, 7 steps, CFG 0.0. `ZIMAGE_DEFAULT_STYLE` accepts a comma list and uses the first entry (e.g., `Cinematic photo,Anime`). `ZIMAGE_DEFAULT_RESOLUTION` also accepts a comma list and uses the first entry (e.g., `512x512,768x768`).
+- Bot-only (no gallery/history): `ZIMAGE_GENERATE_ENDPOINT=generate_ephemeral,generate` (default). Tries `POST /api/generate_ephemeral` first (returns `image/png` bytes, no local persistence) and falls back to `POST /api/generate` for older servers.
 - Auto-enhance default: set `ZIMAGE_AUTO_ENHANCE_DEFAULT=1` to start `/zopts` with auto-enhance on (restart the bot/container to apply).
 - Commands: use `/zopts` as the main entrypoint. `/zimage`, `/z`, and `/image` are aliases that open the `/zopts` panel (and can pass a prompt like `/z <prompt>` to prefill it).
 - Options UI: `/zoptions` (`/zopts`) opens a control panel that shows current settings + last prompt (or use `/zopts <prompt>` to set the stored prompt without generating). Use buttons to set style (rotating), quality (rotating), size/steps (rotating), prompt type + “Generate Prompt”, recipes, LoRA (rotating, includes None), enhance the current prompt, clear queued jobs, reset, and Generate using the stored prompt.

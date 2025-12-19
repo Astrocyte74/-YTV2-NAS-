@@ -4272,38 +4272,84 @@ class YouTubeTelegramBot:
             "stealth": False,
             "model": None,
         }
-        gen_url = f"{base}/api/generate"
+
+        def _zimage_generate_endpoint_order() -> List[str]:
+            raw = (os.getenv("ZIMAGE_GENERATE_ENDPOINT") or "generate_ephemeral,generate").strip()
+            candidates = [part.strip().lower() for part in raw.split(",") if part.strip()]
+            if not candidates:
+                candidates = ["generate_ephemeral", "generate"]
+            order: List[str] = []
+            for cand in candidates:
+                if cand in {"generate_ephemeral", "ephemeral"}:
+                    order.append("generate_ephemeral")
+                elif cand in {"generate", "persistent", "normal"}:
+                    order.append("generate")
+            # Ensure we always have a usable fallback
+            if not order:
+                order = ["generate_ephemeral", "generate"]
+            return list(dict.fromkeys(order))
+
         post_timeout = httpx.Timeout(120.0)
         get_timeout = httpx.Timeout(60.0)
+        data: Dict[str, Any] = {}
+        png_bytes: Optional[bytes] = None
+        used_endpoint: str = "unknown"
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.post(gen_url, json=payload, timeout=post_timeout)
-                if resp.status_code != 200:
-                    await _mark("❌ Z-Image generation failed.")
+                last_error: Optional[str] = None
+                for endpoint in _zimage_generate_endpoint_order():
+                    if endpoint == "generate_ephemeral":
+                        gen_url = f"{base}/api/generate_ephemeral"
+                        logging.info("zimage: generating via %s", gen_url)
+                        resp = await client.post(gen_url, json=payload, timeout=post_timeout)
+                        if resp.status_code == 200:
+                            png_bytes = resp.content
+                            used_endpoint = "generate_ephemeral"
+                            # Capture metadata from response headers
+                            data = {
+                                "seed": resp.headers.get("X-Zimage-Seed"),
+                                "duration_sec": resp.headers.get("X-Zimage-Duration-Sec"),
+                                "id": resp.headers.get("X-Zimage-Image-Id"),
+                                "width": width,
+                                "height": height,
+                            }
+                            break
+                        # Fallback to persistent if ephemeral endpoint is not available on the server.
+                        if resp.status_code in (404, 405):
+                            last_error = f"{gen_url} returned {resp.status_code}"
+                            continue
+                        last_error = f"{gen_url} returned {resp.status_code}: {(resp.text or '')[:200]}"
+                        break
+
+                    gen_url = f"{base}/api/generate"
+                    logging.info("zimage: generating via %s", gen_url)
+                    resp = await client.post(gen_url, json=payload, timeout=post_timeout)
+                    if resp.status_code != 200:
+                        last_error = f"{gen_url} returned {resp.status_code}: {(resp.text or '')[:200]}"
+                        break
+                    data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else (resp.json())
+                    image_url = data.get("image_url")
+                    if not image_url:
+                        last_error = "Z-Image returned no image_url"
+                        break
+                    full_url = image_url if image_url.startswith("http") else f"{base}{image_url}"
+                    img_resp = await client.get(full_url, timeout=get_timeout)
+                    if img_resp.status_code != 200:
+                        last_error = f"GET {full_url} returned {img_resp.status_code}"
+                        break
+                    png_bytes = img_resp.content
+                    used_endpoint = "generate"
+                    break
+
+                if not png_bytes:
+                    await _mark("❌ Z-Image request failed.")
+                    if last_error:
+                        logging.info("zimage: generation failed: %s", last_error)
                     if queue_on_fail:
                         await self._zimage_enqueue_for_later(job, chat_id, status_message)
                     else:
                         await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
                     return
-                data = resp.json()
-                image_url = data.get("image_url")
-                if not image_url:
-                    await _mark("❌ Z-Image returned no image URL.")
-                    if queue_on_fail:
-                        await self._zimage_enqueue_for_later(job, chat_id, status_message)
-                    else:
-                        await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
-                    return
-                full_url = image_url if image_url.startswith("http") else f"{base}{image_url}"
-                img_resp = await client.get(full_url, timeout=get_timeout)
-                if img_resp.status_code != 200:
-                    await _mark("❌ Z-Image fetch failed.")
-                    if queue_on_fail:
-                        await self._zimage_enqueue_for_later(job, chat_id, status_message)
-                    else:
-                        await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
-                    return
-                png_bytes = img_resp.content
         except Exception as exc:
             logging.warning("zimage: request failed: %s", exc)
             await _mark("❌ Z-Image request failed.")
@@ -4313,17 +4359,47 @@ class YouTubeTelegramBot:
                 await bot.send_message(chat_id=chat_id, text="Z-Image is offline or busy right now; please try again later.")
             return
         # Build caption
-        seed_used = seed if seed != -1 else data.get("seed")
+        def _as_int(val: Any) -> Optional[int]:
+            try:
+                if val is None:
+                    return None
+                if isinstance(val, int):
+                    return val
+                s = str(val).strip()
+                if not s:
+                    return None
+                return int(float(s))
+            except Exception:
+                return None
+
+        def _as_float(val: Any) -> Optional[float]:
+            try:
+                if val is None:
+                    return None
+                if isinstance(val, (int, float)):
+                    return float(val)
+                s = str(val).strip()
+                if not s:
+                    return None
+                return float(s)
+            except Exception:
+                return None
+
+        seed_used = seed if seed != -1 else _as_int(data.get("seed"))
         cap_parts = ["Z-Image"]
         if seed_used is not None:
             cap_parts.append(f"Seed {seed_used}")
-        w_used = data.get("width") or width
-        h_used = data.get("height") or height
+        w_used = _as_int(data.get("width")) or width
+        h_used = _as_int(data.get("height")) or height
         if w_used and h_used:
             cap_parts.append(f"{w_used}×{h_used}")
-        dur = data.get("duration_sec")
-        if isinstance(dur, (int, float)):
+        dur = _as_float(data.get("duration_sec"))
+        if isinstance(dur, float):
             cap_parts.append(f"{dur:.1f}s")
+        if used_endpoint == "generate_ephemeral":
+            img_id = str(data.get("id") or "").strip()
+            if img_id:
+                cap_parts.append(f"ID {img_id}")
         caption = " • ".join(cap_parts)
         bio = io.BytesIO(png_bytes)
         bio.name = "zimage.png"

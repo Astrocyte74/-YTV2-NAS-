@@ -102,6 +102,20 @@ def _map_style_preset_to_zimage(style_preset: Optional[str]) -> str:
     return "Cinematic photo"
 
 
+def _zimage_generate_endpoint_order() -> List[str]:
+    raw = _csv_list_env("ZIMAGE_GENERATE_ENDPOINT", "generate_ephemeral,generate")
+    order: List[str] = []
+    for entry in raw:
+        key = entry.strip().lower()
+        if key in {"generate_ephemeral", "ephemeral"}:
+            order.append("generate_ephemeral")
+        elif key in {"generate", "persistent", "normal"}:
+            order.append("generate")
+    if not order:
+        order = ["generate_ephemeral", "generate"]
+    return list(dict.fromkeys(order))
+
+
 async def _zimage_is_reachable(
     base_url: str,
     *,
@@ -158,7 +172,6 @@ async def _zimage_generate_image(
     if not base:
         raise RuntimeError("Z-Image base URL is not configured.")
 
-    url = f"{base}/api/generate"
     payload: Dict[str, Any] = {
         "prompt": prompt,
         "negative_prompt": negative_prompt,
@@ -180,15 +193,60 @@ async def _zimage_generate_image(
     loop = asyncio.get_running_loop()
 
     def _call() -> Dict[str, Any]:
-        resp = requests.post(url, json=payload, timeout=timeout)
-        if resp.status_code >= 400:
-            snippet = (resp.text or "").strip()
-            snippet = snippet[:400] if snippet else f"HTTP {resp.status_code}"
-            raise RuntimeError(f"Z-Image returned {resp.status_code}: {snippet}")
-        data = resp.json() or {}
-        return data
+        last_error: Optional[str] = None
+        for endpoint in _zimage_generate_endpoint_order():
+            if endpoint == "generate_ephemeral":
+                url = f"{base}/api/generate_ephemeral"
+                resp = requests.post(url, json=payload, timeout=timeout)
+                if resp.status_code == 200:
+                    seed_val: Optional[int] = None
+                    dur_val: Optional[float] = None
+                    try:
+                        seed_hdr = (resp.headers.get("X-Zimage-Seed") or "").strip()
+                        seed_val = int(seed_hdr) if seed_hdr else None
+                    except Exception:
+                        seed_val = None
+                    try:
+                        dur_hdr = (resp.headers.get("X-Zimage-Duration-Sec") or "").strip()
+                        dur_val = float(dur_hdr) if dur_hdr else None
+                    except Exception:
+                        dur_val = None
+                    img_id = (resp.headers.get("X-Zimage-Image-Id") or "").strip() or None
+                    return {
+                        "endpoint": "generate_ephemeral",
+                        "source_url": url,
+                        "image_bytes": resp.content,
+                        "seed": seed_val,
+                        "duration_sec": dur_val,
+                        "id": img_id,
+                        "width": int(width),
+                        "height": int(height),
+                        "model": None,
+                    }
+                if resp.status_code in (404, 405):
+                    last_error = f"{url} returned {resp.status_code}"
+                    continue
+                snippet = (resp.text or "").strip()
+                snippet = snippet[:400] if snippet else f"HTTP {resp.status_code}"
+                raise RuntimeError(f"Z-Image returned {resp.status_code}: {snippet}")
+
+            url = f"{base}/api/generate"
+            resp = requests.post(url, json=payload, timeout=timeout)
+            if resp.status_code >= 400:
+                snippet = (resp.text or "").strip()
+                snippet = snippet[:400] if snippet else f"HTTP {resp.status_code}"
+                raise RuntimeError(f"Z-Image returned {resp.status_code}: {snippet}")
+            data = resp.json() or {}
+            out = dict(data)
+            out["endpoint"] = "generate"
+            return out
+
+        raise RuntimeError(last_error or "Z-Image did not attempt any generate endpoint")
 
     data = await loop.run_in_executor(None, _call)
+    if isinstance(data, dict) and data.get("endpoint") == "generate_ephemeral":
+        return data
+
     image_url = data.get("image_url")
     if not isinstance(image_url, str) or not image_url.strip():
         raise RuntimeError("Z-Image did not return image_url")
@@ -1801,32 +1859,40 @@ async def maybe_generate_summary_image(
                 logger.warning("summary image generation failed and queueing also failed: %s", exc)
         return None
 
-    absolute_url = generation.get("absolute_url") or generation.get("url")
-    if not absolute_url:
-        logger.warning("summary image failed: hub did not return an image URL")
-        # Enqueue for later if hub produced no URL (transient failure), unless suppressed
-        if not _suppress_enqueue():
-            try:
-                from modules import image_queue
-                job = {
-                    "mode": "summary_image",
-                    "image_mode": image_mode,
-                    "content": content,
-                    "reason": "no_image_url",
-                }
-                cid = str(content.get("id") or content.get("video_id") or "")
-                if not _pending_job_exists(cid) and _should_enqueue(cid):
-                    image_queue.enqueue(job)
-                    logger.info("summary image queued (no URL returned)")
-            except Exception:
-                pass
-        return None
+    image_bytes: Optional[bytes] = None
+    if isinstance(generation, dict):
+        raw_bytes = generation.get("image_bytes")
+        if isinstance(raw_bytes, (bytes, bytearray)):
+            image_bytes = bytes(raw_bytes)
 
-    try:
-        image_bytes = await _download_image(absolute_url)
-    except Exception as exc:
-        logger.warning("summary image download failed: %s", exc)
-        return None
+    absolute_url = generation.get("absolute_url") or generation.get("url")
+    source_url = absolute_url or generation.get("source_url") or ""
+    if image_bytes is None:
+        if not absolute_url:
+            logger.warning("summary image failed: hub did not return an image URL")
+            # Enqueue for later if hub produced no URL (transient failure), unless suppressed
+            if not _suppress_enqueue():
+                try:
+                    from modules import image_queue
+                    job = {
+                        "mode": "summary_image",
+                        "image_mode": image_mode,
+                        "content": content,
+                        "reason": "no_image_url",
+                    }
+                    cid = str(content.get("id") or content.get("video_id") or "")
+                    if not _pending_job_exists(cid) and _should_enqueue(cid):
+                        image_queue.enqueue(job)
+                        logger.info("summary image queued (no URL returned)")
+                except Exception:
+                    pass
+            return None
+
+        try:
+            image_bytes = await _download_image(absolute_url)
+        except Exception as exc:
+            logger.warning("summary image download failed: %s", exc)
+            return None
 
     content_id = content.get("id") or content.get("video_id") or "summary"
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
@@ -1847,6 +1913,7 @@ async def maybe_generate_summary_image(
     )
     metadata = {
         "provider": selected_provider,
+        "provider_endpoint": generation.get("endpoint"),
         "path": str(output_path),
         "relative_path": str(output_path.relative_to(Path.cwd())),
         "public_url": public_url,
@@ -1860,7 +1927,7 @@ async def maybe_generate_summary_image(
         "style_preset": template.style_preset,
         "width": template.width,
         "height": template.height,
-        "source_url": absolute_url,
+        "source_url": source_url,
         "model": model_name,
         "created_at": created_at,
         "analysis_variant": build_analysis_variant(
