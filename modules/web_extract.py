@@ -298,13 +298,20 @@ class WebPageExtractor:
             len(getattr(response, "content", b"")),
             final_url,
         )
+        prepare_start = time.time()
         html, metadata = self._prepare_html(response)
+        prepare_elapsed_ms = int((time.time() - prepare_start) * 1000)
+
+        static_start = time.time()
         text, meta = self._extract_static(html, final_url, metadata)
+        static_elapsed_ms = int((time.time() - static_start) * 1000)
 
         notes: Dict[str, str] = {
             "initial_method": "static",
             "final_url": final_url,
             "fetch_elapsed_ms": f"{int((time.time() - fetch_start) * 1000)}",
+            "prepare_elapsed_ms": str(prepare_elapsed_ms),
+            "static_elapsed_ms": str(static_elapsed_ms),
         }
 
         best_text = text
@@ -320,7 +327,9 @@ class WebPageExtractor:
                 len(text),
                 final_url,
             )
+            readability_start = time.time()
             result = self._extract_via_readability(html, final_url, metadata, notes)
+            notes["readability_elapsed_ms"] = str(int((time.time() - readability_start) * 1000))
             if result:
                 cand_text, cand_meta = result
                 cand_quality = self._assess_quality(cand_text)
@@ -331,7 +340,9 @@ class WebPageExtractor:
 
         if best_quality != "good":
             logger.debug("Attempting trafilatura fallback for %s", final_url)
+            trafilatura_start = time.time()
             result = self._extract_via_trafilatura(html, final_url, metadata, notes)
+            notes["trafilatura_elapsed_ms"] = str(int((time.time() - trafilatura_start) * 1000))
             if result:
                 cand_text, cand_meta = result
                 cand_quality = self._assess_quality(cand_text)
@@ -346,7 +357,9 @@ class WebPageExtractor:
                 final_url,
                 bool(PLAYWRIGHT_AVAILABLE),
             )
+            playwright_start = time.time()
             result = self._extract_via_playwright(final_url, notes)
+            notes["playwright_elapsed_ms"] = str(int((time.time() - playwright_start) * 1000))
             if result:
                 cand_text, cand_meta = result
                 cand_quality = self._assess_quality(cand_text)
@@ -358,7 +371,9 @@ class WebPageExtractor:
         url_context_mode = self._url_context_mode()
         if url_context_mode == "always" or (url_context_mode == "auto" and best_quality != "good"):
             logger.info("Attempting Gemini URL context fallback for %s (mode=%s)", final_url, url_context_mode)
+            url_context_start = time.time()
             result = self._extract_via_gemini_url_context(final_url, notes)
+            notes["url_context_elapsed_ms"] = str(int((time.time() - url_context_start) * 1000))
             if result:
                 cand_text, cand_meta = result
                 cand_quality = self._assess_quality(cand_text)
