@@ -34,5 +34,13 @@ class WebPageFetcher:
         except Exception as exc:  # pragma: no cover - network errors
             raise WebFetcherError(str(exc)) from exc
         if not content.text or len(content.text.strip()) < 200:
+            notes = getattr(content, "extractor_notes", None) or {}
+            if isinstance(notes, dict):
+                urlctx = str(notes.get("url_context") or "").strip()
+                if urlctx:
+                    hint = ""
+                    if "readtimeout" in urlctx.lower():
+                        hint = " (try increasing WEB_URL_CONTEXT_TIMEOUT / WEB_URL_CONTEXT_PDF_TIMEOUT)"
+                    raise WebFetcherError(f"Page does not contain enough extractable text; URL-context: {urlctx}{hint}.")
             raise WebFetcherError("Page does not contain enough extractable text.")
         return WebFetcherResult(content=content, text=content.text)

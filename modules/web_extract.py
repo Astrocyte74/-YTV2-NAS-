@@ -204,6 +204,39 @@ class WebPageExtractor:
         except Exception:
             return 20.0
 
+    @staticmethod
+    def _looks_like_pdf_url(url: str) -> bool:
+        try:
+            if not url:
+                return False
+            lowered = url.lower()
+            if lowered.endswith(".pdf"):
+                return True
+            parsed = urlparse(lowered)
+            if parsed.path.endswith(".pdf"):
+                return True
+            # Common patterns for PDF endpoints
+            if "/pdf/" in parsed.path:
+                return True
+            if "pdf" in parsed.path and ("showpdf" in parsed.path or parsed.path.endswith("/pdf")):
+                return True
+            return False
+        except Exception:
+            return False
+
+    def _url_context_timeout_for_url(self, url: str) -> float:
+        base = self._url_context_timeout()
+        if not self._looks_like_pdf_url(url):
+            return base
+        raw = (os.getenv("WEB_URL_CONTEXT_PDF_TIMEOUT") or "").strip()
+        if raw:
+            try:
+                return float(raw)
+            except Exception:
+                return base
+        # PDFs frequently take longer than HTML pages to process via URL-context.
+        return max(base, 60.0)
+
     def _url_context_max_chars(self) -> int:
         try:
             return int(os.getenv("WEB_URL_CONTEXT_MAX_CHARS", "40000"))
@@ -222,7 +255,8 @@ class WebPageExtractor:
 
         model = self._url_context_model()
         notes["url_context_model"] = model
-        timeout = self._url_context_timeout()
+        timeout = self._url_context_timeout_for_url(url)
+        notes["url_context_timeout_s"] = str(timeout)
         max_chars = self._url_context_max_chars()
 
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -395,6 +429,41 @@ class WebPageExtractor:
             "final_url": url,
             "fetch_elapsed_ms": "0",
         }
+
+        # If it looks like a PDF, prefer URL-context first (avoids downloading large
+        # binaries and avoids some anti-bot HTML interstitials).
+        if self._looks_like_pdf_url(url) and url_context_mode != "off":
+            logger.info("PDF URL detected; attempting Gemini URL context first for %s (mode=%s)", url, url_context_mode)
+            url_context_start = time.time()
+            result = self._extract_via_gemini_url_context(url, notes)
+            notes["url_context_elapsed_ms"] = str(int((time.time() - url_context_start) * 1000))
+            if result:
+                cand_text, cand_meta = result
+                cand_quality = self._assess_quality(cand_text)
+                notes["url_context_quality"] = cand_quality
+                if cand_quality != "too_short":
+                    cleaned = self._clean_text(cand_text)
+                    if len(cleaned) > MAX_BODY_CHARACTERS:
+                        logger.info("Truncating article text at %s characters", MAX_BODY_CHARACTERS)
+                        cleaned = cleaned[:MAX_BODY_CHARACTERS]
+
+                    final_meta = {**cand_meta}
+                    notes["final_method"] = "url_context"
+                    notes["final_text_chars"] = str(len(cleaned))
+                    notes["final_quality"] = cand_quality
+                    return WebPageContent(
+                        source_url=url,
+                        canonical_url=final_meta.get("canonical_url") or url,
+                        title=final_meta.get("title") or url,
+                        text=cleaned,
+                        language=final_meta.get("language"),
+                        site_name=final_meta.get("site_name"),
+                        author=final_meta.get("author"),
+                        published_at=final_meta.get("published"),
+                        top_image=final_meta.get("top_image"),
+                        html=None,
+                        extractor_notes=notes,
+                    )
 
         # Wikipedia fast-path via official REST APIs (opt-in)
         with contextlib.suppress(Exception):

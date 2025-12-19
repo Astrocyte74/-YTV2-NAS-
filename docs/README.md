@@ -6,6 +6,7 @@
   - `WEB_URL_CONTEXT_MODE=auto` (only when local extraction quality is poor) or `WEB_URL_CONTEXT_MODE=always` (also supports CSV like `auto,off` and uses the first entry)
   - `GEMINI_API_KEY=...` (or `GOOGLE_API_KEY=...`)
   - Optional: `WEB_URL_CONTEXT_MODEL=gemini-2.5-flash` (also supports CSV; first entry wins), `WEB_URL_CONTEXT_TIMEOUT=20`, `WEB_URL_CONTEXT_MAX_CHARS=40000`
+  - Optional: `WEB_URL_CONTEXT_PDF_TIMEOUT=60` (PDF URLs can take longer to process via URL-context; defaults to max(WEB_URL_CONTEXT_TIMEOUT, 60))
   - Optional: `WEB_URL_CONTEXT_SHOW_COST=1` to append an estimated per-call URL-context cost (and an “~N/$1” estimate) in the Telegram summary header whenever URL-context was attempted (even if another extractor won).
   - Reports also record `source_metadata.web.extractor_notes.url_context_*` token counts, elapsed time, and an estimated cost (best-effort, depends on model pricing).
 - Optional header diagnostics: set `WEB_EXTRACT_SHOW_METHOD=1` to show the chosen extraction method (e.g., Readability vs Gemini URL context) in the Telegram summary header for web URLs.
