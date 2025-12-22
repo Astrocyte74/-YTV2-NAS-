@@ -2581,7 +2581,15 @@ Preview:
         except Exception:
             pass
         
-        # Normalize summary_type to canonical keys for robust matching
+        # Normalize summary_type to canonical keys for robust matching.
+        # Some callers use suffixes like `audio-fr:intermediate`; treat the suffix as the
+        # proficiency level when relevant.
+        raw_type = (summary_type or "").strip().lower()
+        base_type = raw_type.split(":", 1)[0].replace("_", "-")
+        suffix = raw_type.split(":", 1)[1].strip().lower() if ":" in raw_type else ""
+        if base_type in ("audio-fr", "audio-es") and (not proficiency_level) and suffix in {"beginner", "intermediate", "advanced"}:
+            proficiency_level = suffix
+
         TYPE_MAP = {
             "comprehensive": "comprehensive",
             "key points": "key_points", 
@@ -2596,8 +2604,10 @@ Preview:
             "audio": "audio",
             "audio-fr": "audio_fr",
             "audio-es": "audio_es",
+            "audio_fr": "audio_fr",
+            "audio_es": "audio_es",
         }
-        normalized_type = TYPE_MAP.get(summary_type.lower().strip(), summary_type)
+        normalized_type = TYPE_MAP.get(base_type, base_type)
         
         # Handle multilingual audio with vocabulary logic
         if normalized_type in ("audio_fr", "audio_es"):
@@ -3567,7 +3577,15 @@ Multiple Categories (when content genuinely spans areas):
     async def _generate_chunked_summary(self, transcript: str, metadata: Dict, summary_type: str, proficiency_level: str = None) -> Dict[str, str]:
         """Generate summary by processing transcript in chunks and combining results"""
         
-        # Normalize summary_type to canonical keys for robust matching
+        # Normalize summary_type to canonical keys for robust matching.
+        # Some callers use suffixes like `audio-fr:intermediate`; treat the suffix as the
+        # proficiency level when relevant and preserve it in the reported summary_type.
+        raw_type = (summary_type or "").strip().lower()
+        base_type = raw_type.split(":", 1)[0].replace("_", "-")
+        suffix = raw_type.split(":", 1)[1].strip().lower() if ":" in raw_type else ""
+        if base_type in ("audio-fr", "audio-es") and (not proficiency_level) and suffix in {"beginner", "intermediate", "advanced"}:
+            proficiency_level = suffix
+
         TYPE_MAP = {
             "comprehensive": "comprehensive",
             "key points": "key_points", 
@@ -3582,8 +3600,10 @@ Multiple Categories (when content genuinely spans areas):
             "audio": "audio",
             "audio-fr": "audio_fr",
             "audio-es": "audio_es",
+            "audio_fr": "audio_fr",
+            "audio_es": "audio_es",
         }
-        normalized_type = TYPE_MAP.get(summary_type.lower().strip(), summary_type)
+        normalized_type = TYPE_MAP.get(base_type, base_type)
         
         # Split transcript into manageable chunks (aim for ~8000 chars per chunk with overlap)
         chunk_size = 8000
@@ -3686,8 +3706,11 @@ Multiple Categories (when content genuinely spans areas):
         primary_text = result.get(primary_key) or combined_summary or ""
 
         canonical_variant = variant_map.get(normalized_type, "comprehensive")
+        out_summary_type = canonical_variant
+        if suffix and canonical_variant in ("audio-fr", "audio-es"):
+            out_summary_type = f"{canonical_variant}:{suffix}"
         result["summary"] = primary_text
-        result["summary_type"] = canonical_variant
+        result["summary_type"] = out_summary_type
         result["generated_at"] = datetime.now().isoformat()
         if normalized_type == "audio_fr":
             result["language"] = 'fr'
