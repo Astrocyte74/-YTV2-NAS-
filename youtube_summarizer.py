@@ -2488,6 +2488,16 @@ Preview:
         if not STRUCTURED_SUMMARY_ENABLED:
             return None
 
+        # Structured planner/chapter summaries are heading/bullet oriented and are not suitable for
+        # audio narration or language-learning variants. Fall back to the classic audio pipeline,
+        # which handles TTS-friendly narration and audio-fr/audio-es translation + proficiency help.
+        try:
+            st = (summary_type or "").strip().lower()
+            if st.startswith("audio"):
+                return None
+        except Exception:
+            pass
+
         try:
             slices = [c for c in (chapter_slices or []) if c]
         except Exception:
