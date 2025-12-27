@@ -299,16 +299,53 @@ class WebPageExtractor:
             "tools": [{"url_context": {}}],
         }
 
-        try:
-            resp = self.session.post(
+        def _retry_timeout_seconds(initial_timeout: float) -> Optional[float]:
+            try:
+                enabled = str(os.getenv("WEB_URL_CONTEXT_RETRY_ON_TIMEOUT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+            except Exception:
+                enabled = True
+            if not enabled:
+                return None
+            try:
+                retry_timeout = float(os.getenv("WEB_URL_CONTEXT_RETRY_TIMEOUT", "60") or "60")
+            except Exception:
+                retry_timeout = 60.0
+            # Only retry if we'd actually increase the timeout.
+            return retry_timeout if retry_timeout > float(initial_timeout) else None
+
+        def _post(timeout_s: float):
+            return self.session.post(
                 endpoint,
                 headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
                 json=payload,
-                timeout=timeout,
+                timeout=timeout_s,
             )
+
+        try:
+            resp = _post(timeout)
         except Exception as exc:
             notes["url_context"] = f"error ({type(exc).__name__})"
-            return None
+            detail = str(exc).strip()
+            if detail:
+                notes["url_context_detail"] = detail[:180]
+            # Common failure: ReadTimeout on slow/JS-heavy pages. Retry once with a higher timeout.
+            if type(exc).__name__ == "ReadTimeout":
+                retry_timeout = _retry_timeout_seconds(timeout)
+                if retry_timeout:
+                    notes["url_context_retry_timeout_s"] = str(int(retry_timeout) if retry_timeout.is_integer() else retry_timeout)
+                    try:
+                        resp = _post(retry_timeout)
+                        notes["url_context_retried"] = "1"
+                    except Exception as exc2:
+                        notes["url_context_retry_error"] = f"{type(exc2).__name__}"
+                        detail2 = str(exc2).strip()
+                        if detail2:
+                            notes["url_context_retry_detail"] = detail2[:180]
+                        return None
+                else:
+                    return None
+            else:
+                return None
 
         if resp.status_code != 200:
             snippet = (resp.text or "").strip().replace("\n", " ")

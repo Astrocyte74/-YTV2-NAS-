@@ -1228,6 +1228,17 @@ async def process_content_summary(
         except Exception:
             export_info["generated_at"] = datetime.now().isoformat(timespec='seconds')
 
+        # For web URLs, show an explicit extraction step up front. This avoids the UX
+        # feeling "stuck" during fetch + extraction (some sites are slow/JS-heavy).
+        try:
+            if source == "web" and url:
+                await _safe_edit_status(
+                    query,
+                    f"📰 Extracting article text…\nLLM: {handler._escape_markdown(llm_label)}",
+                )
+        except Exception:
+            pass
+
         try:
             if source == "reddit":
                 result = await summarizer.process_reddit_thread(
@@ -1264,11 +1275,21 @@ async def process_content_summary(
             raise
 
         if not result:
+            try:
+                if progress_task:
+                    progress_task.cancel()
+            except Exception:
+                pass
             await query.edit_message_text("❌ Failed to process content. Please check the URL and try again.")
             return
 
         error_message = result.get('error') if isinstance(result, dict) else None
         if error_message:
+            try:
+                if progress_task:
+                    progress_task.cancel()
+            except Exception:
+                pass
             if 'No transcript available' in error_message:
                 await query.edit_message_text(
                     f"⚠️ {error_message}\n\nSkipping this item to prevent empty dashboard entries."
@@ -1277,6 +1298,42 @@ async def process_content_summary(
             else:
                 await query.edit_message_text(f"❌ {error_message}")
                 logging.info("❌ Processing error: %s", error_message)
+                # Ensure there's a visible message in chat even if the status message is
+                # later overwritten by a background spinner or another edit.
+                try:
+                    lower = str(error_message).lower()
+                    if query.message and (
+                        "extractable text" in lower
+                        or "all extraction methods" in lower
+                        or "url-context" in lower
+                        or "url context" in lower
+                        or "too_short" in lower
+                        or "readtimeout" in lower
+                    ):
+                        timeout_s = (os.getenv("WEB_URL_CONTEXT_TIMEOUT") or "").strip()
+                        pdf_timeout_s = (os.getenv("WEB_URL_CONTEXT_PDF_TIMEOUT") or "").strip()
+                        mode = (os.getenv("WEB_URL_CONTEXT_MODE") or "").strip()
+                        hint_lines = [
+                            "❌ Web extraction failed.",
+                            f"URL: {url}",
+                            "",
+                            str(error_message).strip()[:900],
+                        ]
+                        cfg = []
+                        if mode:
+                            cfg.append(f"WEB_URL_CONTEXT_MODE={mode}")
+                        if timeout_s:
+                            cfg.append(f"WEB_URL_CONTEXT_TIMEOUT={timeout_s}")
+                        if pdf_timeout_s:
+                            cfg.append(f"WEB_URL_CONTEXT_PDF_TIMEOUT={pdf_timeout_s}")
+                        if cfg:
+                            hint_lines.append("")
+                            hint_lines.append("Current settings: " + " • ".join(cfg))
+                        hint_lines.append("")
+                        hint_lines.append("Try: increase `WEB_URL_CONTEXT_TIMEOUT` (e.g. 60) or set `WEB_URL_CONTEXT_MODE=always`.")
+                        await query.message.reply_text("\n".join(hint_lines))
+                except Exception:
+                    pass
             return
 
         has_summary, placeholder_detail = _summary_has_useful_content(result)
@@ -1497,8 +1554,46 @@ async def process_content_summary(
 
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)
-        await query.edit_message_text(f"❌ Error processing content: {str(e)[:100]}...")
+        try:
+            if progress_task:
+                progress_task.cancel()
+        except Exception:
+            pass
+
+        detail = str(e).strip() if e is not None else "Unknown error"
+        if not detail:
+            detail = "Unknown error"
+
+        msg_lines = ["❌ Processing failed."]
+        if url:
+            msg_lines.append(f"URL: {url}")
+        msg_lines.append("")
+        msg_lines.append(detail[:900])
+        message = "\n".join(msg_lines).strip()
+
+        try:
+            await _safe_edit_status(query, message)
+        except Exception:
+            try:
+                if query.message:
+                    await query.message.reply_text(message)
+            except Exception:
+                pass
+        else:
+            # Send a standalone message for extractor-ish failures, which are otherwise easy to miss.
+            try:
+                lower = detail.lower()
+                if query.message and ("extractable text" in lower or "url-context" in lower or "readtimeout" in lower):
+                    await query.message.reply_text(message)
+            except Exception:
+                pass
     finally:
+        # Ensure periodic updater is stopped on every exit path.
+        try:
+            if progress_task:
+                progress_task.cancel()
+        except Exception:
+            pass
         # Detach status callback to avoid cross-talk with future runs
         try:
             setattr(summarizer, 'status_callback', None)
