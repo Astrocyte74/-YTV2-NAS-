@@ -17,11 +17,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Header
+from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Header, Body
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from .models import ProcessRequest, ProcessResponse, HealthResponse
+from .models import ProcessRequest, ProcessResponse, TranscriptResponse, HealthResponse
 
 # Lazy-initialized service instances
 _summarizer = None
@@ -35,6 +35,20 @@ YOUTUBE_PATTERN = re.compile(
 REDDIT_PATTERN = re.compile(
     r'^(https?://)?(www\.)?(reddit\.com/|redd\.it/)[\w/]+'
 )
+
+
+def _extract_video_id(url: str) -> Optional[str]:
+    """Extract YouTube video ID from URL."""
+    patterns = [
+        r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
+        r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})',
+        r'youtube\.com/live/([a-zA-Z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
 
 
 def get_dashboard_url() -> str:
@@ -323,6 +337,61 @@ async def process_web(url: str, summary_type: str, user_id: str, channel: str) -
         )
 
 
+async def get_youtube_transcript(url: str) -> TranscriptResponse:
+    """Extract transcript from YouTube URL without summarization."""
+    summarizer = get_summarizer()
+
+    try:
+        result = summarizer.extract_transcript(url)
+
+        if result.get('error'):
+            return TranscriptResponse(
+                content_id=_extract_video_id(url) or 'unknown',
+                status='failed',
+                error=result.get('error'),
+                metadata={},
+                chapters=None,
+                segments=None,
+                language=None,
+                duration=None,
+                source_type='youtube'
+            )
+
+        metadata = result.get('metadata', {})
+
+        return TranscriptResponse(
+            content_id=_extract_video_id(url) or metadata.get('video_id', 'unknown'),
+            status='completed',
+            transcript=result.get('transcript'),
+            metadata={
+                'title': metadata.get('title', ''),
+                'channel': metadata.get('channel', ''),
+                'channel_id': metadata.get('channel_id', ''),
+                'upload_date': metadata.get('upload_date', ''),
+                'view_count': metadata.get('view_count', 0),
+                'like_count': metadata.get('like_count', 0),
+            },
+            chapters=metadata.get('chapters', []),
+            segments=result.get('transcript_segments', []),  # Timestamped transcript segments
+            language=result.get('transcript_language'),  # Language of the transcript
+            duration=metadata.get('duration'),
+            source_type='youtube'
+        )
+
+    except Exception as e:
+        return TranscriptResponse(
+            content_id='unknown',
+            status='failed',
+            error=str(e),
+            metadata={},
+            chapters=None,
+            segments=None,
+            language=None,
+            duration=None,
+            source_type='youtube'
+        )
+
+
 @app.post("/api/process", response_model=ProcessResponse)
 async def process_url(request: ProcessRequest, background_tasks: BackgroundTasks, authorization: Optional[str] = Header(None)):
     """
@@ -359,6 +428,51 @@ async def process_url(request: ProcessRequest, background_tasks: BackgroundTasks
         return await process_web(url, summary_type, user_id, channel)
 
 
+@app.post("/api/transcript", response_model=TranscriptResponse)
+async def get_transcript(url: str = Body(..., embed=True), authorization: Optional[str] = Header(None)):
+    """
+    Extract transcript from a YouTube URL without summarization.
+
+    This endpoint returns only the raw transcript and metadata, allowing the
+    caller to perform their own summarization. No LLM costs are incurred.
+
+    Use this when you want to:
+    - Get the full transcript for custom processing
+    - Let your own service handle summarization
+    - Avoid LLM costs on the YTV2 side
+    """
+    # Check authentication if secret is configured
+    if not check_auth(authorization):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing authorization token"
+        )
+
+    url = url.strip()
+
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="URL is required"
+        )
+
+    # Only YouTube supported for transcript extraction
+    if not YOUTUBE_PATTERN.match(url):
+        return TranscriptResponse(
+            content_id='unknown',
+            status='failed',
+            error='Only YouTube URLs are supported for transcript extraction',
+            metadata={},
+            chapters=None,
+            segments=None,
+            language=None,
+            duration=None,
+            source_type='youtube'
+        )
+
+    return await get_youtube_transcript(url)
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Health check endpoint."""
@@ -377,6 +491,7 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "process": "/api/process",
+            "transcript": "/api/transcript",
             "health": "/health"
         }
     }

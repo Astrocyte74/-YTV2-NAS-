@@ -39,6 +39,21 @@ class ProcessResponse(BaseModel):
     source_type: str = Field(..., description="Type of content (youtube, reddit, web)")
 
 
+class TranscriptResponse(BaseModel):
+    """Response model for transcript-only requests."""
+
+    content_id: str = Field(..., description="Unique content identifier (video ID, etc.)")
+    status: str = Field(..., description="Processing status (completed, failed)")
+    transcript: Optional[str] = Field(None, description="Full transcript text")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Content metadata (title, channel, duration, etc.)")
+    chapters: Optional[list] = Field(None, description="Video chapters with timestamps")
+    segments: Optional[list] = Field(None, description="Transcript segments with timestamps")
+    language: Optional[str] = Field(None, description="Transcript language code")
+    duration: Optional[int] = Field(None, description="Video duration in seconds")
+    error: Optional[str] = Field(None, description="Error message if extraction failed")
+    source_type: str = Field(..., description="Type of content (youtube, reddit, web)")
+
+
 class HealthResponse(BaseModel):
     """Response model for health check."""
 
