@@ -27,3 +27,9 @@ python-telegram-bot>=20.0
 
 # Audio processing for TTS chunk combination
 pydub>=0.25.1
+
+# HTTP API for multi-channel gateway
+fastapi>=0.104.0
+uvicorn>=0.24.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
