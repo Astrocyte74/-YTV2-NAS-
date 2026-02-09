@@ -133,20 +133,28 @@ async def _zimage_is_reachable(
         if now - cached_ts <= ttl:
             return cached_ok
 
+    # Try /health first, fall back to /api/recipes
     url = f"{base}/health"
     loop = asyncio.get_running_loop()
 
     def _call() -> bool:
         try:
             resp = requests.get(url, timeout=timeout)
-            if resp.status_code != 200:
-                return False
-            try:
-                data = resp.json() or {}
-                status = str(data.get("status") or "").strip().lower()
-                return status == "ok" if status else True
-            except Exception:
-                return True
+            if resp.status_code == 200:
+                try:
+                    data = resp.json() or {}
+                    status = str(data.get("status") or "").strip().lower()
+                    return status == "ok" if status else True
+                except Exception:
+                    return True
+        except Exception:
+            pass
+
+        # Fallback: try /api/recipes endpoint (Z-Image has this)
+        try:
+            recipes_url = f"{base}/recipes"
+            resp = requests.get(recipes_url, timeout=timeout)
+            return resp.status_code == 200
         except Exception:
             return False
 
@@ -166,6 +174,7 @@ async def _zimage_generate_image(
     cfg_scale: float = _SUMMARY_IMAGE_ZIMAGE_DEFAULT_CFG_SCALE,
     style_preset: str = _SUMMARY_IMAGE_ZIMAGE_DEFAULT_STYLE,
     negative_prompt: str = _SUMMARY_IMAGE_ZIMAGE_NEGATIVE_PROMPT,
+    recipe_id: Optional[str] = None,
     timeout: float = 120.0,
 ) -> Dict[str, Any]:
     base = (base_url or "").strip().rstrip("/")
@@ -189,6 +198,11 @@ async def _zimage_generate_image(
         "stealth": False,
         "model": None,
     }
+
+    # Add recipe_id if provided (overrides other settings)
+    if recipe_id:
+        payload["recipe_id"] = recipe_id
+        logger.info("Z-Image using recipe: %s", recipe_id)
 
     loop = asyncio.get_running_loop()
 
@@ -526,6 +540,96 @@ def _pending_job_exists(cid: str) -> bool:
         return False
     return False
 
+
+def _select_zimage_recipe(content: Dict[str, Any], summary_data: Any, analysis: Dict[str, Any]) -> Optional[str]:
+    """
+    Intelligently select a Z-Image thumbnail recipe based on content analysis.
+
+    Available recipes in the 'thumbnails' group (actual IDs from Z-Image API):
+    - Bold & Eye-catching: neon-pop-7e6006b7-thumb, breaking-the-feed-thumb, energy-burst-hero-illustration-thumb
+    - Product Reviews: recipe_1768973569544-thumb (Sleek Product), recipe_1767928648857-thumb (Dynamic), recipe_1768631936696-thumb (Luxury), recipe_1768026749167-thumb (Tech Heartbeat)
+    - Interviews/Profiles: hero-spotlight-portrait-thumb, ethereal-energy-portrait-thumb
+    - Historical/Tribute: recipe_1767928545975-thumb (Tribute Poster)
+    """
+    import re
+
+    if not isinstance(content, dict):
+        return None
+
+    analysis = analysis or {}
+    title = (content.get("title") or content.get("metadata", {}).get("title") or "").lower()
+    summary_text = ""
+    if isinstance(summary_data, dict):
+        summary_text = summary_data.get("summary") or summary_data.get("text") or ""
+    elif isinstance(summary_data, str):
+        summary_text = summary_data
+
+    text = f"{title} {summary_text}".lower()
+
+    # Extract topics from analysis
+    topics = []
+    if isinstance(analysis, dict):
+        if isinstance(analysis.get("topics_json"), dict):
+            topics_obj = analysis.get("topics_json", {})
+            if isinstance(topics_obj.get("topics"), list):
+                topics = [str(t).lower() for t in topics_obj.get("topics", [])[:10]]
+        elif isinstance(analysis.get("topics"), list):
+            topics = [str(t).lower() for t in analysis.get("topics", [])[:10]]
+
+    topics_text = " ".join(topics)
+    combined_text = f"{text} {topics_text}"
+
+    # Product Review detection
+    product_keywords = [
+        "review", "test", "vs", "versus", "comparison", "unboxing", "hands-on",
+        "product", "gadget", "device", "shoe", "camera", "phone", "laptop",
+        "rating", "score", "verdict", "recommend", "buy", "price", "value"
+    ]
+    if any(kw in combined_text for kw in product_keywords):
+        # Tech/sleek product
+        if any(kw in combined_text for kw in ["tech", "gadget", "device", "hardware", "chip", "cpu"]):
+            return "recipe_1768026749167-thumb"  # Visible Tech Heartbeat
+        # Luxury product
+        if any(kw in combined_text for kw in ["luxury", "premium", "high-end", "expensive", "exclusive"]):
+            return "recipe_1768631936696-thumb"  # Luxury Product Unboxing Reveal
+        # Dynamic/action product
+        if any(kw in combined_text for kw in ["performance", "speed", "action", "dynamic", "fast"]):
+            return "recipe_1767928648857-thumb"  # Dynamic Product Showcase
+        # Default sleek product
+        return "recipe_1768973569544-thumb"  # Sleek Product Advertising
+
+    # Interview/Profile detection
+    interview_keywords = [
+        "interview", "profile", "portrait", "spotlight", "feature", "conversation",
+        "talks with", "sits down", "discusses", "reveals", "shares", "personal"
+    ]
+    if any(kw in combined_text for kw in interview_keywords):
+        # Ethereal/spiritual
+        if any(kw in combined_text for kw in ["spiritual", "meditation", "energy", "ethereal", "peaceful"]):
+            return "ethereal-energy-portrait-thumb"
+        # Hero spotlight
+        return "hero-spotlight-7e6006b7-thumb"
+
+    # Historical/Tribute detection
+    historical_keywords = [
+        "tribute", "historical", "history", "documentary", "wwii", "ww2", "world war",
+        "memorial", "legacy", "remember", "anniversary", "commemorate", "in memory"
+    ]
+    if any(kw in combined_text for kw in historical_keywords):
+        return "recipe_1767928545975-thumb"  # Conceptual Tribute Poster Design
+
+    # Bold/Eye-catching detection (default for most content)
+    bold_keywords = [
+        "breaking", "shocking", "surprising", "revealed", "exposed", "truth",
+        "secret", "hidden", "urgent", "alert", "warning", "energy", "burst"
+    ]
+    if any(kw in combined_text for kw in bold_keywords):
+        return "breaking-the-feed-7e6006b7-thumb"
+
+    # Default: Neon Pop Art (works for most content)
+    return "neon-pop-7e6006b7-thumb"
+
+
 async def maybe_generate_summary_image(
     content: Dict[str, Any],
     *,
@@ -711,12 +815,17 @@ async def maybe_generate_summary_image(
 
     try:
         if selected_provider == "zimage":
+            # Select appropriate recipe based on content analysis
+            recipe_id = _select_zimage_recipe(content, summary_data, analysis)
+            logger.info("Z-Image recipe selected: %s", recipe_id)
+
             generation = await _zimage_generate_image(
                 zimage_base,
                 prompt,
                 width=template.width,
                 height=template.height,
                 style_preset=_map_style_preset_to_zimage(template.style_preset),
+                recipe_id=recipe_id,
             )
         else:
             generation = await draw_service.generate_image(
