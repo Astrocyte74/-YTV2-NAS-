@@ -1,0 +1,44 @@
+These climate change charts are wrong. Here are the real versions.
+📺 ReasonTV
+⏱️ Duration: 06:41 → ~3 min read (⏰ Saves 03:41)
+🕒 2026-02-08 22:14:02 MST • Model: OpenRouter • gemini-2.5-flash-lite
+📝 Key Insights Summary:
+This video discusses how climate data can be presented in misleading ways, particularly through the use of "hockey stick" graphs. While global warming is real, using statistical tricks to create fear paralyzes public discourse and leads to poor policy decisions. The video offers alternative, more responsible visualizations.
+
+### Manipulated Climate Graphs
+*   Charts can be presented to intentionally generate fear about climate change.
+*   "Hockey stick" graphs are a common example, showing a sharp upward trend in temperature.
+*   Using statistical tricks to frighten people poisons public discourse and leads to bad policy.
+
+### Original Hockey Stick Graph
+*   Michael Mann's 1998 hockey stick graph presented a simple story of unprecedented warming.
+*   Mann refused to reveal his data and methodology, grafting a red line unrelated to the data onto the chart.
+*   He used a biased statistical method to stitch together unreliable proxy data.
+*   The graph dramatically overstated the certainty of past temperatures.
+
+### US Government's Ratio Chart
+*   A US government chart used ratios of record high to record low daily temperatures.
+*   The chart created a scary visual with alarming red bars getting taller.
+*   Physicist Steven Kunan graphed the number of record warm days and found they were not occurring more than in recent years.
+*   The ratio lines go up because the number of record cold days is decreasing, not because record highs are increasing.
+*   A record warm day required being the warmest in 124 years by 2018, thus records occurred less frequently and created exaggerated ratios.
+
+### Critique of Zike Housefather's Chart
+*   Zeke Housefather's chart shows the percentage of the world reaching record high temperatures each decade.
+*   It claims a steady growth in record highs, exploding in recent decades.
+*   The rise partly represents improving quantity and quality of temperature measurements, leading to more detected record highs.
+*   The video proposes a more meaningful chart that accounts for measurement problems and data quantity by using a different dataset.
+
+### Responsible Climate Visualization
+*   Visualizing global heat minimums shows the dramatic effect of global warming is the near disappearance of record cold months.
+*   This trend is an unambiguous warning of potential future problems.
+*   Annual global mean temperature anomaly since 1880 shows accelerating warming, no sudden hockey stick.
+*   This trend projects nearing 2°C by 2060 if it continues.
+
+### Positive Economic Trends
+*   A chart shows reduced energy consumption per dollar of GDP in the US.
+*   It takes 60% less energy than in 1965 to produce the same amount of real wealth.
+*   This demonstrates that economic enrichment can occur with less environmental impact.
+*   It suggests confronting climate change is possible alongside economic growth.
+
+Bottom line: Sensible progress requires honestly evaluating climate change and devising realistic strategies, not manipulating data to generate misleading charts.
