@@ -52,3 +52,9 @@ data/backups/
 data/logs/
 data/ledger.json
 data/ytv2_content.db
+
+# Claude local settings (may contain API tokens)
+.claude/settings.local.json
+
+# Node.js binaries (platform-specific, large)
+node-v*/
