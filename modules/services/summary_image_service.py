@@ -133,8 +133,10 @@ async def _zimage_is_reachable(
         if now - cached_ts <= ttl:
             return cached_ok
 
-    # Try /health first, fall back to /api/recipes
-    url = f"{base}/health"
+    # Try /health endpoint (Z-Image has this at root, not /api/health)
+    # Remove /api suffix if present for health check
+    health_base = base[:-4] if base.endswith("/api") else base
+    url = f"{health_base}/health"
     loop = asyncio.get_running_loop()
 
     def _call() -> bool:
@@ -144,17 +146,9 @@ async def _zimage_is_reachable(
                 try:
                     data = resp.json() or {}
                     status = str(data.get("status") or "").strip().lower()
-                    return status == "ok" if status else True
+                    return status == "ok"
                 except Exception:
-                    return True
-        except Exception:
-            pass
-
-        # Fallback: try /api/recipes endpoint (Z-Image has this)
-        try:
-            recipes_url = f"{base}/recipes"
-            resp = requests.get(recipes_url, timeout=timeout)
-            return resp.status_code == 200
+                    return False
         except Exception:
             return False
 
@@ -667,7 +661,7 @@ async def maybe_generate_summary_image(
     # Quick health probe; if offline, optionally enqueue and return gracefully.
     # Allow drain context to bypass per-call health when a preflight has passed.
     bypass_health = str(os.getenv("SUMMARY_IMAGE_HEALTH_BYPASS","0")).strip().lower() in ("1","true","yes","on")
-    health_ttl = 0 if bypass_health else int(os.getenv("SUMMARY_IMAGE_HEALTH_TTL","30") or "30")
+    health_ttl = 0 if bypass_health else int(os.getenv("SUMMARY_IMAGE_HEALTH_TTL","120") or "120")
     probe_errors: List[str] = []
     for provider in providers:
         if provider == "drawthings":

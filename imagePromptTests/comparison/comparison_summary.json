@@ -1,0 +1,59 @@
+[
+  {
+    "name": "climate_charts",
+    "prompt": "Thumbnail image for: These climate change charts are wrong. Here are the real versions.. This video discusses how climate data can be presented in misleading ways, particularly through the use of 'hockey stick' graphs.",
+    "drawthings": {
+      "success": true,
+      "time": 22.273437976837158,
+      "file": "climate_charts_drawthings.png",
+      "seed": 1760577966,
+      "steps": 4
+    },
+    "zimage": {
+      "success": true,
+      "time": 54.444491147994995,
+      "file": "climate_charts_zimage.png",
+      "recipe": "neon-pop-7e6006b7-thumb",
+      "seed": 3888879816,
+      "duration": 54.319839833071455
+    }
+  },
+  {
+    "name": "saucony_shoes",
+    "prompt": "Thumbnail image for: Can Saucony Beat the Evo SL? | Endorphin Azura Review. The Saucony Endorphin Azura is a highly anticipated non-plated training shoe designed to bridge the gap between tempo specialists and long-distance gr",
+    "drawthings": {
+      "success": true,
+      "time": 39.03500008583069,
+      "file": "saucony_shoes_drawthings.png",
+      "seed": 1227821916,
+      "steps": 4
+    },
+    "zimage": {
+      "success": true,
+      "time": 69.9956111907959,
+      "file": "saucony_shoes_zimage.png",
+      "recipe": "recipe_1768973569544-thumb",
+      "seed": 550050231,
+      "duration": 69.84384449990466
+    }
+  },
+  {
+    "name": "ww2_secrets",
+    "prompt": "Thumbnail image for: State Secrets - Still Classified WWII Subjects. This summary explores the persistent official secrecy surrounding specific events of World War II nearly 80 years after the conflict ended.",
+    "drawthings": {
+      "success": true,
+      "time": 39.27906107902527,
+      "file": "ww2_secrets_drawthings.png",
+      "seed": 1828782441,
+      "steps": 4
+    },
+    "zimage": {
+      "success": true,
+      "time": 47.14740014076233,
+      "file": "ww2_secrets_zimage.png",
+      "recipe": "breaking-the-feed-thumb",
+      "seed": 3443125628,
+      "duration": 46.89351654215716
+    }
+  }
+]
