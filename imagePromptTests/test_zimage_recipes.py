@@ -61,7 +61,7 @@ async def test_image_generation():
 
     from modules.services.summary_image_service import _select_zimage_recipe
 
-    output_dir = Path("/Users/markdarby16/16projects/ytv16/imagePromptTests/zimage_results")
+    output_dir = Path("/Users/markdarby16/16projects/ytv2/backend/imagePromptTests/zimage_results")
     output_dir.mkdir(exist_ok=True)
 
     for key, video in TEST_VIDEOS.items():

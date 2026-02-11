@@ -14,7 +14,7 @@ from datetime import datetime
 DRAW_API_BASE = "http://100.101.80.13:7860/api"
 
 # Output directory
-OUTPUT_DIR = Path("/Users/markdarby16/16projects/ytv16/imagePromptTests/test_images")
+OUTPUT_DIR = Path("/Users/markdarby16/16projects/ytv2/backend/imagePromptTests/test_images")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Templates
