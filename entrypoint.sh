@@ -12,7 +12,28 @@ YTV2_API_ENABLED="${YTV2_API_ENABLED:-false}"
 YTV2_API_PORT="${YTV2_API_PORT:-6453}"
 YTV2_API_HOST="${YTV2_API_HOST:-127.0.0.1}"
 
-echo "[entrypoint] Starting services (ENABLE_TTS_QUEUE_WORKER=${ENABLE_TTS_QUEUE_WORKER}, TTS_INTERVAL=${TTS_QUEUE_INTERVAL}s, ENABLE_IMAGE_QUEUE_WORKER=${ENABLE_IMAGE_QUEUE_WORKER}, IMG_INTERVAL=${IMAGE_QUEUE_INTERVAL}s, ENABLE_ZIMAGE_QUEUE_WORKER=${ENABLE_ZIMAGE_QUEUE_WORKER}, ZIMG_INTERVAL=${ZIMAGE_QUEUE_INTERVAL}s, YTV2_API_ENABLED=${YTV2_API_ENABLED})"
+# Verify mount points before starting services (prevent wrong-directory issues)
+echo "[entrypoint] Verifying mount points..."
+if [ -d "/app/data" ]; then
+    REPORTS_DIR="/app/data/reports"
+    mkdir -p "$REPORTS_DIR" 2>/dev/null || true
+    if touch "$REPORTS_DIR/.write_test" 2>/dev/null; then
+        rm -f "$REPORTS_DIR/.write_test"
+        echo "[entrypoint] ✅ Data directory writable: /app/data"
+    else
+        echo "[entrypoint] ❌ ERROR: /app/data is not writable!"
+        echo "[entrypoint]    Container may be started from wrong directory"
+        echo "[entrypoint]    Expected: ytv2/backend"
+        echo "[entrypoint]    Current mount: $(df -h /app 2>/dev/null | tail -1)"
+        exit 1
+    fi
+else
+    echo "[entrypoint] ❌ ERROR: /app/data directory not found!"
+    echo "[entrypoint]    Container may be started from wrong directory"
+    exit 1
+fi
+
+echo "[entrypoint] Starting services (ENABLE_TTS_QUEUE_WORKER=${ENABLE_TTS_QUEUE_WORKER}, TTS_INTERVAL=${TTS_INTERVAL:-30}s, ENABLE_IMAGE_QUEUE_WORKER=${ENABLE_IMAGE_QUEUE_WORKER}, IMG_INTERVAL=${IMAGE_QUEUE_INTERVAL:-30}s, ENABLE_ZIMAGE_QUEUE_WORKER=${ENABLE_ZIMAGE_QUEUE_WORKER}, ZIMG_INTERVAL=${ZIMAGE_QUEUE_INTERVAL:-30}s, YTV2_API_ENABLED=${YTV2_API_ENABLED})"
 
 is_enabled() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -47,14 +68,14 @@ if [ "${ENABLE_TTS_QUEUE_WORKER}" = "1" ]; then
 fi
 
 # Optionally start the Image queue worker in watch mode
-if is_enabled "${ENABLE_IMAGE_QUEUE_WORKER}"; then
+if [ "${ENABLE_IMAGE_QUEUE_WORKER}" = "1" ]; then
   ${PYTHON_BIN} tools/drain_image_queue.py --watch --interval "${IMAGE_QUEUE_INTERVAL}" &
   IMG_WORKER_PID=$!
   echo "[entrypoint] Image queue worker PID=${IMG_WORKER_PID}"
 fi
 
 # Optionally start the Z-Image queue worker in watch mode
-if is_enabled "${ENABLE_ZIMAGE_QUEUE_WORKER}"; then
+if [ "${ENABLE_ZIMAGE_QUEUE_WORKER}" = "1" ]; then
   ${PYTHON_BIN} tools/drain_zimage_queue.py --watch --interval "${ZIMAGE_QUEUE_INTERVAL}" &
   ZIMG_WORKER_PID=$!
   echo "[entrypoint] Z-Image queue worker PID=${ZIMG_WORKER_PID}"

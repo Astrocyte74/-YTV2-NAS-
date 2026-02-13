@@ -1,11 +1,21 @@
 version: "3.9"
 
+# Project name prevents container name conflicts and ensures correct working directory
+name: ytv2-backend
+
 services:
   youtube-summarizer-bot:
     container_name: youtube-summarizer-bot
     # Use the last known-good, explicitly tagged image. Do not use :latest.
     image: ytv2-nas:clawdbot-integration
     restart: unless-stopped
+    # Health check to ensure data directory is properly mounted
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; exit(0 if Path('/app/data').exists() else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     # Keep secrets and provider keys in .env.nas (source of truth)
     env_file:
       - .env.nas

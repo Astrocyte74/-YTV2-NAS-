@@ -1,0 +1,400 @@
+#!/bin/bash
+# YTV2 Management CLI
+# Usage: ytv2 [status|stats|restart|logs|verify|help]
+
+set -euo pipefail
+
+# Color codes for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Project paths
+BACKEND_DIR="/Users/markdarby16/16projects/ytv2/backend"
+DASHBOARD_DIR="/Users/markdarby16/16projects/ytv2/dashboard16"
+POSTGRES_BIN="/usr/local/Cellar/postgresql@16/16.11_1/bin/psql"
+
+# Ports
+BACKEND_PORT="6452"
+DASHBOARD_PORT="10000"
+
+# Functions
+print_header() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  YTV2 Dashboard Management${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+print_section() {
+    echo -e "\n${BLUE}▶ $1${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}✓${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}✗${NC} $1"
+}
+
+check_container() {
+    local container=$1
+    docker ps --format '{{.Names}}' | grep -q "^${container}$"
+}
+
+get_container_status() {
+    local container=$1
+    if docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+        local status=$(docker inspect "$container" --format='{{.State.Status}}')
+        local health=$(docker inspect "$container" --format='{{.State.Health.Status}}' 2>/dev/null || echo "N/A")
+        echo "Running ($status${health:+, $health})"
+    else
+        echo "Stopped"
+    fi
+}
+
+show_status() {
+    print_header
+    print_section "Server Status"
+
+    # Backend
+    echo -n "Backend (youtube-summarizer-bot): "
+    if check_container "youtube-summarizer-bot"; then
+        print_success "$(get_container_status youtube-summarizer-bot)"
+        # Show mount info
+        local mount=$(docker inspect youtube-summarizer-bot --format='{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+        if [[ "$mount" == *"ytv2/backend"* ]]; then
+            print_success "Mount: $mount"
+        else
+            print_error "Mount: $mount (WRONG DIRECTORY!)"
+        fi
+    else
+        print_error "$(get_container_status youtube-summarizer-bot)"
+    fi
+
+    # Dashboard
+    echo -n "Dashboard (ytv2-dashboard):        "
+    if check_container "ytv2-dashboard"; then
+        print_success "$(get_container_status ytv2-dashboard)"
+    else
+        print_error "$(get_container_status ytv2-dashboard)"
+    fi
+
+    # PostgreSQL
+    echo -n "PostgreSQL:                        "
+    if brew services list | grep postgresql@16 | grep -q started; then
+        print_success "Running (Homebrew)"
+    else
+        print_error "Stopped"
+    fi
+
+    # Image Queue
+    echo -n "Image Queue:                       "
+    local pending=$(docker exec youtube-summarizer-bot ls /app/data/image_queue/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$pending" -gt 0 ]]; then
+        print_warning "$pending pending"
+        # Show oldest pending file
+        local oldest=$(docker exec youtube-summarizer-bot ls -t /app/data/image_queue/*.json 2>/dev/null | tail -1 | xargs -I {} basename {} .json 2>/dev/null)
+        echo "                    Oldest: ${CYAN}${oldest}${NC}"
+    else
+        print_success "Idle"
+    fi
+
+    # URLs
+    print_section "Access URLs"
+    echo "Dashboard:  ${GREEN}http://localhost:${DASHBOARD_PORT}${NC}"
+    echo "Tailscale:  ${GREEN}http://marks-macbook-pro-2.tail9e123c.ts.net:${DASHBOARD_PORT}/${NC}"
+    echo "Backend:    ${GREEN}http://localhost:${BACKEND_PORT}${NC}"
+
+    # Recent activity
+    print_section "Recent Activity (Last 5)"
+    docker logs youtube-summarizer-bot 2>&1 | grep -E "PROCESSING:|Syncing|Error" | tail -5 | sed 's/^/  /' || echo "  No recent activity"
+}
+
+show_stats() {
+    print_header
+    print_section "Dashboard Statistics"
+
+    # Get stats from PostgreSQL
+    if command -v "$POSTGRES_BIN" &> /dev/null; then
+        # Total content
+        local total=$($POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT COUNT(*) FROM content;" 2>/dev/null | tr -d ' ')
+        echo "Total Reports:     ${GREEN}${total:-0}${NC}"
+
+        # Recent additions (last 24h)
+        local recent=$($POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT COUNT(*) FROM content WHERE created_at > NOW() - INTERVAL '24 hours';" 2>/dev/null | tr -d ' ')
+        echo "Last 24h:          ${GREEN}${recent:-0}${NC}"
+
+        # By source type
+        local youtube=$($POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT COUNT(*) FROM content WHERE video_id LIKE 'yt_%';" 2>/dev/null | tr -d ' ')
+        local web=$($POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT COUNT(*) FROM content WHERE video_id LIKE 'web:%';" 2>/dev/null | tr -d ' ')
+        echo "  YouTube:        ${CYAN}${youtube:-0}${NC}"
+        echo "  Web Articles:   ${CYAN}${web:-0}${NC}"
+
+        # Latest entry
+        local latest=$($POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT title FROM content ORDER BY created_at DESC LIMIT 1;" 2>/dev/null)
+        echo -e "\nLatest Entry:"
+        echo "  ${CYAN}${latest:-No entries}${NC}"
+    else
+        print_error "PostgreSQL client not found"
+    fi
+
+    # Image queue status
+    print_section "Image Queue Status"
+    local pending=$(docker exec youtube-summarizer-bot ls /app/data/image_queue/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$pending" -gt 0 ]]; then
+        print_warning "$pending images pending generation"
+        docker exec youtube-summarizer-bot ls /app/data/image_queue/*.json 2>/dev/null | head -5 | sed 's|/app/data/image_queue/|  |'
+    else
+        print_success "No pending images"
+    fi
+
+    # TTS queue status
+    print_section "TTS Queue Status"
+    local tts_pending=$(docker exec youtube-summarizer-bot ls /app/data/tts_queue/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$tts_pending" -gt 0 ]]; then
+        print_warning "$tts_pending TTS jobs pending"
+    else
+        print_success "No pending TTS jobs"
+    fi
+
+    # Disk usage
+    print_section "Storage"
+    echo "Backend data:     $(du -sh $BACKEND_DIR/data 2>/dev/null | cut -f1)"
+    echo "Exports:          $(du -sh $BACKEND_DIR/exports 2>/dev/null | cut -f1)"
+    echo "Dashboard exports:$(du -sh $DASHBOARD_DIR/data/exports 2>/dev/null | cut -f1)"
+}
+
+restart_servers() {
+    print_header
+    print_section "Restarting YTV2 Servers"
+
+    local restart_backend=false
+    local restart_dashboard=false
+
+    # Check backend
+    if check_container "youtube-summarizer-bot"; then
+        print_warning "Stopping backend..."
+        cd "$BACKEND_DIR"
+        docker-compose stop
+        sleep 2
+        restart_backend=true
+    fi
+
+    # Check dashboard
+    if check_container "ytv2-dashboard"; then
+        print_warning "Stopping dashboard..."
+        cd "$DASHBOARD_DIR"
+        docker-compose stop
+        sleep 2
+        restart_dashboard=true
+    fi
+
+    # Start backend
+    if [[ "$restart_backend" == true ]]; then
+        print_section "Starting Backend"
+        cd "$BACKEND_DIR"
+        docker-compose up -d
+        sleep 5
+
+        if check_container "youtube-summarizer-bot"; then
+            # Verify mount
+            local mount=$(docker inspect youtube-summarizer-bot --format='{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+            if [[ "$mount" == *"ytv2/backend"* ]]; then
+                print_success "Backend started with correct mount"
+            else
+                print_error "Backend started but mount is WRONG: $mount"
+            fi
+        else
+            print_error "Backend failed to start"
+            return 1
+        fi
+    fi
+
+    # Start dashboard
+    if [[ "$restart_dashboard" == true ]]; then
+        print_section "Starting Dashboard"
+        cd "$DASHBOARD_DIR"
+        docker-compose up -d
+        sleep 5
+
+        if check_container "ytv2-dashboard"; then
+            print_success "Dashboard started"
+        else
+            print_error "Dashboard failed to start"
+            return 1
+        fi
+    fi
+
+    print_section "Verifying Services"
+    sleep 3
+
+    # Check backend health
+    if check_container "youtube-summarizer-bot"; then
+        local health=$(docker inspect youtube-summarizer-bot --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+        if [[ "$health" == "healthy" ]]; then
+            print_success "Backend is healthy"
+        else
+            print_warning "Backend health: $health"
+        fi
+    fi
+
+    # Check dashboard health
+    if check_container "ytv2-dashboard"; then
+        local health=$(docker inspect ytv2-dashboard --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+        if [[ "$health" == "healthy" ]]; then
+            print_success "Dashboard is healthy"
+        else
+            print_warning "Dashboard health: $health"
+        fi
+    fi
+
+    print_section "Access URLs"
+    echo "Dashboard:  ${GREEN}http://localhost:${DASHBOARD_PORT}${NC}"
+    echo "Tailscale:  ${GREEN}http://marks-macbook-pro-2.tail9e123c.ts.net:${DASHBOARD_PORT}/${NC}"
+}
+
+show_logs() {
+    local service=${1:-youtube-summarizer-bot}
+    local lines=${2:-50}
+
+    print_header
+    print_section "Recent Logs: $service"
+
+    if docker ps --format '{{.Names}}' | grep -q "^${service}$"; then
+        docker logs "$service" --tail "$lines" 2>&1 | grep -v "drain_image_queue\|drain_tts_queue\|summary image prompt" | tail -20
+    else
+        print_error "Service '$service' is not running"
+    fi
+}
+
+verify_setup() {
+    print_header
+    print_section "Verifying YTV2 Setup"
+
+    local all_good=true
+
+    # Check backend directory
+    if [[ -d "$BACKEND_DIR" ]]; then
+        print_success "Backend directory exists"
+    else
+        print_error "Backend directory not found: $BACKEND_DIR"
+        all_good=false
+    fi
+
+    # Check dashboard directory
+    if [[ -d "$DASHBOARD_DIR" ]]; then
+        print_success "Dashboard directory exists"
+    else
+        print_error "Dashboard directory not found: $DASHBOARD_DIR"
+        all_good=false
+    fi
+
+    # Check PostgreSQL
+    if brew services list | grep postgresql@16 | grep -q started; then
+        print_success "PostgreSQL is running"
+    else
+        print_error "PostgreSQL is not running"
+        all_good=false
+    fi
+
+    # Check backend container mount
+    if check_container "youtube-summarizer-bot"; then
+        local mount=$(docker inspect youtube-summarizer-bot --format='{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+        if [[ "$mount" == *"ytv2/backend"* ]]; then
+            print_success "Backend container has correct mount"
+        else
+            print_error "Backend container mount is WRONG: $mount"
+            echo "       Expected: ytv2/backend"
+            all_good=false
+        fi
+    else
+        print_warning "Backend container is not running"
+    fi
+
+    # Check dashboard container
+    if check_container "ytv2-dashboard"; then
+        print_success "Dashboard container is running"
+    else
+        print_warning "Dashboard container is not running"
+    fi
+
+    # Check connectivity
+    print_section "Connectivity Test"
+    if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${DASHBOARD_PORT}" | grep -q "200"; then
+        print_success "Dashboard is responding"
+    else
+        print_error "Dashboard is not responding"
+        all_good=false
+    fi
+
+    if [[ "$all_good" == true ]]; then
+        print_section "Result"
+        echo -e "${GREEN}✓ All checks passed!${NC}"
+    else
+        print_section "Result"
+        echo -e "${RED}✗ Some checks failed. Run 'ytv2 restart' to fix.${NC}"
+    fi
+}
+
+show_help() {
+    cat << EOF
+${CYAN}YTV2 Management CLI${NC}
+
+Usage: ytv2 [command] [options]
+
+Commands:
+  ${GREEN}status${NC}              Show server status and access URLs
+  ${GREEN}stats${NC}               Show dashboard statistics (reports, queues, storage)
+  ${GREEN}restart${NC}             Safely restart all servers (preserves URLs)
+  ${GREEN}logs [service] [n]${NC}  Show recent logs (default: backend, 50 lines)
+  ${GREEN}verify${NC}              Verify setup and detect issues
+  ${GREEN}help${NC}                Show this help message
+
+Examples:
+  ytv2 status              # Check if servers are running
+  ytv2 stats               # See dashboard statistics
+  ytv2 restart             # Restart all servers safely
+  ytv2 logs ytv2-dashboard # Show dashboard logs
+  ytv2 verify              # Verify everything is configured correctly
+
+Shortcut: You can use 'ytv2' without arguments to show status.
+EOF
+}
+
+# Main
+cd "$BACKEND_DIR" 2>/dev/null || true
+
+case "${1:-status}" in
+    status)
+        show_status
+        ;;
+    stats)
+        show_stats
+        ;;
+    restart)
+        restart_servers
+        ;;
+    logs)
+        show_logs "${2:-youtube-summarizer-bot}" "${3:-50}"
+        ;;
+    verify)
+        verify_setup
+        ;;
+    help|--help|-h)
+        show_help
+        ;;
+    *)
+        print_error "Unknown command: $1"
+        echo ""
+        show_help
+        exit 1
+        ;;
+esac

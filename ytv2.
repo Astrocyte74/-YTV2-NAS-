@@ -1,0 +1,418 @@
+#!/usr/bin/env bash
+# YTV2 Interactive Menu
+# Usage: ytv2. (with trailing period)
+
+# Color codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Project paths
+BACKEND_DIR="/Users/markdarby16/16projects/ytv2/backend"
+DASHBOARD_DIR="/Users/markdarby16/16projects/ytv2/dashboard16"
+POSTGRES_BIN="/usr/local/Cellar/postgresql@16/16.11_1/bin/psql"
+
+# Get stats functions
+get_total_reports() {
+    $POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT COUNT(*) FROM content;" 2>/dev/null | tr -d ' ' || echo "0"
+}
+
+get_recent_reports() {
+    $POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT COUNT(*) FROM content WHERE created_at > NOW() - INTERVAL '24 hours';" 2>/dev/null | tr -d ' ' || echo "0"
+}
+
+get_pending_images() {
+    docker exec youtube-summarizer-bot ls /app/data/image_queue/*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0"
+}
+
+get_pending_tts() {
+    docker exec youtube-summarizer-bot ls /app/data/tts_queue/*.json 2>/dev/null | wc -l | tr -d ' ' || echo "0"
+}
+
+show_header() {
+    clear
+    printf "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}\n"
+    printf "${CYAN}║${NC} ${BOLD}YTV2 Dashboard Management${NC}               ${CYAN}║${NC}\n"
+    printf "${CYAN}╠════════════════════════════════════════════════════════════╣${NC}\n"
+    printf "${CYAN}║${NC} ${MAGENTA}Press Ctrl+C to exit${NC}                                       ${CYAN}║${NC}\n"
+    printf "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}\n"
+    printf "\n"
+}
+
+show_status_panel() {
+    printf "${BLUE}┌──────────────────────────────────────────────────────────┐${NC}\n"
+    printf "${BLUE}│${NC} ${BOLD}STATUS${NC}                                                    ${BLUE}│${NC}\n"
+    printf "${BLUE}├──────────────────────────────────────────────────────────┤${NC}\n"
+
+    # Backend
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^youtube-summarizer-bot$"; then
+        health=$(docker inspect youtube-summarizer-bot --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+        if [ "$health" = "healthy" ]; then
+            printf "${BLUE}│${NC} Backend:   ${GREEN}● Running (healthy)${NC}                           ${BLUE}│${NC}\n"
+        else
+            printf "${BLUE}│${NC} Backend:   ${YELLOW}● Running ($health)${NC}                             ${BLUE}│${NC}\n"
+        fi
+    else
+        printf "${BLUE}│${NC} Backend:   ${RED}○ Stopped${NC}                                     ${BLUE}│${NC}\n"
+    fi
+
+    # Dashboard
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^ytv2-dashboard$"; then
+        health=$(docker inspect ytv2-dashboard --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+        if [ "$health" = "healthy" ]; then
+            printf "${BLUE}│${NC} Dashboard: ${GREEN}● Running (healthy)${NC}                           ${BLUE}│${NC}\n"
+        else
+            printf "${BLUE}│${NC} Dashboard: ${YELLOW}● Running ($health)${NC}                             ${BLUE}│${NC}\n"
+        fi
+    else
+        printf "${BLUE}│${NC} Dashboard: ${RED}○ Stopped${NC}                                     ${BLUE}│${NC}\n"
+    fi
+
+    # PostgreSQL
+    if brew services list 2>/dev/null | grep postgresql@16 | grep -q started; then
+        printf "${BLUE}│${NC} PostgreSQL: ${GREEN}● Running${NC}                                   ${BLUE}│${NC}\n"
+    else
+        printf "${BLUE}│${NC} PostgreSQL: ${RED}○ Stopped${NC}                                   ${BLUE}│${NC}\n"
+    fi
+
+    printf "${BLUE}└──────────────────────────────────────────────────────────┘${NC}\n"
+    printf "\n"
+}
+
+show_stats_panel() {
+    printf "${MAGENTA}┌──────────────────────────────────────────────────────────┐${NC}\n"
+    printf "${MAGENTA}│${NC} ${BOLD}STATS${NC}                                                     ${MAGENTA}│${NC}\n"
+    printf "${MAGENTA}├──────────────────────────────────────────────────────────┤${NC}\n"
+    printf "${MAGENTA}│${NC} Total Reports:    ${CYAN}$(get_total_reports)${NC}                                  ${MAGENTA}│${NC}\n"
+    printf "${MAGENTA}│${NC} Last 24h:         ${CYAN}$(get_recent_reports)${NC}                                  ${MAGENTA}│${NC}\n"
+    printf "${MAGENTA}│${NC} Pending Images:   ${CYAN}$(get_pending_images)${NC}                                  ${MAGENTA}│${NC}\n"
+    printf "${MAGENTA}│${NC} Pending TTS:      ${CYAN}$(get_pending_tts)${NC}                                  ${MAGENTA}│${NC}\n"
+    printf "${MAGENTA}└──────────────────────────────────────────────────────────┘${NC}\n"
+    printf "\n"
+}
+
+show_urls_panel() {
+    printf "${GREEN}┌──────────────────────────────────────────────────────────┐${NC}\n"
+    printf "${GREEN}│${NC} ${BOLD}ACCESS URLS${NC}                                                ${GREEN}│${NC}\n"
+    printf "${GREEN}├──────────────────────────────────────────────────────────┤${NC}\n"
+    printf "${GREEN}│${NC} Dashboard:  ${CYAN}http://localhost:10000${NC}                   ${GREEN}│${NC}\n"
+    printf "${GREEN}│${NC} Tailscale:  ${CYAN}http://marks-macbook-pro-2.tail9e123c.ts.net:10000/${NC}${GREEN}│${NC}\n"
+    printf "${GREEN}│${NC} Backend:    ${CYAN}http://localhost:6452${NC}                       ${GREEN}│${NC}\n"
+    printf "${GREEN}└──────────────────────────────────────────────────────────┘${NC}\n"
+    printf "\n"
+}
+
+show_menu() {
+    printf "${BOLD}┌──────────────────────────────────────────────────────────┐${NC}\n"
+    printf "${BOLD}│${NC} ${BOLD}ACTIONS${NC}                                                    ${BOLD}│${NC}\n"
+    printf "${BOLD}├──────────────────────────────────────────────────────────┤${NC}\n"
+    printf "${BOLD}│${NC} [${CYAN}1${NC}] Show Status          [${CYAN}6${NC}] Dashboard Logs        ${BOLD}│${NC}\n"
+    printf "${BOLD}│${NC} [${CYAN}2${NC}] Show Statistics      [${CYAN}7${NC}] Backend Logs          ${BOLD}│${NC}\n"
+    printf "${BOLD}│${NC} [${CYAN}3${NC}] Verify Setup        [${CYAN}8${NC}] Restart Servers       ${BOLD}│${NC}\n"
+    printf "${BOLD}│${NC} [${CYAN}4${NC}] Open Dashboard       [${CYAN}9${NC}] Container Health       ${BOLD}│${NC}\n"
+    printf "${BOLD}│${NC} [${CYAN}5${NC}] Recent Activity      [${CYAN}0${NC}] Refresh               ${BOLD}│${NC}\n"
+    printf "${BOLD}│${NC} [${CYAN}q${NC}] Quit                                                      ${BOLD}│${NC}\n"
+    printf "${BOLD}└──────────────────────────────────────────────────────────┘${NC}\n"
+    printf "\n"
+    printf "${CYAN}Choose an option: ${NC}"
+}
+
+show_status_detail() {
+    show_header
+    show_status_panel
+
+    printf "${BOLD}Detailed Status:${NC}\n"
+    printf "\n"
+
+    # Mount check
+    mount=$(docker inspect youtube-summarizer-bot --format='{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+    case "$mount" in
+        *ytv2/backend*)
+            printf "${GREEN}✓${NC} Backend mount: $mount\n"
+            ;;
+        *)
+            printf "${RED}✗${NC} Backend mount: $mount ${RED}(WRONG!)${NC}\n"
+            ;;
+    esac
+
+    # Recent activity
+    printf "\n"
+    printf "${BOLD}Recent Activity:${NC}\n"
+    docker logs youtube-summarizer-bot 2>&1 | grep -E "PROCESSING:|Syncing|Error" | tail -5 | sed 's/^/  /' || printf "  No recent activity\n"
+
+    printf "\n"
+    printf "${CYAN}Press Enter to return to menu...${NC}\n"
+    read
+}
+
+show_statistics() {
+    show_header
+    show_stats_panel
+
+    printf "${BOLD}Storage:${NC}\n"
+    printf "  Backend data:     $(du -sh $BACKEND_DIR/data 2>/dev/null | cut -f1)\n"
+    printf "  Exports:          $(du -sh $BACKEND_DIR/exports 2>/dev/null | cut -f1)\n"
+    printf "  Dashboard:        $(du -sh $DASHBOARD_DIR/data/exports 2>/dev/null | cut -f1)\n"
+
+    printf "\n"
+    printf "${BOLD}Latest Entry:${NC}\n"
+    latest=$($POSTGRES_BIN -U ytv2 -d ytv2 -h localhost -t -c "SELECT title FROM content ORDER BY created_at DESC LIMIT 1;" 2>/dev/null)
+    printf "  ${CYAN}${latest:-No entries}${NC}\n"
+
+    printf "\n"
+    printf "${CYAN}Press Enter to return to menu...${NC}\n"
+    read
+}
+
+verify_setup() {
+    show_header
+
+    printf "${BOLD}Verifying YTV2 Setup...${NC}\n"
+    printf "\n"
+
+    all_good="true"
+
+    # Check directories
+    printf "Backend directory: "
+    if [ -d "$BACKEND_DIR" ]; then
+        printf "${GREEN}✓${NC}\n"
+    else
+        printf "${RED}✗${NC}\n"
+        all_good="false"
+    fi
+
+    printf "Dashboard directory: "
+    if [ -d "$DASHBOARD_DIR" ]; then
+        printf "${GREEN}✓${NC}\n"
+    else
+        printf "${RED}✗${NC}\n"
+        all_good="false"
+    fi
+
+    printf "PostgreSQL: "
+    if brew services list 2>/dev/null | grep postgresql@16 | grep -q started; then
+        printf "${GREEN}✓${NC}\n"
+    else
+        printf "${RED}✗${NC}\n"
+        all_good="false"
+    fi
+
+    printf "Backend mount: "
+    mount=$(docker inspect youtube-summarizer-bot --format='{{range .Mounts}}{{if eq .Destination "/app/data"}}{{.Source}}{{end}}{{end}}' 2>/dev/null)
+    case "$mount" in
+        *ytv2/backend*)
+            printf "${GREEN}✓${NC}\n"
+            ;;
+        *)
+            printf "${RED}✗ (WRONG: $mount)${NC}\n"
+            all_good="false"
+            ;;
+    esac
+
+    printf "Dashboard responding: "
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:10000" 2>/dev/null)
+    case "$http_code" in
+        200|302)
+            printf "${GREEN}✓${NC}\n"
+            ;;
+        *)
+            printf "${RED}✗${NC}\n"
+            all_good="false"
+            ;;
+    esac
+
+    printf "\n"
+    if [ "$all_good" = "true" ]; then
+        printf "${GREEN}✓ All checks passed!${NC}\n"
+    else
+        printf "${RED}✗ Some checks failed. Try 'Restart Servers'.${NC}\n"
+    fi
+
+    printf "\n"
+    printf "${CYAN}Press Enter to return to menu...${NC}\n"
+    read
+}
+
+open_dashboard() {
+    open "http://localhost:10000"
+    printf "${GREEN}Opened dashboard in browser...${NC}\n"
+    sleep 1
+}
+
+show_logs() {
+    service=$1
+    show_header
+
+    printf "${BOLD}Recent Logs: $service${NC}\n"
+    printf "\n"
+
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${service}$"; then
+        docker logs "$service" --tail 30 2>&1 | grep -v "drain_image_queue\|drain_tts_queue\|summary image prompt" || printf "No logs\n"
+    else
+        printf "${RED}Service '$service' is not running${NC}\n"
+    fi
+
+    printf "\n"
+    printf "${CYAN}Press Enter to return to menu...${NC}\n"
+    read
+}
+
+show_activity() {
+    show_header
+
+    printf "${BOLD}Recent Activity (Last 20)${NC}\n"
+    printf "\n"
+
+    docker logs youtube-summarizer-bot 2>&1 | grep -E "PROCESSING:|Syncing|Exported|Error|Telegram" | tail -20 | sed 's/^/  /' || printf "No recent activity\n"
+
+    printf "\n"
+    printf "${CYAN}Press Enter to return to menu...${NC}\n"
+    read
+}
+
+show_health() {
+    show_header
+
+    printf "${BOLD}Container Health Details${NC}\n"
+    printf "\n"
+
+    printf "${CYAN}Backend (youtube-summarizer-bot):${NC}\n"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^youtube-summarizer-bot$"; then
+        status=$(docker inspect youtube-summarizer-bot --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
+        health=$(docker inspect youtube-summarizer-bot --format='{{.State.Health.Status}}' 2>/dev/null || echo "N/A")
+        restarts=$(docker inspect youtube-summarizer-bot --format='{{.RestartCount}}' 2>/dev/null || echo "0")
+        started=$(docker inspect youtube-summarizer-bot --format='{{.State.StartedAt}}' 2>/dev/null || echo "unknown")
+
+        printf "  Status:   $status\n"
+        printf "  Health:   $health\n"
+        printf "  Restarts: $restarts\n"
+        printf "  Started:  $started\n"
+    else
+        printf "  ${RED}Not running${NC}\n"
+    fi
+
+    printf "\n"
+    printf "${CYAN}Dashboard (ytv2-dashboard):${NC}\n"
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^ytv2-dashboard$"; then
+        status=$(docker inspect ytv2-dashboard --format='{{.State.Status}}' 2>/dev/null || echo "unknown")
+        health=$(docker inspect ytv2-dashboard --format='{{.State.Health.Status}}' 2>/dev/null || echo "N/A")
+        restarts=$(docker inspect ytv2-dashboard --format='{{.RestartCount}}' 2>/dev/null || echo "0")
+        started=$(docker inspect ytv2-dashboard --format='{{.State.StartedAt}}' 2>/dev/null || echo "unknown")
+
+        printf "  Status:   $status\n"
+        printf "  Health:   $health\n"
+        printf "  Restarts: $restarts\n"
+        printf "  Started:  $started\n"
+    else
+        printf "  ${RED}Not running${NC}\n"
+    fi
+
+    printf "\n"
+    printf "${CYAN}Press Enter to return to menu...${NC}\n"
+    read
+}
+
+restart_servers() {
+    show_header
+
+    printf "${YELLOW}This will restart both servers.${NC}\n"
+    printf "${CYAN}Continue? (y/N): ${NC}"
+    read -n 1 confirm
+    printf "\n"
+
+    case "$confirm" in
+        y|Y)
+            ;;
+        *)
+            printf "Cancelled.\n"
+            sleep 1
+            return
+            ;;
+    esac
+
+    printf "\n"
+    printf "${BOLD}Restarting YTV2 Servers...${NC}\n"
+    printf "\n"
+
+    # Stop backend
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^youtube-summarizer-bot$"; then
+        printf "Stopping backend... "
+        cd "$BACKEND_DIR"
+        docker-compose stop > /dev/null 2>&1
+        printf "${GREEN}Done${NC}\n"
+        sleep 2
+    fi
+
+    # Stop dashboard
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^ytv2-dashboard$"; then
+        printf "Stopping dashboard... "
+        cd "$DASHBOARD_DIR"
+        docker-compose stop > /dev/null 2>&1
+        printf "${GREEN}Done${NC}\n"
+        sleep 2
+    fi
+
+    # Start backend
+    printf "Starting backend... "
+    cd "$BACKEND_DIR"
+    docker-compose up -d > /dev/null 2>&1
+    sleep 3
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^youtube-summarizer-bot$"; then
+        printf "${GREEN}Done${NC}\n"
+    else
+        printf "${RED}Failed${NC}\n"
+    fi
+
+    # Start dashboard
+    printf "Starting dashboard... "
+    cd "$DASHBOARD_DIR"
+    docker-compose up -d > /dev/null 2>&1
+    sleep 3
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^ytv2-dashboard$"; then
+        printf "${GREEN}Done${NC}\n"
+    else
+        printf "${RED}Failed${NC}\n"
+    fi
+
+    printf "\n"
+    printf "${GREEN}✓ Servers restarted!${NC}\n"
+    printf "\n"
+    printf "${CYAN}Press Enter to continue...${NC}\n"
+    read
+}
+
+# Main loop
+main() {
+    while true; do
+        show_header
+        show_status_panel
+        show_stats_panel
+        show_urls_panel
+        show_menu
+
+        read -n 1 choice
+        printf "\n"
+
+        case $choice in
+            1) show_status_detail ;;
+            2) show_statistics ;;
+            3) verify_setup ;;
+            4) open_dashboard ;;
+            5) show_activity ;;
+            6) show_logs "ytv2-dashboard" ;;
+            7) show_logs "youtube-summarizer-bot" ;;
+            8) restart_servers ;;
+            9) show_health ;;
+            0) continue ;;
+            q|Q) exit 0 ;;
+            *) printf "${RED}Invalid option${NC}\n"; sleep 1 ;;
+        esac
+    done
+}
+
+main
