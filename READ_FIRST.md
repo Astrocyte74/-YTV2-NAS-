@@ -1,12 +1,48 @@
 # READ FIRST
 
-YTV2-NAS is the processing side of the YTV2 hybrid system. It downloads YouTube/Reddit content, cleans general web articles, generates summaries + TTS audio, and writes everything directly into the dashboard’s Postgres database.
+YTV2 is a YouTube summarization system running locally on i9 Mac with remote access via Tailscale.
 
-To get oriented quickly:
+## Current Architecture
 
-- `README.md` – architecture overview, environment setup, first-run checklist, audio pipeline.
-- `POSTGRES_UPSERT_GUIDE.md` – schema DDL, UPSERT shapes, role grants.
-- `docs/README.md` – operational notes (NAS vs Render responsibilities, deployment tips).
-- `tools/README.md` – scripts for schema bootstrap, backfills, diagnostics, and cleanup.
+| Component | Location | Access |
+|-----------|----------|--------|
+| **Backend** | i9 Mac Docker | `localhost:6452` |
+| **Dashboard** | i9 Mac Docker | `localhost:10000` / Tailscale |
+| **PostgreSQL** | i9 Mac (Homebrew) | `host.docker.internal:5432` |
+| **Telegram Bot** | i9 Mac Docker | @Astro74Bot |
+| **TTS/Images** | M4 Mac (DrawThings) | `100.101.80.13:7860` (Tailscale) |
 
-With those four docs, you’ll know how the NAS ingests to Postgres, how audio lands on Render, and which tools to use for setup and troubleshooting.
+## Quick Start
+
+```bash
+# Start/restart services
+cd /Users/markdarby16/16projects/ytv2/backend
+docker-compose down && docker-compose up -d
+
+# Check logs
+docker logs youtube-summarizer-bot --tail 50 -f
+
+# Status via CLI
+./ytv2 status
+```
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `.env.nas` | All environment variables (source of truth) |
+| `docker-compose.yml` | Docker configuration |
+| `telegram_bot.py` | Main bot entry point |
+| `modules/services/` | Service modules (TTS, images, LLM) |
+
+## Remote Access
+
+- **Tailscale URL**: `http://marks-macbook-pro-2.tail9e123c.ts.net:10000`
+- **Dashboard**: Port 10000
+- **Backend API**: Port 6452
+
+## Documentation
+
+- `README.md` - Full documentation
+- `docs/` - Additional guides
+- `tools/README.md` - Diagnostic scripts

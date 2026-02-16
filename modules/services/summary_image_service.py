@@ -26,6 +26,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from modules.services import draw_service
+from modules.services import auto1111_service
+from modules.services import flux2_service
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +60,7 @@ def _csv_list_env(name: str, default: str = "") -> List[str]:
 def _summary_image_providers() -> List[str]:
     """
     Return provider preference order for summary images.
-    Supported providers: drawthings, zimage
+    Supported providers: drawthings, flux2, auto1111, zimage
     """
     raw = _csv_list_env("SUMMARY_IMAGE_PROVIDERS", "drawthings")
     normalized: List[str] = []
@@ -66,6 +68,10 @@ def _summary_image_providers() -> List[str]:
         key = entry.strip().lower()
         if key in {"draw", "drawthings", "hub"}:
             key = "drawthings"
+        elif key in {"flux2", "flux.2", "flux"}:
+            key = "flux2"
+        elif key in {"auto1111", "automatic1111", "a1111", "auto"}:
+            key = "auto1111"
         elif key in {"zimage", "z-image"}:
             key = "zimage"
         else:
@@ -650,9 +656,10 @@ async def maybe_generate_summary_image(
     freestyle_mode = mode_key in {"ai2", "freestyle", "ai2_freestyle", "free"}
     image_mode = "ai2" if freestyle_mode else "ai1"
 
-    # Provider selection (priority list): drawthings,zimage
+    # Provider selection (priority list): drawthings,auto1111,zimage
     providers = _summary_image_providers()
     tts_base = (os.getenv("TTSHUB_API_BASE") or "").strip()
+    auto1111_base = (os.getenv("AUTOMATIC1111_BASE_URL") or "").strip()
     zimage_base = (os.getenv("ZIMAGE_BASE_URL") or "").strip()
 
     selected_provider: Optional[str] = None
@@ -691,6 +698,38 @@ async def maybe_generate_summary_image(
                 selected_provider = "zimage"
                 break
             probe_errors.append("zimage:offline")
+        elif provider == "auto1111":
+            if not auto1111_base:
+                continue
+            any_configured = True
+            if bypass_health:
+                selected_provider = "auto1111"
+                break
+            try:
+                health = await auto1111_service.fetch_auto1111_health(auto1111_base, ttl=health_ttl)
+                if bool((health or {}).get("reachable", False)):
+                    selected_provider = "auto1111"
+                    break
+                probe_errors.append("auto1111:not_reachable")
+            except Exception as exc:
+                probe_errors.append(f"auto1111:{type(exc).__name__}")
+        elif provider == "flux2":
+            # Flux.2 via OpenRouter (paid API, gated by FLUX2_ENABLED)
+            if not flux2_service.is_enabled():
+                logger.debug("flux2 provider skipped: FLUX2_ENABLED not set")
+                continue
+            any_configured = True
+            if bypass_health:
+                selected_provider = "flux2"
+                break
+            try:
+                health = await flux2_service.fetch_flux2_health()
+                if bool((health or {}).get("reachable", False)):
+                    selected_provider = "flux2"
+                    break
+                probe_errors.append("flux2:not_configured")
+            except Exception as exc:
+                probe_errors.append(f"flux2:{type(exc).__name__}")
 
     if not selected_provider:
         if not any_configured:
@@ -820,6 +859,28 @@ async def maybe_generate_summary_image(
                 height=template.height,
                 style_preset=_map_style_preset_to_zimage(template.style_preset),
                 recipe_id=recipe_id,
+            )
+        elif selected_provider == "auto1111":
+            # Use Automatic1111 (i9 Mac fallback)
+            logger.info("Using Automatic1111 provider (i9 Mac fallback)")
+
+            generation = await auto1111_service.generate_image(
+                auto1111_base,
+                prompt,
+                width=template.width,
+                height=template.height,
+                steps=int(os.getenv("AUTO1111_STEPS", "8") or "8"),
+                cfg_scale=float(os.getenv("AUTO1111_CFG_SCALE", "7.5") or "7.5"),
+                model=os.getenv("AUTO1111_MODEL", "sd_xl_base_1.0.safetensors"),
+            )
+        elif selected_provider == "flux2":
+            # Use Flux.2 Klein 4B via OpenRouter (paid API, ~$0.014/image)
+            logger.info("Using Flux.2 Klein 4B provider (OpenRouter API, ~$0.014/image)")
+
+            generation = await flux2_service.generate_image(
+                prompt,
+                width=template.width,
+                height=template.height,
             )
         else:
             generation = await draw_service.generate_image(

@@ -1,85 +1,206 @@
-# NAS ↔ Render Integration (Postgres + Uploads)
+# Local Integration (i9 Mac)
 
-This document summarizes how the NAS syncs summaries and audio to the Render‑hosted dashboard and what env vars are required.
+This document describes the current local deployment architecture.
 
-Overview
-- Content writes: direct PostgreSQL upsert from NAS
-- Audio/Image uploads: authenticated multipart uploads to the dashboard
-- Read APIs: `/api/reports`, `/api/filters`, `/<id>.json` enriched with audio variants
+> **Note:** This was previously NAS_INTEGRATION.md for Render deployment. The system now runs locally on i9 Mac.
 
-Environment Variables
-- NAS:
-  - `DATABASE_URL` – Postgres DSN used by the NAS for direct content upserts
-  - `RENDER_DASHBOARD_URL` – e.g., https://ytv2-dashboard-postgres.onrender.com
-  - `INGEST_TOKEN` – copy from Render service env; used for private ingest
-  - `SYNC_SECRET` – optional bearer token; either header works for uploads
-  - Optional: `DUAL_SYNC`, `POSTGRES_ONLY` (we run `POSTGRES_ONLY=true`)
-  - Optional: `AUDIO_PUBLIC_BASE` – not required; use HTTP uploads instead
-- Render (dashboard):
-  - `DATABASE_URL_POSTGRES_NEW` – Postgres DSN
-  - `INGEST_TOKEN` – shared secret for NAS ingest
+## Architecture
 
-Endpoints (Render)
-- JSON read:
-  - `GET /api/reports` — list view; enriched `summary_variants`
-  - `GET /<video_id>.json` — single view; enriched `summary_variants`, `has_audio`
-- Uploads (multipart):
-  - `POST /api/upload-audio` — primary audio upload (accepts `Authorization: Bearer` or `X-INGEST-TOKEN`)
-  - `POST /api/upload-image` — summary image upload (same auth)
-  - Fallback: `POST /ingest/audio` — legacy ingest
-- Health checks:
-  - `GET /health/ingest` → `{status:'ok', token_set:true, pg_dsn_set:true}`
-  - `GET /api/reports?size=1` → sanity read
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                           i9 Mac                                │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                    Docker Containers                     │   │
+│  │  ┌─────────────────┐  ┌─────────────────────────────┐   │   │
+│  │  │ Backend Bot     │  │ Dashboard                   │   │   │
+│  │  │ Port 6452/6453  │  │ Port 10000                  │   │   │
+│  │  │ - Telegram Bot  │  │ - Web Interface             │   │   │
+│  │  │ - Processing    │  │ - Audio Playback            │   │   │
+│  │  └────────┬────────┘  └──────────────┬──────────────┘   │   │
+│  │           │                          │                   │   │
+│  │           └────────────┬─────────────┘                   │   │
+│  │                        │                                 │   │
+│  │              host.docker.internal                        │   │
+│  └────────────────────────┼─────────────────────────────────┘   │
+│                           │                                     │
+│  ┌────────────────────────┴─────────────────────────────────┐   │
+│  │              PostgreSQL (Homebrew)                       │   │
+│  │              Port 5432                                   │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│                                                                 │
+│                    ┌──────────────────┐                         │
+│                    │    Tailscale     │                         │
+│                    └────────┬─────────┘                         │
+└─────────────────────────────┼───────────────────────────────────┘
+                              │
+                    ┌─────────┴─────────┐
+                    │   Tailscale VPN   │
+                    └─────────┬─────────┘
+                              │
+┌─────────────────────────────┼───────────────────────────────────┐
+│                     M4 Mac   │                                   │
+│                    (Remote)  │                                   │
+│  ┌──────────────────────────┴──────────────────────────────┐   │
+│  │                    TTSHUB API                            │   │
+│  │                    Port 7860                             │   │
+│  │  ┌─────────────────┐  ┌─────────────────────────────┐   │   │
+│  │  │ DrawThings      │  │ TTS Services                │   │   │
+│  │  │ Flux.1 Schnell  │  │ - Audio Generation          │   │   │
+│  │  │ Image Gen       │  │ - Voice Synthesis           │   │   │
+│  │  └─────────────────┘  └─────────────────────────────┘   │   │
+│  │                                                         │   │
+│  │  IP: 100.101.80.13 (Tailscale)                         │   │
+│  └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-Audio Upload Strategy
-- Preferred: Direct Postgres for metadata + `POST /api/upload-audio` for the MP3.
-- Why: The dashboard serves audio from its filesystem; uploads ensure the file exists and then JSON enrichment pulls `audio_url`/`duration` from `content`.
-- Coordinator behavior (NAS):
-  1) Upload via `/api/upload-audio` with either `Authorization: Bearer $SYNC_SECRET` or `X-INGEST-TOKEN: $INGEST_TOKEN`.
-  2) On success, update Postgres: `has_audio=true`, `media.audio_url`, `media_metadata.mp3_duration_seconds`, `audio_version`.
-  3) Fallback: `/ingest/audio` is available if needed.
+## Services
 
-Authoritative fields written by NAS (after 200 OK upload)
-- `content.has_audio = true`
-- `content.media.audio_url = "/exports/audio/<filename>.mp3"` (root‑relative)
-- `content.media_metadata.mp3_duration_seconds = <int>` (ffprobe)
-- Optional: `content.audio_version = <unix_ts>` (dashboard appends `?v=`)
+### i9 Mac (Local Host)
 
-JSON semantics
-- Prefer omission over null when a field is unknown/unavailable (e.g., omit `audio_url` and `mp3_duration_seconds` if upload fails).
+| Service | Port | Description |
+|---------|------|-------------|
+| Backend Bot | 6452 | Telegram bot, video processing |
+| Backend API | 6453 | YTV2 API server (Clawdbot) |
+| Dashboard | 10000 | Web interface |
+| PostgreSQL | 5432 | Database |
 
-Typical Logs
-- Direct PG content upsert:
-  - `[SYNC] target=postgres ... op=report status=ok upserted=True`
-- Skipping DB audio variant (expected):
-  - `AUDIO_PUBLIC_BASE not set; skipping DB audio variant (HTTP ingest fallback may upload the MP3).`
-- HTTP ingest fallback for MP3:
-  - `[SYNC] target=postgres ... op=audio status=fallback_http_ingest`
-  - `✅ PostgreSQL audio uploaded: <video_id> -> /exports/audio/<sanitized>.mp3`
-  - `[SYNC] ... op=audio status=ok (http)`
+### M4 Mac (Remote via Tailscale)
 
-Troubleshooting (MP3 not playable)
-1) Verify health: `curl -sS "$RENDER_DASHBOARD_URL/health/ingest" | jq`
-   - Expect `token_set:true`, `pg_dsn_set:true`.
-2) Check the returned URL: `curl -I "$RENDER_DASHBOARD_URL/exports/audio/<filename>.mp3?v=<audio_version>"`
-   - Expect `200` with non‑zero `Content-Length`. If `404` or size 0, re‑upload.
-3) Look for coordinator logs:
-   - `status=fallback_http_ingest` followed by `status=ok (http)` indicates success.
-4) Disk full on Render produces 500s and zero‑byte artifacts; increase `/app/data` or clean old files. Server writes atomically to avoid partial files.
+| Service | Port | Description |
+|---------|------|-------------|
+| TTSHUB API | 7860 | TTS and image generation |
+| DrawThings | - | Flux.1 Schnell image generation |
 
-Notes
-- Upload responses include `public_url`/`relative_path` and `size`; prefer server‑returned paths.
-- The server sanitizes filenames and keeps DB `video_id` stable.
-- Send consistent `video_id` between content and audio calls.
+## Configuration
 
-## Admin & Health (Optional)
+### Environment Variables
 
-Admin endpoints (gated with `DEBUG_TOKEN` on the dashboard; use `DASHBOARD_DEBUG_TOKEN` on NAS):
-- `GET /api/version` (no auth) — deploy metadata
-- `GET /api/health/storage` (`Authorization: Bearer <token>`) — `{ total_bytes, used_bytes, free_bytes, used_pct }`; returns 503 at ≥98% to signal critical
-- `GET /api/debug/content?video_id=<id>` (Bearer token) — raw `content` row for ops
+```bash
+# Database
+DATABASE_URL=postgresql://ytv2:password@host.docker.internal:5432/ytv2
+POSTGRES_ONLY=true
 
-NAS usage:
-- `/status` shows version + storage health when `DASHBOARD_DEBUG_TOKEN` is set
-- Optional pre‑upload backoff when `used_pct ≥ DASHBOARD_STORAGE_BLOCK_PCT` (default 98%)
-- Early chat gate: warn at ≥90/≥95% and block new processing at ≥99%
+# Dashboard
+DASHBOARD_URL=http://marks-macbook-pro-2.tail9e123c.ts.net:10000
+
+# M4 Mac Services (via Tailscale)
+TTSHUB_API_BASE=http://100.101.80.13:7860/api
+
+# Image Generation
+SUMMARY_IMAGE_PROVIDERS=drawthings,zimage
+SUMMARY_IMAGE_ENABLED=1
+
+# Flux.2 API (optional, paid fallback)
+FLUX2_ENABLED=0
+```
+
+### Docker Networking
+
+The backend container connects to:
+- **PostgreSQL**: `host.docker.internal:5432`
+- **M4 Mac**: `100.101.80.13:7860` (Tailscale IP)
+
+## Database
+
+### PostgreSQL Setup (Homebrew)
+
+```bash
+# Install
+brew install postgresql@14
+brew services start postgresql@14
+
+# Create database
+createdb ytv2
+psql ytv2 -c "CREATE USER ytv2 WITH PASSWORD 'password';"
+psql ytv2 -c "GRANT ALL PRIVILEGES ON DATABASE ytv2 TO ytv2;"
+
+# Schema setup
+python tools/setup_postgres_schema.py
+```
+
+### Connection Test
+
+```bash
+python tools/test_postgres_connect.py
+```
+
+## Image Generation
+
+### DrawThings (M4 Mac) - Primary
+
+- Model: Flux.1 Schnell
+- Steps: 6
+- Resolution: 384x384
+- Quality: Excellent (9/10)
+- Cost: Free
+
+### Flux.2 Klein 4B (OpenRouter) - Optional
+
+- Cost: $0.014/image
+- Enable: `FLUX2_ENABLED=1`
+- Add `flux2` to `SUMMARY_IMAGE_PROVIDERS`
+
+### Auto1111 (i9 Mac) - Disabled
+
+SDXL on CPU produces poor quality images (2/10). Not recommended.
+
+## Remote Access
+
+### Tailscale Setup
+
+1. Install Tailscale on both Macs
+2. Ensure both are connected to same tailnet
+3. Verify connectivity: `ping 100.101.80.13`
+
+### Access URLs
+
+| From | To | URL |
+|------|-----|-----|
+| M4 Mac | Dashboard | `http://marks-macbook-pro-2.tail9e123c.ts.net:10000` |
+| i9 Mac | M4 Mac TTSHUB | `http://100.101.80.13:7860/api` |
+| iPhone/iPad | Dashboard | Same Tailscale URL |
+
+## Troubleshooting
+
+### M4 Mac Unreachable
+
+```bash
+# Check Tailscale
+tailscale status
+
+# Test connectivity
+curl http://100.101.80.13:7860/api/health
+```
+
+### Database Connection Failed
+
+```bash
+# Check PostgreSQL
+brew services list
+brew services restart postgresql@14
+
+# Test from container
+docker exec youtube-summarizer-bot python -c "
+import os
+import psycopg2
+conn = psycopg2.connect(os.getenv('DATABASE_URL'))
+print('Connected!')
+"
+```
+
+### Image Generation Failing
+
+1. Check M4 Mac is online and Tailscale connected
+2. Verify TTSHUB is running on M4 Mac
+3. Check health: `curl http://100.101.80.13:7860/api/health`
+
+## Migration History
+
+| Date | Change |
+|------|--------|
+| Feb 2026 | Migrated from NAS to i9 Mac local |
+| Feb 2026 | Added Flux.2 Klein support |
+| Feb 2026 | Disabled Auto1111 (poor quality) |
+| Sep 2025 | Migrated to PostgreSQL-only |

@@ -86,10 +86,10 @@ async def process_job(path: Path) -> bool:
     import os as _os
 
     prev_suppress = _os.environ.get("SUMMARY_IMAGE_QUEUE_SUPPRESS")
-    prev_health = _os.environ.get("SUMMARY_IMAGE_HEALTH_BYPASS")
     _os.environ["SUMMARY_IMAGE_QUEUE_SUPPRESS"] = "1"
-    # Skip repeated per-job health probes; a single preflight is done in drain_once.
-    _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = "1"
+    # Note: We don't set SUMMARY_IMAGE_HEALTH_BYPASS=1 anymore because
+    # we need per-job health checks to properly fallback to auto1111 when drawthings is offline.
+    # The health check caching (TTL) handles efficiency.
 
     existing_url: Optional[str] = None
     try:
@@ -299,10 +299,6 @@ async def process_job(path: Path) -> bool:
             _os.environ.pop("SUMMARY_IMAGE_QUEUE_SUPPRESS", None)
         else:
             _os.environ["SUMMARY_IMAGE_QUEUE_SUPPRESS"] = prev_suppress
-        if prev_health is None:
-            _os.environ.pop("SUMMARY_IMAGE_HEALTH_BYPASS", None)
-        else:
-            _os.environ["SUMMARY_IMAGE_HEALTH_BYPASS"] = prev_health
 
 
 def _sanitize_id(value: str) -> str:
@@ -426,33 +422,57 @@ def drain_once(limit: Optional[int] = None) -> int:
     try:
         import os as _os
         from modules.services import draw_service as _ds
+        from modules.services import auto1111_service as _a1111
         providers = (_os.getenv("SUMMARY_IMAGE_PROVIDERS") or "drawthings").strip()
         provider_list = [p.strip().lower() for p in providers.split(",") if p.strip()]
         ok = False
         any_configured = False
         for provider in provider_list:
-            if provider in {"draw", "drawthings", "hub"}:
-                base = _os.getenv("TTSHUB_API_BASE") or ""
-                if not base:
-                    continue
-                any_configured = True
-                health = asyncio.run(_ds.fetch_drawthings_health(base, ttl=0, force_refresh=True))
-                if bool((health or {}).get("reachable", False)):
-                    ok = True
-                    break
-            elif provider in {"zimage", "z-image"}:
-                base = (_os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
-                if not base:
-                    continue
-                any_configured = True
-                try:
-                    import requests as _requests
-                    resp = _requests.get(f"{base}/health", timeout=4)
-                    if resp.status_code == 200:
+            try:
+                if provider in {"draw", "drawthings", "hub"}:
+                    base = _os.getenv("TTSHUB_API_BASE") or ""
+                    if not base:
+                        continue
+                    any_configured = True
+                    health = asyncio.run(_ds.fetch_drawthings_health(base, ttl=0, force_refresh=True))
+                    if bool((health or {}).get("reachable", False)):
                         ok = True
                         break
-                except Exception:
-                    pass
+                elif provider in {"auto1111", "automatic1111", "a1111", "auto"}:
+                    base = (_os.getenv("AUTOMATIC1111_BASE_URL") or "").strip().rstrip("/")
+                    if not base:
+                        continue
+                    any_configured = True
+                    health = asyncio.run(_a1111.fetch_auto1111_health(base, ttl=0, force_refresh=True))
+                    if bool((health or {}).get("reachable", False)):
+                        ok = True
+                        break
+                elif provider in {"flux2", "flux.2", "flux"}:
+                    # Flux.2 via OpenRouter (gated by FLUX2_ENABLED)
+                    from modules.services import flux2_service as _flux2
+                    if not _flux2.is_enabled():
+                        continue
+                    any_configured = True
+                    health = asyncio.run(_flux2.fetch_flux2_health())
+                    if bool((health or {}).get("reachable", False)):
+                        ok = True
+                        break
+                elif provider in {"zimage", "z-image"}:
+                    base = (_os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
+                    if not base:
+                        continue
+                    any_configured = True
+                    try:
+                        import requests as _requests
+                        resp = _requests.get(f"{base}/health", timeout=4)
+                        if resp.status_code == 200:
+                            ok = True
+                            break
+                    except Exception:
+                        pass
+            except Exception as provider_exc:
+                logging.debug("Provider %s health check failed: %s", provider, provider_exc)
+                continue
         if any_configured and not ok:
             logging.info("Image drain: no providers reachable; skipping this pass")
             return 0

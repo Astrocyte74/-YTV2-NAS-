@@ -58,3 +58,4 @@ data/ytv2_content.db
 
 # Node.js binaries (platform-specific, large)
 node-v*/
+.playwright-cli/
