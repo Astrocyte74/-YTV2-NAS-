@@ -2,6 +2,8 @@
 
 YouTube summarization system running locally on i9 Mac with Tailscale remote access.
 
+> **See also:** [../ARCHITECTURE.md](../ARCHITECTURE.md) for full system architecture diagram.
+
 ## Current Architecture
 
 ```
@@ -15,6 +17,17 @@ M4 Mac (Remote via Tailscale: 100.101.80.13)
 ├── DrawThings (Flux.1 Schnell image generation)
 └── TTSHUB API (Port 7860)
 ```
+
+## ⚠️ IMPORTANT: Two HTTP Servers
+
+This container runs **TWO separate HTTP servers** on different ports:
+
+| Port | Server | Purpose |
+|------|--------|---------|
+| **6452** | `telegram_bot.py` | Telegram bot, `/api/reprocess`, sync endpoints |
+| **6453** | FastAPI (`ytv2_api/`) | Video processing `/api/process`, `/api/transcript` |
+
+**Dashboard connects to port 6452** for the regenerate functionality!
 
 ## Quick Commands
 
