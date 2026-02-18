@@ -61,10 +61,16 @@ This document describes the current local deployment architecture.
 
 | Service | Port | Description |
 |---------|------|-------------|
-| Backend Bot | 6452 | Telegram bot, video processing |
-| Backend API | 6453 | YTV2 API server (Clawdbot) |
+| Backend Bot | 6452 | Telegram bot, `/api/reprocess`, sync endpoints |
+| Backend API | 6453 | YTV2 API server (Clawdbot) - `/api/process`, `/api/transcript` |
 | Dashboard | 10000 | Web interface |
 | PostgreSQL | 5432 | Database |
+
+> **IMPORTANT:** The backend container runs **TWO HTTP servers**:
+> - **Port 6452**: `telegram_bot.py` - has `/api/reprocess` (dashboard connects here!)
+> - **Port 6453**: FastAPI (`ytv2_api/`) - video processing endpoints
+>
+> Dashboard's `BACKEND_API_URL` should point to **port 6452** for regenerate functionality.
 
 ### M4 Mac (Remote via Tailscale)
 
@@ -84,6 +90,12 @@ POSTGRES_ONLY=true
 
 # Dashboard
 DASHBOARD_URL=http://marks-macbook-pro-2.tail9e123c.ts.net:10000
+
+# Auth for regenerate endpoint (must match dashboard's DEBUG_TOKEN)
+REPROCESS_AUTH_TOKEN=your_shared_secret
+
+# Sync secret (must match dashboard's SYNC_SECRET)
+SYNC_SECRET=your_sync_secret
 
 # M4 Mac Services (via Tailscale)
 TTSHUB_API_BASE=http://100.101.80.13:7860/api
