@@ -1,0 +1,12 @@
+# Semantic Search POC Dependencies
+# Install with: pip install -r requirements-zvec.txt
+#
+# Note: Originally planned for Zvec, but Zvec doesn't support Intel macOS (x86_64).
+# Zvec only provides wheels for:
+#   - macOS ARM64 (Apple Silicon: M1/M2/M3/M4)
+#   - Linux x86_64
+#
+# ChromaDB provides similar capabilities (embedded vector DB, no server needed)
+# and works on all platforms including Intel macOS.
+
+chromadb>=0.4.0
