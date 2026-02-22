@@ -1,6 +1,8 @@
-# YouTube Pipeline – Transcripts, Metadata, Limits, and WG Proxy
+# YouTube Pipeline – Transcripts, Metadata, Limits, and Proxy
 
-This note captures the current, working setup for YouTube processing on the NAS, how we avoid 429 throttling, and how to test/operate the flow. Use this as the reference when new Codex agents or contributors come online.
+This note captures the current, working setup for YouTube processing, how we avoid 429 throttling, and how to test/operate the flow. Use this as the reference when new agents or contributors come online.
+
+> **Note:** This system now runs locally on i9 Mac. For remote M4 Mac services, use Tailscale (`100.101.80.13`).
 
 ## Overview
 
@@ -9,7 +11,7 @@ This note captures the current, working setup for YouTube processing on the NAS,
   - Metadata (title/description/duration/stats): YouTube Data API v3 (official; API key).
   - Fallbacks: `yt-dlp` only when transcript API fails or subtitles are explicitly needed (SAFE client + pacing).
 - 429 strategy
-  - The NAS IPv4 lane was throttled for transcript endpoints; we proxy ONLY transcript calls via the i9 Mac over WireGuard.
+  - If IPv4 lane was throttled for transcript endpoints, proxy transcript calls via the M4 Mac over Tailscale.
   - A process-level transcript rate limiter + circuit breaker reduces burst and prevents re-triggering throttles.
 
 ## Transcripts (primary path)
@@ -26,18 +28,16 @@ This note captures the current, working setup for YouTube processing on the NAS,
   - Behavior: if repeated 429s occur, we auto-pause transcript attempts for the cooldown window to let the lane cool.
 - Language order (first match): `en`, `en-GB`, `en-US`, `en-AU`, `en-CA`, `es`, `es-ES`, `es-MX`, `fr`, `fr-FR`, `fr-CA`.
 
-### i9 WireGuard + tinyproxy (transcript proxy)
+### Proxy Setup (Tailscale)
 
-- WireGuard peer on NAS: `10.0.4.3/32` for the i9.
-- i9 proxy: `tinyproxy` bound to `10.0.4.3:8888`.
-  - Config (key lines):
-    - `Port 8888`
-    - `Listen 10.0.4.3`
-    - ACL: `Allow 127.0.0.1`, `Allow 10.0.4.0/24` (optionally LAN `Allow 192.168.4.0/24`)
-    - `ConnectPort 443`, `ConnectPort 563`
-    - Optional: `DisableViaHeader Yes`, `BasicAuth <user> <pass>`
-  - Start on i9: `brew services start tinyproxy`
-  - Test from NAS container: `HTTPS_PROXY=http://10.0.4.3:8888 python3 tools/test_youtube_transcripts.py --ids dQw4w9WgXcQ --repeat 1`
+For remote M4 Mac services via Tailscale:
+- M4 Mac Tailscale IP: `100.101.80.13`
+- TTSHUB API: `http://100.101.80.13:7860/api`
+- Test connectivity: `curl http://100.101.80.13:7860/api/health`
+
+If proxying transcripts via the M4 Mac:
+- Set `YT_TRANSCRIPT_PROXY=http://100.101.80.13:8888`
+- Test: `HTTPS_PROXY=http://100.101.80.13:8888 python3 tools/test_youtube_transcripts.py --ids dQw4w9WgXcQ --repeat 1`
 
 ## Metadata (official API)
 
@@ -91,16 +91,12 @@ This note captures the current, working setup for YouTube processing on the NAS,
 - Circuit breaker active: app logs show “Transcript fetch paused by circuit breaker (cooldown active)”; wait or reduce `YT_TRANSCRIPT_MIN_INTERVAL` once it cools.
 - If BasicAuth is enabled on tinyproxy, update `YT_TRANSCRIPT_PROXY` to include credentials.
 
-## WireGuard: add new peers on NAS (ADM)
+## Tailscale Setup (Remote Access)
 
-- NAS (ADM): VPN Server → Settings → WireGuard → enable + keypair.
-- Add peer: Privilege → WireGuard Peer → Create
-  - Public key: client’s public key from its WireGuard app.
-  - Allowed IPs: unique `/32` (e.g., `10.0.4.3/32`).
-  - Persistent keepalive: 25.
-- Client (macOS):
-  - [Interface] PrivateKey=…, Address=`10.0.4.x/32`, DNS=1.1.1.1
-  - [Peer] PublicKey=<NAS public key>, Endpoint=`<WAN-IP>:51820`, AllowedIPs=`10.0.4.0/24, 192.168.4.0/24`, PersistentKeepalive=25
+- Install Tailscale on both Macs
+- Ensure both are connected to same tailnet
+- Verify connectivity: `ping 100.101.80.13`
+- M4 Mac services accessible at: `http://100.101.80.13:7860/api`
 
 ## Next improvements
 

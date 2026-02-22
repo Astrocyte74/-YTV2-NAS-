@@ -1672,6 +1672,7 @@ async def reprocess_single_summary(
     ledger_entry: Optional[Dict[str, Any]] = None,
     force: bool = False,
     regenerate_audio: bool = True,
+    llm_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     ledger_entry = dict(ledger_entry or {})
     proficiency = ledger_entry.get('proficiency')
@@ -1679,6 +1680,28 @@ async def reprocess_single_summary(
         'summary_type': summary_type,
         'status': 'pending',
     }
+
+    # Temporarily override LLM model if specified
+    original_provider = None
+    original_model = None
+    if llm_model and hasattr(handler, 'summarizer'):
+        original_provider = getattr(handler.summarizer, 'llm_provider', None)
+        original_model = getattr(handler.summarizer, 'model', None)
+
+        # Parse llm_model (format: "provider/model" or just "model")
+        if '/' in llm_model:
+            parts = llm_model.split('/', 1)
+            new_provider = parts[0]
+            new_model = parts[1]
+        else:
+            # Just model name, keep current provider
+            new_provider = original_provider
+            new_model = llm_model
+
+        if new_provider and new_model:
+            handler.summarizer.llm_provider = new_provider
+            handler.summarizer.model = new_model
+            logging.info(f"Reprocess using LLM: {new_provider}/{new_model}")
 
     try:
         result = await handler.summarizer.process_video(
@@ -1795,6 +1818,12 @@ async def reprocess_single_summary(
         )
         return job_result
 
+    finally:
+        # Restore original LLM model if we overrode it
+        if original_provider and original_model and hasattr(handler, 'summarizer'):
+            handler.summarizer.llm_provider = original_provider
+            handler.summarizer.model = original_model
+
 
 async def reprocess_video(
     handler,
@@ -1803,6 +1832,7 @@ async def reprocess_video(
     force: bool = False,
     regenerate_audio: bool = True,
     video_url: Optional[str] = None,
+    llm_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     normalized_id = handler._normalize_content_id(video_id)
     summary_types = summary_types or handler._discover_summary_types(normalized_id)
@@ -1851,6 +1881,7 @@ async def reprocess_video(
             ledger_entry=ledger_entry,
             force=force,
             regenerate_audio=regenerate_audio,
+            llm_model=llm_model,
         )
         results.append(job_result)
         if job_result.get('status') == 'ok':

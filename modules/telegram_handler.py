@@ -769,6 +769,7 @@ class YouTubeTelegramBot:
         ledger_entry: Optional[Dict[str, Any]] = None,
         force: bool = False,
         regenerate_audio: bool = True,
+        llm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await summary_service.reprocess_single_summary(
             self,
@@ -778,6 +779,7 @@ class YouTubeTelegramBot:
             ledger_entry=ledger_entry,
             force=force,
             regenerate_audio=regenerate_audio,
+            llm_model=llm_model,
         )
 
     async def reprocess_video(
@@ -787,6 +789,7 @@ class YouTubeTelegramBot:
         force: bool = False,
         regenerate_audio: bool = True,
         video_url: Optional[str] = None,
+        llm_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         return await summary_service.reprocess_video(
             self,
@@ -795,6 +798,7 @@ class YouTubeTelegramBot:
             force=force,
             regenerate_audio=regenerate_audio,
             video_url=video_url,
+            llm_model=llm_model,
         )
 
     def setup_handlers(self):

@@ -266,6 +266,8 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.serve_api_report_events()
         elif self.path == '/api/metrics':
             self.serve_api_metrics()
+        elif self.path == '/api/llm-models':
+            self.serve_api_llm_models()
         elif self.path == '/status':
             self.serve_status()
         elif self.path.startswith('/api/'):
@@ -967,6 +969,76 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(snapshot, ensure_ascii=False).encode('utf-8'))
 
+    def serve_api_llm_models(self):
+        """Return available LLM models for regeneration."""
+        from llm_config import LLMConfig
+
+        config = LLMConfig()
+        models = []
+
+        # Get models from shortlists
+        for shortlist_name, shortlist_data in LLMConfig.SHORTLISTS.items():
+            for provider, model in shortlist_data.get("primary", []):
+                label = f"{provider}/{model}"
+                # Create friendly label
+                if "gemini" in model.lower():
+                    friendly = f" Gemini {model.split('-')[-1]}" if "-" in model else model
+                elif "gpt" in model.lower():
+                    friendly = f"GPT {model.split('-')[-1]}" if "-" in model else model
+                elif "claude" in model.lower():
+                    friendly = f"Claude {model.split('-')[-1]}" if "-" in model else model
+                else:
+                    friendly = model
+
+                models.append({
+                    "id": label,
+                    "provider": provider,
+                    "model": model,
+                    "label": friendly,
+                    "shortlist": shortlist_name
+                })
+
+        # Deduplicate by id
+        seen = set()
+        unique_models = []
+        for m in models:
+            if m["id"] not in seen:
+                seen.add(m["id"])
+                unique_models.append(m)
+
+        # Sort by preference (gemini first, then gpt, then others)
+        def sort_key(m):
+            name = m["model"].lower()
+            if "gemini" in name and "flash-lite" in name:
+                return "0" + name
+            elif "gemini" in name:
+                return "1" + name
+            elif "gpt-5" in name:
+                return "2" + name
+            elif "gpt-4" in name:
+                return "3" + name
+            elif "claude" in name:
+                return "4" + name
+            else:
+                return "5" + name
+
+        unique_models.sort(key=sort_key)
+
+        # Add current default
+        current_default = f"{os.getenv('LLM_PROVIDER', 'openrouter')}/{os.getenv('LLM_MODEL', 'google/gemini-2.5-flash-lite')}"
+
+        response = {
+            "models": unique_models[:15],  # Limit to top 15
+            "default": current_default
+        }
+
+        self.send_response(200)
+        self.send_cors_headers()
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Cache-Control', 'max-age=60')
+        self.end_headers()
+        self.wfile.write(json.dumps(response, ensure_ascii=False).encode('utf-8'))
+
     def handle_reprocess_request(self):
         """Schedule a headless reprocess job via the Telegram bot event loop."""
         global BOT_INSTANCE
@@ -1013,6 +1085,7 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
         video_id = payload.get('video_id') or payload.get('id')
         video_url = payload.get('url')
         summary_types = payload.get('summary_types')
+        llm_model = payload.get('llm_model')  # Optional: "provider/model" or just "model"
         force = bool(payload.get('force', False))
         regenerate_audio = payload.get('regenerate_audio', True)
 
@@ -1044,6 +1117,7 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
                     force=force,
                     regenerate_audio=bool(regenerate_audio),
                     video_url=video_url,
+                    llm_model=llm_model,
                 ),
                 loop,
             )
