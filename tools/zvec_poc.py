@@ -9,13 +9,15 @@ Note: Originally planned for Zvec, but Zvec doesn't support Intel macOS.
 ChromaDB provides similar capabilities and works on all platforms.
 
 Prerequisites:
-  pip install chromadb
+  pip install chromadb psycopg2-binary
 
 Usage:
   python tools/zvec_poc.py --help
-  python tools/zvec_poc.py index     # Index all summaries
-  python tools/zvec_poc.py search "videos about space exploration"
-  python tools/zvec_poc.py similar <content_id>  # Find similar content
+  python tools/zvec_poc.py index                     # Index from JSON files
+  python tools/zvec_poc.py index --source postgres   # Index from PostgreSQL
+  python tools/zvec_poc.py search "space exploration"
+  python tools/zvec_poc.py similar <content_id>
+  python tools/zvec_poc.py interactive
 """
 
 import argparse
@@ -43,8 +45,109 @@ REPORTS_DIR = Path(__file__).parent.parent / "data" / "reports"
 CHROMA_DIR = Path(__file__).parent.parent / "data" / "chromadb"
 COLLECTION_NAME = "ytv2_summaries"
 
+# PostgreSQL config
+PG_CONFIG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "ytv2",
+    "user": "ytv2",
+    "password": "pass"
+}
 
-def load_reports(limit: Optional[int] = None) -> list[dict]:
+
+def get_postgres_connection():
+    """Get PostgreSQL connection."""
+    try:
+        import psycopg2
+    except ImportError:
+        print("ERROR: psycopg2 not installed")
+        print("  pip install psycopg2-binary")
+        sys.exit(1)
+
+    return psycopg2.connect(**PG_CONFIG)
+
+
+def load_reports_from_postgres(limit: Optional[int] = None) -> list[dict]:
+    """Load summaries directly from PostgreSQL database."""
+    conn = get_postgres_connection()
+    cur = conn.cursor()
+
+    # Query content with summaries - use 'comprehensive' or 'bullet-points' variant
+    # The content_summaries table has columns: video_id, variant, text (not summary_text)
+    query = """
+        SELECT DISTINCT ON (c.video_id)
+            c.id,
+            c.video_id,
+            c.title,
+            c.channel_name,
+            c.analysis_json,
+            cs.text as summary_text,
+            cs.variant
+        FROM content c
+        JOIN content_summaries cs ON c.video_id = cs.video_id
+        WHERE cs.text IS NOT NULL AND length(cs.text) > 0
+          AND cs.variant IN ('comprehensive', 'bullet-points', 'key-insights')
+        ORDER BY c.video_id,
+          CASE cs.variant
+            WHEN 'comprehensive' THEN 1
+            WHEN 'bullet-points' THEN 2
+            WHEN 'key-insights' THEN 3
+          END
+    """
+    if limit:
+        # Need subquery for limit with DISTINCT ON
+        query = f"""
+            SELECT * FROM (
+                {query}
+            ) subq LIMIT {limit}
+        """
+
+    cur.execute(query)
+    rows = cur.fetchall()
+
+    reports = []
+    for row in rows:
+        content_id, video_id, title, channel_name, analysis_json, summary_text, variant = row
+
+        # Parse categories from analysis_json
+        categories = []
+        if analysis_json:
+            try:
+                if isinstance(analysis_json, str):
+                    analysis = json.loads(analysis_json)
+                else:
+                    analysis = analysis_json
+                categories = analysis.get("category", [])
+            except:
+                pass
+
+        # Determine source from ID prefix
+        source = "unknown"
+        if content_id:
+            if content_id.startswith("yt:"):
+                source = "youtube"
+            elif content_id.startswith("web:"):
+                source = "web"
+            elif content_id.startswith("reddit:"):
+                source = "reddit"
+
+        reports.append({
+            "id": content_id or video_id,
+            "title": title or "",
+            "channel_name": channel_name or "",
+            "analysis": {"category": categories} if categories else {},
+            "summary_text": summary_text,
+            "content_source": source,
+        })
+
+    cur.close()
+    conn.close()
+
+    print(f"Loaded {len(reports)} summaries from PostgreSQL")
+    return reports
+
+
+def load_reports_from_json(limit: Optional[int] = None) -> list[dict]:
     """Load JSON reports from the reports directory."""
     reports = []
     json_files = sorted(REPORTS_DIR.glob("*.json"))
@@ -63,6 +166,14 @@ def load_reports(limit: Optional[int] = None) -> list[dict]:
 
     print(f"Loaded {len(reports)} reports from {REPORTS_DIR}")
     return reports
+
+
+def load_reports(limit: Optional[int] = None, source: str = "json") -> list[dict]:
+    """Load reports from specified source."""
+    if source == "postgres":
+        return load_reports_from_postgres(limit)
+    else:
+        return load_reports_from_json(limit)
 
 
 def extract_text_for_embedding(report: dict) -> str:
@@ -114,6 +225,10 @@ def get_or_create_collection(client):
 
 def index_reports(reports: list[dict], collection):
     """Index reports in ChromaDB."""
+    if not reports:
+        print("No reports to index")
+        return
+
     print(f"\nIndexing {len(reports)} reports...")
 
     # Prepare data for batch insert
@@ -123,6 +238,9 @@ def index_reports(reports: list[dict], collection):
 
     for i, report in enumerate(reports):
         text = extract_text_for_embedding(report)
+        if not text.strip():
+            continue  # Skip empty documents
+
         content_id = report.get("id", f"doc_{i}")
 
         ids.append(content_id)
@@ -133,7 +251,7 @@ def index_reports(reports: list[dict], collection):
             "channel": report.get("channel_name", ""),
         })
 
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 25 == 0:
             print(f"  Processed {i + 1}/{len(reports)}")
 
     # Upsert all documents
@@ -160,6 +278,10 @@ def semantic_search(query: str, collection, topk: int = 10):
         n_results=topk
     )
 
+    if not results['ids'][0]:
+        print("No results found")
+        return results
+
     print(f"\nTop {len(results['ids'][0])} results:\n")
     for i, (doc_id, distance, metadata, doc) in enumerate(zip(
         results['ids'][0],
@@ -181,23 +303,21 @@ def semantic_search(query: str, collection, topk: int = 10):
     return results
 
 
-def find_similar(content_id: str, reports: list[dict], collection, topk: int = 5):
-    """Find content similar to a specific report."""
-    # Find the report
-    report = None
-    for r in reports:
-        if r.get("id") == content_id:
-            report = r
-            break
-
-    if not report:
-        print(f"Report not found: {content_id}")
+def find_similar_by_id(content_id: str, collection, topk: int = 5):
+    """Find content similar to a specific document by ID."""
+    # Get the document from ChromaDB
+    try:
+        doc = collection.get(ids=[content_id], include=["documents", "metadatas"])
+        if not doc['ids']:
+            print(f"Document not found in index: {content_id}")
+            return []
+        text = doc['documents'][0]
+        title = doc['metadatas'][0].get('title', 'N/A')
+    except Exception as e:
+        print(f"Error fetching document: {e}")
         return []
 
-    print(f"\nFinding content similar to: {report.get('title')}")
-
-    # Get the document text and search
-    text = extract_text_for_embedding(report)
+    print(f"\nFinding content similar to: {title}")
 
     # Search (will include the document itself)
     results = collection.query(
@@ -227,7 +347,33 @@ def find_similar(content_id: str, reports: list[dict], collection, topk: int = 5
     return results
 
 
-def interactive_mode(collection, reports):
+def show_stats(collection):
+    """Show collection statistics."""
+    count = collection.count()
+    print(f"\nCollection: {COLLECTION_NAME}")
+    print(f"Documents: {count}")
+
+    # Check PostgreSQL for comparison
+    try:
+        conn = get_postgres_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(DISTINCT video_id)
+            FROM content_summaries
+            WHERE text IS NOT NULL AND length(text) > 0
+              AND variant IN ('comprehensive', 'bullet-points', 'key-insights')
+        """)
+        pg_count = cur.fetchone()[0]
+        cur.close()
+        conn.close()
+        print(f"PostgreSQL summaries (indexable): {pg_count}")
+        if count < pg_count:
+            print(f"  (!) {pg_count - count} summaries not yet indexed")
+    except Exception as e:
+        print(f"PostgreSQL: Unable to connect ({e})")
+
+
+def interactive_mode(collection):
     """Interactive search mode."""
     print("\n" + "=" * 60)
     print("YTV2 Semantic Search (Interactive Mode)")
@@ -255,13 +401,19 @@ def main():
     )
     parser.add_argument(
         "command",
-        choices=["index", "search", "similar", "interactive"],
+        choices=["index", "search", "similar", "interactive", "stats"],
         help="Command to run"
     )
     parser.add_argument(
         "query",
         nargs="?",
         help="Search query or content ID for 'similar' command"
+    )
+    parser.add_argument(
+        "--source", "-s",
+        choices=["json", "postgres"],
+        default="json",
+        help="Data source: 'json' (files) or 'postgres' (database)"
     )
     parser.add_argument(
         "--limit", "-l",
@@ -296,10 +448,12 @@ def main():
 
     collection = get_or_create_collection(client)
 
-    # Load reports
-    reports = load_reports(args.limit)
+    if args.command == "stats":
+        show_stats(collection)
+        return
 
     if args.command == "index":
+        reports = load_reports(args.limit, args.source)
         index_reports(reports, collection)
 
     elif args.command == "search":
@@ -312,14 +466,15 @@ def main():
         if not args.query:
             print("ERROR: similar requires a content_id argument")
             sys.exit(1)
-        find_similar(args.query, reports, collection, args.topk)
+        find_similar_by_id(args.query, collection, args.topk)
 
     elif args.command == "interactive":
         # Check if indexed
         if collection.count() == 0:
-            print("Collection is empty. Indexing first...")
+            print("Collection is empty. Indexing from PostgreSQL first...")
+            reports = load_reports(None, "postgres")
             index_reports(reports, collection)
-        interactive_mode(collection, reports)
+        interactive_mode(collection)
 
 
 if __name__ == "__main__":
