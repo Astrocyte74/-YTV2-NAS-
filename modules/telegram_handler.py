@@ -280,7 +280,7 @@ class YouTubeTelegramBot:
     def __init__(self, token: str, allowed_user_ids: List[int]):
         """
         Initialize the Telegram bot.
-        
+
         Args:
             token: Telegram bot token
             allowed_user_ids: List of user IDs allowed to use the bot
@@ -291,7 +291,13 @@ class YouTubeTelegramBot:
         self.summarizer = None
         self.current_item: Optional[Dict[str, Any]] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
-        
+
+        # Shared HTTP client for external API calls (reused across requests)
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+        # Cache dashboard URL to avoid repeated env lookups
+        self._dashboard_url: Optional[str] = None
+
         # Initialize exporters and ensure directories exist
         Path("./data/reports").mkdir(parents=True, exist_ok=True)
         Path("./exports").mkdir(parents=True, exist_ok=True)
@@ -308,6 +314,31 @@ class YouTubeTelegramBot:
         self.tts_preselect_by_content: Dict[str, Dict[str, Any]] = {}
         # Interactive summary sessions keyed by (chat_id, message_id)
         self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Get or create shared HTTP client."""
+        if self._http_client is None:
+            timeout = httpx.Timeout(30.0)
+            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            self._http_client = httpx.AsyncClient(timeout=timeout, limits=limits)
+        return self._http_client
+
+    def _get_dashboard_url(self) -> str:
+        """Get dashboard URL from environment with caching."""
+        if self._dashboard_url is None:
+            self._dashboard_url = (
+                os.getenv('DASHBOARD_URL') or
+                os.getenv('RENDER_DASHBOARD_URL') or
+                os.getenv('RENDER_API_URL') or
+                os.getenv('POSTGRES_DASHBOARD_URL', '')
+            )
+        return self._dashboard_url
+
+    async def close(self):
+        """Cleanup resources when shutting down."""
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
         # Interactive Draw Things sessions keyed by (chat_id, message_id)
         self.draw_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Cache of instantiated summarizers keyed by provider/model
@@ -3697,11 +3728,11 @@ class YouTubeTelegramBot:
         )
 
     async def _handle_delete_summary(self, query, callback_data: str) -> None:
-        """Handle delete summary button click."""
+        """Handle delete summary button click with confirmation dialog."""
         import urllib.parse
 
         try:
-            # Extract video ID from callback data
+            # Extract and validate video ID from callback data
             parts = callback_data.split(":", 1)
             if len(parts) != 2:
                 await query.answer("Invalid delete request", show_alert=True)
@@ -3710,51 +3741,128 @@ class YouTubeTelegramBot:
             video_id_encoded = parts[1]
             video_id = urllib.parse.unquote(video_id_encoded)
 
-            # Show confirmation message
+            # Validate video_id format (basic check for safe characters)
+            if not video_id or not re.match(r'^[a-zA-Z0-9:_-]+$', video_id):
+                await query.answer("Invalid video ID format", show_alert=True)
+                return
+
+            # Check if this is a confirmation click
+            if query.data == f"summary_delete:{video_id_encoded}":
+                # First click - show confirmation dialog
+                confirm_keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Yes, delete", callback_data=f"summary_delete_confirm:{video_id_encoded}"),
+                    ],
+                    [
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"summary_delete_cancel:{video_id_encoded}"),
+                    ],
+                ])
+
+                # Use try_answer with fallback to edit for confirmation
+                try:
+                    await query.edit_message_text(
+                        f"🗑️ *Delete this summary?*\n\n"
+                        f"Video ID: `{video_id}`\n\n"
+                        f"This will permanently delete:\n"
+                        f"• Summary from database\n"
+                        f"• Report files\n"
+                        f"• Audio files\n\n"
+                        f"⚠️ This action cannot be undone.",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=confirm_keyboard
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to show confirmation dialog: {e}")
+                    await query.answer("Could not show confirmation dialog", show_alert=True)
+                return
+
+            # Handle confirmation
+            if query.data.startswith("summary_delete_confirm:"):
+                # User confirmed - proceed with deletion
+                await self._execute_delete(query, video_id, video_id_encoded)
+            elif query.data.startswith("summary_delete_cancel:"):
+                # User cancelled
+                try:
+                    await query.edit_message_text("❌ Deletion cancelled")
+                except Exception:
+                    await query.answer("Deletion cancelled", show_alert=True)
+
+        except Exception as exc:
+            logging.error(f"Delete handler error: {exc}")
+            try:
+                await query.answer("Delete operation failed", show_alert=True)
+            except Exception:
+                pass
+
+    async def _execute_delete(self, query, video_id: str, video_id_encoded: str) -> None:
+        """Execute the actual delete operation."""
+        import urllib.parse
+
+        try:
+            # Show deleting status
             await query.edit_message_text(
-                f"🗑️ Deleting summary for: `{video_id}`\n\nPlease wait...",
+                f"🗑️ Deleting: `{video_id}`\n\nPlease wait...",
                 parse_mode=ParseMode.MARKDOWN
             )
 
-            # Get dashboard URL from environment
-            dashboard_url = os.getenv('DASHBOARD_URL') or os.getenv('RENDER_DASHBOARD_URL') or os.getenv('RENDER_API_URL')
+            # Get cached dashboard URL
+            dashboard_url = self._get_dashboard_url()
             if not dashboard_url:
-                await query.edit_message_text("❌ Dashboard URL not configured")
+                await self._safe_edit_message(query, "❌ Dashboard not configured")
                 return
 
             # Build delete API URL
             delete_url = f"{dashboard_url}/api/delete/{urllib.parse.quote(video_id, safe='')}"
 
-            # Get authentication token
+            # Get authentication token (use SYNC_SECRET for dashboard API)
             auth_token = os.getenv('SYNC_SECRET')
-            headers = {}
+            headers = {'Content-Type': 'application/json'}
             if auth_token:
                 headers['Authorization'] = f'Bearer {auth_token}'
 
-            # Call dashboard DELETE API
-            import httpx
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.delete(delete_url, headers=headers)
-                if response.status_code == 200:
-                    result = response.json()
-                    deleted_count = len(result.get('deleted_files', []))
-                    errors = result.get('errors', [])
+            # Call dashboard DELETE API using shared client
+            client = self._get_http_client()
+            response = await client.delete(delete_url, headers=headers)
 
-                    if errors:
-                        error_msg = f"⚠️ Deleted {deleted_count} item(s) with errors:\n" + "\n".join(errors[:3])
-                        if len(errors) > 3:
-                            error_msg += f"\n...and {len(errors) - 3} more"
-                        await query.edit_message_text(error_msg)
-                    else:
-                        await query.edit_message_text(f"✅ Summary deleted successfully ({deleted_count} item(s))")
-                elif response.status_code == 404:
-                    await query.edit_message_text("ℹ️ Summary not found (may have been already deleted)")
+            if response.status_code == 200:
+                result = response.json()
+                deleted_count = len(result.get('deleted_files', []))
+                errors = result.get('errors', [])
+
+                if errors:
+                    error_msg = f"⚠️ Deleted {deleted_count} item(s) with errors:\n" + "\n".join(errors[:3])
+                    if len(errors) > 3:
+                        error_msg += f"\n...and {len(errors) - 3} more"
+                    await self._safe_edit_message(query, error_msg)
                 else:
-                    await query.edit_message_text(f"❌ Delete failed: HTTP {response.status_code}")
+                    await self._safe_edit_message(query, f"✅ Deleted successfully ({deleted_count} item(s))")
+            elif response.status_code == 404:
+                await self._safe_edit_message(query, "ℹ️ Summary not found (may already be deleted)")
+            elif response.status_code == 401:
+                await self._safe_edit_message(query, "❌ Unauthorized: Invalid auth token")
+            else:
+                await self._safe_edit_message(query, f"❌ Delete failed: HTTP {response.status_code}")
 
+        except httpx.TimeoutException:
+            logging.error(f"Delete timeout for {video_id}")
+            await self._safe_edit_message(query, "⏱️ Dashboard timeout - try again later")
         except Exception as exc:
-            logging.error(f"Delete summary failed: {exc}")
-            await query.edit_message_text(f"❌ Delete failed: {str(exc)[:100]}")
+            logging.error(f"Delete execution failed: {exc}")
+            await self._safe_edit_message(query, f"❌ Delete failed: {str(exc)[:80]}")
+
+    async def _safe_edit_message(self, query, text: str, parse_mode: str = ParseMode.MARKDOWN) -> bool:
+        """Safely edit a message, falling back to sending a new message if edit fails."""
+        try:
+            await query.edit_message_text(text, parse_mode=parse_mode)
+            return True
+        except Exception as e:
+            logging.warning(f"Message edit failed, sending new message: {e}")
+            try:
+                await query.message.reply_text(text, parse_mode=parse_mode)
+                return True
+            except Exception as e2:
+                logging.error(f"Failed to send delete result message: {e2}")
+                return False
 
     # ------------------------- Ollama chat integration -------------------------
     def _ollama_models_list(self, raw: Dict[str, Any]) -> List[str]:
@@ -6497,8 +6605,8 @@ class YouTubeTelegramBot:
                 except Exception:
                     pass
                 return
-        elif callback_data.startswith("summary_delete:"):
-            # Handle delete summary button
+        elif callback_data.startswith("summary_delete:") or callback_data.startswith("summary_delete_confirm:") or callback_data.startswith("summary_delete_cancel:"):
+            # Handle delete summary button and confirmation dialog
             await self._handle_delete_summary(query, callback_data)
             return
         elif callback_data.startswith("summary_model:"):
