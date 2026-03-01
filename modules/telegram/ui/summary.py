@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import urllib.parse
+
+
+def _short_id(video_id: str) -> str:
+    """Generate a short hash for video_id that fits in Telegram's 64-byte callback_data limit."""
+    # Use first 8 chars of MD5 hash - gives us 64M unique values, more than enough
+    return hashlib.md5(video_id.encode()).hexdigest()[:8]
 
 
 def friendly_variant_label(variant: str, variant_labels: Dict[str, str]) -> str:
@@ -21,9 +28,18 @@ def build_summary_keyboard(
     video_id: Optional[str] = None,
     dashboard_url: Optional[str] = None,
     show_delete_button: bool = False,
-) -> InlineKeyboardMarkup:
+) -> tuple[InlineKeyboardMarkup, Dict[str, str]]:
+    """
+    Build summary keyboard with variant buttons.
+
+    Returns:
+        tuple: (keyboard markup, delete_id_map mapping short_id -> video_id)
+    """
     existing_variants = existing_variants or []
     existing_bases = {variant.split(':', 1)[0] for variant in existing_variants}
+
+    # Mapping for delete button: short hash -> full video_id
+    delete_id_map: Dict[str, str] = {}
 
     def label_for(variant_key: str) -> str:
         label = variant_labels.get(variant_key, variant_key.replace('-', ' ').title())
@@ -55,13 +71,15 @@ def build_summary_keyboard(
         ])
 
     # Add delete button when showing summary results (not in initial selection)
+    # Use short hash to fit within Telegram's 64-byte callback_data limit
     if show_delete_button and video_id:
-        report_id_encoded = urllib.parse.quote(video_id, safe='')
+        short_id = _short_id(video_id)
+        delete_id_map[short_id] = video_id  # Store mapping for handler to resolve
         keyboard.append([
-            InlineKeyboardButton("🗑️ Delete", callback_data=f"summary_delete:{report_id_encoded}"),
+            InlineKeyboardButton("🗑️ Delete", callback_data=f"summary_delete:{short_id}"),
         ])
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(keyboard), delete_id_map
 
 
 def existing_variants_message(

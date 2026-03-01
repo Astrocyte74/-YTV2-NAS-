@@ -668,8 +668,13 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     if row2:
                         keyboard.append(row2)
 
-                    # Add delete button
-                    delete_cb = f"summary_delete:{report_id_encoded}"
+                    # Add delete button with short hash to fit within 64-byte callback_data limit
+                    import hashlib
+                    short_id = hashlib.md5(video_id.encode()).hexdigest()[:8]
+                    delete_cb = f"summary_delete:{short_id}"
+                    # Store mapping for handler to resolve
+                    if hasattr(handler, '_delete_id_map'):
+                        handler._delete_id_map[short_id] = video_id
                     row3 = [InlineKeyboardButton("🗑️ Delete", callback_data=delete_cb)]
                     keyboard.append(row3)
 

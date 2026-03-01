@@ -733,58 +733,9 @@ class YouTubeSummarizer:
             if not any(lowered.startswith(prefix) for prefix in disallowed_prefixes):
                 allow_image = True
 
-        if summary_image_service.SUMMARY_IMAGE_ENABLED and allow_image:
-            try:
-                image_meta = await summary_image_service.maybe_generate_summary_image(result)
-                if image_meta:
-                    result["summary_image"] = image_meta
-                    result["summary_image_url"] = (
-                        image_meta.get("public_url")
-                        or image_meta.get("relative_path")
-                        or image_meta.get("path")
-                    )
-                    variant_entry = image_meta.get("analysis_variant")
-                    if variant_entry:
-                        analysis_block = result.get("analysis")
-                        if not isinstance(analysis_block, dict):
-                            analysis_block = {}
-                        selected_url = (
-                            image_meta.get("public_url")
-                            or image_meta.get("relative_path")
-                            or image_meta.get("path")
-                        )
-                        analysis_block = summary_image_service.apply_analysis_variant(
-                            analysis_block,
-                            variant_entry,
-                            selected_url=selected_url,
-                            prompt=image_meta.get("prompt"),
-                            model=image_meta.get("model"),
-                        )
-                        result["analysis"] = analysis_block
-            except Exception as exc:
-                logging.debug("summary image generation skipped: %s", exc)
-            if SUMMARY_IMAGE_AI2_ENABLED:
-                try:
-                    ai2_meta = await summary_image_service.maybe_generate_summary_image(result, mode="ai2")
-                    if ai2_meta:
-                        result["summary_image_ai2"] = ai2_meta
-                        result["summary_image_ai2_url"] = (
-                            ai2_meta.get("public_url")
-                            or ai2_meta.get("relative_path")
-                            or ai2_meta.get("path")
-                        )
-                        variant_entry = ai2_meta.get("analysis_variant")
-                        if variant_entry:
-                            analysis_block = result.get("analysis")
-                            analysis_block = summary_image_service.apply_analysis_variant(
-                                analysis_block,
-                                variant_entry,
-                                prompt=ai2_meta.get("prompt"),
-                                model=ai2_meta.get("model"),
-                            )
-                            result["analysis"] = analysis_block
-                except Exception as exc:
-                    logging.debug("summary ai2 image generation skipped: %s", exc)
+        # Image generation is handled by the image queue processor (like YouTube flow)
+        # Do NOT await here - it blocks the summary. Images will be generated in background.
+        # The summary_service.py enqueues images after the summary is sent (lines 1443-1508)
 
         return result
 
@@ -1210,39 +1161,8 @@ Preview:
             },
         }
 
-        # Optional: image generation remains as in process_text_content
-        summary_for_image = insights_text
-        allow_image = bool(summary_for_image and not summary_for_image.lower().startswith("unable to "))
-        if summary_image_service.SUMMARY_IMAGE_ENABLED and allow_image:
-            try:
-                image_meta = await summary_image_service.maybe_generate_summary_image(result)
-                if image_meta:
-                    result["summary_image"] = image_meta
-                    result["summary_image_url"] = (
-                        image_meta.get("public_url")
-                        or image_meta.get("relative_path")
-                        or image_meta.get("path")
-                    )
-                    variant_entry = image_meta.get("analysis_variant")
-                    if variant_entry:
-                        analysis_block = result.get("analysis")
-                        if not isinstance(analysis_block, dict):
-                            analysis_block = {}
-                        selected_url = (
-                            image_meta.get("public_url")
-                            or image_meta.get("relative_path")
-                            or image_meta.get("path")
-                        )
-                        analysis_block = summary_image_service.apply_analysis_variant(
-                            analysis_block,
-                            variant_entry,
-                            selected_url=selected_url,
-                            prompt=image_meta.get("prompt"),
-                            model=image_meta.get("model"),
-                        )
-                        result["analysis"] = analysis_block
-            except Exception as exc:
-                logging.debug("summary image generation skipped: %s", exc)
+        # Image generation is handled by the image queue processor (like YouTube flow)
+        # Do NOT await here - it blocks the summary. Images will be generated in background.
 
         return result
     

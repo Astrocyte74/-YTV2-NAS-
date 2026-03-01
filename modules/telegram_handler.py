@@ -314,31 +314,6 @@ class YouTubeTelegramBot:
         self.tts_preselect_by_content: Dict[str, Dict[str, Any]] = {}
         # Interactive summary sessions keyed by (chat_id, message_id)
         self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
-
-    def _get_http_client(self) -> httpx.AsyncClient:
-        """Get or create shared HTTP client."""
-        if self._http_client is None:
-            timeout = httpx.Timeout(30.0)
-            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-            self._http_client = httpx.AsyncClient(timeout=timeout, limits=limits)
-        return self._http_client
-
-    def _get_dashboard_url(self) -> str:
-        """Get dashboard URL from environment with caching."""
-        if self._dashboard_url is None:
-            self._dashboard_url = (
-                os.getenv('DASHBOARD_URL') or
-                os.getenv('RENDER_DASHBOARD_URL') or
-                os.getenv('RENDER_API_URL') or
-                os.getenv('POSTGRES_DASHBOARD_URL', '')
-            )
-        return self._dashboard_url
-
-    async def close(self):
-        """Cleanup resources when shutting down."""
-        if self._http_client:
-            await self._http_client.aclose()
-            self._http_client = None
         # Interactive Draw Things sessions keyed by (chat_id, message_id)
         self.draw_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Cache of instantiated summarizers keyed by provider/model
@@ -361,6 +336,9 @@ class YouTubeTelegramBot:
         # Auto-process scheduler for idle URLs (keyed by (chat_id, message_id))
         self._auto_tasks: Dict[tuple, asyncio.Task] = {}
 
+        # Delete button ID mapping: short_hash -> full video_id (for callback_data size limits)
+        self._delete_id_map: Dict[str, str] = {}
+
         # Persisted user preferences (e.g., last-used cloud/local models for quick picks)
         self.user_prefs_path = Path("./data/user_prefs.json")
         self.user_prefs: Dict[str, Any] = {}
@@ -370,7 +348,7 @@ class YouTubeTelegramBot:
                 self.user_prefs = json.loads(self.user_prefs_path.read_text(encoding="utf-8")) or {}
         except Exception:
             self.user_prefs = {}
-        
+
         # YouTube URL regex pattern (supports www./m., watch, embed, v, shorts, live, and youtu.be)
         self.youtube_url_pattern = re.compile(
             r'(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|embed/|v/|shorts/|live/)|youtu\.be/)([a-zA-Z0-9_-]{11})'
@@ -404,6 +382,31 @@ class YouTubeTelegramBot:
             logging.info(f"✅ YouTube summarizer initialized with {self.summarizer.llm_provider}/{self.summarizer.model}")
         except Exception as e:
             logging.error(f"Failed to initialize YouTubeSummarizer: {e}")
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        """Get or create shared HTTP client."""
+        if self._http_client is None:
+            timeout = httpx.Timeout(30.0)
+            limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+            self._http_client = httpx.AsyncClient(timeout=timeout, limits=limits)
+        return self._http_client
+
+    def _get_dashboard_url(self) -> str:
+        """Get dashboard URL from environment with caching."""
+        if self._dashboard_url is None:
+            self._dashboard_url = (
+                os.getenv('DASHBOARD_URL') or
+                os.getenv('RENDER_DASHBOARD_URL') or
+                os.getenv('RENDER_API_URL') or
+                os.getenv('POSTGRES_DASHBOARD_URL', '')
+            )
+        return self._dashboard_url
+
+    async def close(self):
+        """Cleanup resources when shutting down."""
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
 
     # ------------------------------------------------------------------
     # Utility helpers for reprocessing and internal orchestration
@@ -519,13 +522,17 @@ class YouTubeTelegramBot:
                 or os.getenv('POSTGRES_DASHBOARD_URL')
                 or 'https://ytv2-dashboard-postgres.onrender.com'
             )
-        return ui_build_summary_keyboard(
+        keyboard, delete_id_map = ui_build_summary_keyboard(
             self.VARIANT_LABELS,
             existing_variants=existing_variants,
             video_id=video_id,
             dashboard_url=dashboard_url,
             show_delete_button=show_delete_button,
         )
+        # Store the delete ID mapping for the handler to resolve
+        if delete_id_map:
+            self._delete_id_map.update(delete_id_map)
+        return keyboard
 
     def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
         return ui_existing_variants_message(self.VARIANT_LABELS, content_id, variants, source)
@@ -1766,6 +1773,70 @@ class YouTubeTelegramBot:
             }
 
             existing_variants = self._discover_summary_types(content_id)
+
+            # === AUTO-MODE: Skip keyboard, process immediately (same as YouTube) ===
+            auto_mode_enabled = str(os.getenv('TELEGRAM_AUTO_MODE', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+            if auto_mode_enabled:
+                try:
+                    auto_models_str = os.getenv('AUTO_MODE_MODELS', 'mercury-2,google/gemini-2.5-flash-lite')
+                    auto_models = [m.strip() for m in auto_models_str.split(',') if m.strip()]
+                    auto_variant = os.getenv('AUTO_MODE_VARIANT', 'key-insights')
+
+                    # Check if variant already exists
+                    current_variants = set(existing_variants or [])
+                    if any((auto_variant == v.split(':', 1)[0]) for v in current_variants):
+                        # Variant exists, show normal keyboard
+                        reply_markup = self._build_summary_keyboard(existing_variants, hashed)
+                        message_text = self._existing_variants_message(content_id, existing_variants, source="web")
+                        reply_msg = await update.message.reply_text(
+                            message_text,
+                            reply_markup=reply_markup
+                        )
+                        await self._maybe_schedule_auto_process(
+                            reply_msg,
+                            source="web",
+                            url=web_url,
+                            content_id=content_id,
+                            user_name=user_name,
+                        )
+                        return
+
+                    # Get primary model for initial message
+                    from llm_config import llm_config as _lc
+                    try:
+                        provider, model, api_key = _lc.get_model_config(None, auto_models[0])
+                        model_label = f"{provider} • {model}"
+                    except Exception as e:
+                        logging.info(f"[AUTO-MODE] llm_config failed: {e}")
+                        provider, model = "inception", "mercury-2"
+
+                    status_msg = await update.message.reply_text(
+                        f"🚀 *Auto-Mode enabled*\n"
+                        f"▪️ Model: `{provider}/{model}`\n"
+                        f"▪️ Variant: `{auto_variant}`\n"
+                        f"▪️ Processing article...",
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logging.error(f"[AUTO-MODE] Exception: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    raise
+
+                # Execute summary directly with fallback support
+                await self._execute_auto_summary_with_fallback(
+                    status_msg,
+                    source="web",
+                    url=web_url,
+                    content_id=content_id,
+                    summary_type=auto_variant,
+                    models=auto_models,
+                    user_name=user_name,
+                    original_message=update.message,
+                )
+                return
+
+            # === NORMAL MODE: Show keyboard ===
             reply_markup = self._build_summary_keyboard(existing_variants, hashed)
             message_text = self._existing_variants_message(content_id, existing_variants, source="web")
 
@@ -3729,32 +3800,44 @@ class YouTubeTelegramBot:
 
     async def _handle_delete_summary(self, query, callback_data: str) -> None:
         """Handle delete summary button click with confirmation dialog."""
-        import urllib.parse
+        from modules.telegram.ui.summary import _short_id
 
         try:
-            # Extract and validate video ID from callback data
+            # Extract short_id or encoded video_id from callback data
             parts = callback_data.split(":", 1)
             if len(parts) != 2:
                 await query.answer("Invalid delete request", show_alert=True)
                 return
 
-            video_id_encoded = parts[1]
-            video_id = urllib.parse.unquote(video_id_encoded)
+            short_id_or_encoded = parts[1]
+
+            # Try to resolve as short_id first (for new long video_ids)
+            # Fall back to URL decoding for backward compatibility
+            video_id = self._delete_id_map.get(short_id_or_encoded)
+            if not video_id:
+                import urllib.parse
+                video_id = urllib.parse.unquote(short_id_or_encoded)
 
             # Validate video_id format (basic check for safe characters)
             if not video_id or not re.match(r'^[a-zA-Z0-9:_-]+$', video_id):
                 await query.answer("Invalid video ID format", show_alert=True)
                 return
 
+            # Use the short_id for callback_data to stay within size limits
+            # If we don't have a short_id in the map, generate one for this session
+            callback_short_id = short_id_or_encoded if short_id_or_encoded in self._delete_id_map else _short_id(video_id)
+            if callback_short_id not in self._delete_id_map:
+                self._delete_id_map[callback_short_id] = video_id
+
             # Check if this is a confirmation click
-            if query.data == f"summary_delete:{video_id_encoded}":
+            if query.data == f"summary_delete:{callback_short_id}":
                 # First click - show confirmation dialog
                 confirm_keyboard = InlineKeyboardMarkup([
                     [
-                        InlineKeyboardButton("✅ Yes, delete", callback_data=f"summary_delete_confirm:{video_id_encoded}"),
+                        InlineKeyboardButton("✅ Yes, delete", callback_data=f"summary_delete_confirm:{callback_short_id}"),
                     ],
                     [
-                        InlineKeyboardButton("❌ Cancel", callback_data=f"summary_delete_cancel:{video_id_encoded}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"summary_delete_cancel:{callback_short_id}"),
                     ],
                 ])
 
@@ -3779,7 +3862,7 @@ class YouTubeTelegramBot:
             # Handle confirmation
             if query.data.startswith("summary_delete_confirm:"):
                 # User confirmed - proceed with deletion
-                await self._execute_delete(query, video_id, video_id_encoded)
+                await self._execute_delete(query, video_id, callback_short_id)
             elif query.data.startswith("summary_delete_cancel:"):
                 # User cancelled
                 try:
