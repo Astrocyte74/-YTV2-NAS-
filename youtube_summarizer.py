@@ -594,8 +594,10 @@ class YouTubeSummarizer:
         source: str = "web",
         source_metadata: Optional[Dict[str, Any]] = None,
         assume_has_audio: bool = False,
+        chapter_slices: Optional[List[Dict[str, Any]]] = None,
+        transcript_segments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Universal text processing pipeline used by non-YouTube sources."""
+        """Universal text processing pipeline used by all content sources including YouTube."""
 
         transcript = (text or "").strip()
         if len(transcript) < 50:
@@ -626,8 +628,8 @@ class YouTubeSummarizer:
                 transcript,
                 safe_metadata,
                 summary_type,
-                chapter_slices=None,
-                transcript_segments=None,
+                chapter_slices=chapter_slices,
+                transcript_segments=transcript_segments,
                 transcript_language=transcript_language,
                 proficiency_level=proficiency_level,
             )
@@ -705,6 +707,13 @@ class YouTubeSummarizer:
             "url": safe_metadata.get("url", ""),
             "metadata": safe_metadata,
             "transcript": transcript,
+            # Include segments/chapters - prefer values from summary_data if present
+            "transcript_segments": (
+                summary_data.get("transcript_segments") if isinstance(summary_data, dict) else None
+            ) or transcript_segments,
+            "chapter_slices": (
+                summary_data.get("chapter_slices") if isinstance(summary_data, dict) else None
+            ) or chapter_slices,
             "summary": summary_data,
             "processed_at": datetime.now().isoformat(),
             "processor_info": {
@@ -3368,123 +3377,37 @@ Multiple Categories (when content genuinely spans areas):
                 'processed_at': datetime.now().isoformat(),
                 'suggestion': "Look for videos with the [CC] closed captions icon on YouTube, or videos from channels that typically include subtitles."
             }
-        
-        # Step 2: Generate summary
+
+        # Step 2: Delegate to universal text processing pipeline
         print("Generating summary...")
-        summary_data = None
-        plan_hint: Optional[List[Dict[str, str]]] = None
-        try:
-            summary_data = await self._generate_structured_summary(
-                transcript,
-                metadata,
-                summary_type,
-                chapter_slices=chapter_slices,
-                transcript_segments=transcript_segments,
-                transcript_language=transcript_language,
-                proficiency_level=proficiency_level,
-            )
-        except Exception as exc:
-            print(f"⚠️ Structured summary pipeline failed, using classic path: {exc}")
-        if not summary_data:
-            try:
-                excerpt = transcript[:STRUCTURED_PLANNER_EXCERPT_CHARS]
-                plan_hint = await self._plan_sections_from_transcript(excerpt, metadata)
-            except Exception:
-                plan_hint = None
-            summary_data = await self.generate_summary(transcript, metadata, summary_type, proficiency_level)
+        video_id = metadata.get('id', metadata.get('video_id', ''))
 
-        # Ensure raw artifacts are carried forward for reporting
-        if isinstance(summary_data, dict):
-            if transcript_segments and not summary_data.get("transcript_segments"):
-                summary_data["transcript_segments"] = transcript_segments
-            if chapter_slices and not summary_data.get("chapter_slices"):
-                summary_data["chapter_slices"] = chapter_slices
-            if plan_hint and not summary_data.get("summary_plan"):
-                summary_data["summary_plan"] = {"source": "planner", "sections": plan_hint}
-
-        summary_language = None
-        if isinstance(summary_data, dict):
-            summary_language = summary_data.get('language')
-            if 'summary' not in summary_data and isinstance(summary_data.get('audio'), str):
-                summary_data['summary'] = summary_data['audio']
-
-        if isinstance(summary_data, str) and not summary_language:
-            summary_language = transcript_language
-        
-        # Step 3: Analyze content (using summary for token efficiency)
-        print("Analyzing content...")
-        if isinstance(summary_data, dict):
-            summary_text = summary_data.get('summary', '') or ''
-            if not summary_text:
-                for key in ('comprehensive', 'key_insights', 'bullet_points', 'audio'):
-                    candidate = summary_data.get(key)
-                    if isinstance(candidate, str) and candidate.strip():
-                        summary_text = candidate.strip()
-                        break
-        else:
-            summary_text = str(summary_data)
-
-        if not summary_text.strip():
-            print("⚠️ Summary text unavailable for analysis. Falling back to transcript excerpt.")
-            summary_text = transcript[:6000]
-
-        analysis_data = await self.analyze_content(summary_text, metadata)
-        if summary_language:
-            analysis_data['language'] = summary_language
-        else:
-            summary_language = analysis_data.get('language', transcript_language)
-        
-        # Enhanced universal schema compliance
-        from urllib.parse import urlparse
-        parsed_url = urlparse(youtube_url)
-        video_id = metadata.get('id', metadata.get('video_id', ''))[:20]  # Limit ID length
-        
-        # Create universal schema structure
-        result = {
-            'id': f"yt:{video_id}" if video_id else f"yt:unknown-{int(datetime.now().timestamp())}",
-            'content_source': 'youtube',
-            'title': metadata.get('title', '')[:300],  # Limit title length
-            'canonical_url': youtube_url,
-            'thumbnail_url': metadata.get('thumbnail', ''),
-            'published_at': self._format_youtube_date(metadata.get('upload_date', '')),
-            'duration_seconds': metadata.get('duration', 0),
-            'word_count': len(transcript.split()) if transcript else 0,
-            
-            'media': {
-                'has_audio': True,  # YouTube videos always have audio
-                'audio_duration_seconds': metadata.get('duration', 0),
-                'has_transcript': bool(transcript and len(transcript.strip()) > 50),
-                'transcript_chars': len(transcript) if transcript else 0
-            },
-            
-            'source_metadata': {
-                'youtube': {
-                    'video_id': video_id,
-                    'channel_name': metadata.get('uploader', 'Unknown')[:100],
-                    'view_count': metadata.get('view_count', 0),
-                    'tags': (metadata.get('tags', []) or [])[:10]  # Limit tags
-                }
-            },
-            
-            'analysis': analysis_data,
-            'original_language': transcript_language,
-            'summary_language': summary_language,
-            'audio_language': summary_language,
-            
-            # Legacy fields for backward compatibility
-            'url': youtube_url,
-            'metadata': metadata,
-            'transcript': transcript,
-            'transcript_segments': transcript_segments,
-            'chapter_slices': chapter_slices,
-            'summary': summary_data,
-            'processed_at': datetime.now().isoformat(),
-            'processor_info': {
-                'llm_provider': self.llm_provider,
-                'model': getattr(self.llm, 'model_name', getattr(self.llm, 'model', self.model))
-            }
+        youtube_source_metadata = {
+            'video_id': video_id,
+            'channel_name': metadata.get('uploader', 'Unknown')[:100],
+            'view_count': metadata.get('view_count', 0),
+            'tags': (metadata.get('tags', []) or [])[:10]
         }
-        
+
+        # Pre-format YouTube date for proper ISO 8601 compliance
+        metadata['published_at'] = self._format_youtube_date(metadata.get('upload_date', ''))
+
+        result = await self.process_text_content(
+            content_id=f"yt:{video_id}" if video_id else f"yt:unknown-{int(datetime.now().timestamp())}",
+            text=transcript,
+            metadata=metadata,
+            summary_type=summary_type,
+            proficiency_level=proficiency_level,
+            source="youtube",
+            source_metadata=youtube_source_metadata,
+            assume_has_audio=True,
+            chapter_slices=chapter_slices,
+            transcript_segments=transcript_segments,
+        )
+
+        # Ensure canonical_url is the YouTube URL (not from generic metadata)
+        result['canonical_url'] = youtube_url
+
         print("✅ Processing complete with universal schema compliance!")
         return result
     
