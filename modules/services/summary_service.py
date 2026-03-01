@@ -1392,9 +1392,9 @@ async def process_content_summary(
                 # This ensures users see the summary immediately
                 await send_formatted_response(handler, query, result, summary_type, export_info, force_new_message=True)
 
-                # Now show sync message and proceed with background operations
+                # Update status to indicate report is saved (sync happens in background)
                 try:
-                    await _safe_edit_status(query, "📄 Report saved. Syncing to dashboard…")
+                    await _safe_edit_status(query, "✅ Report saved. Syncing to dashboard in background…")
                 except Exception:
                     pass
             else:
@@ -1503,54 +1503,64 @@ async def process_content_summary(
 
             is_audio_summary = summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es")
 
-            if not is_audio_summary:
-                json_path_obj = Path(json_path)
-                stem = json_path_obj.stem
-                report_path = Path(f"/app/data/reports/{stem}.json")
-                result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
+            # Run dual-sync in BACKGROUND to avoid blocking Telegram message delivery
+            # This ensures the summary appears immediately while sync happens asynchronously
+            async def _run_dual_sync_background():
+                """Background task for dual-sync operations."""
+                try:
+                    if not is_audio_summary:
+                        json_path_obj = Path(json_path)
+                        stem = json_path_obj.stem
+                        report_path = Path(f"/app/data/reports/{stem}.json")
+                        result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
 
-                logging.info("📡 DUAL-SYNC START: Uploading to configured targets...")
-                outcome = sync_service.run_dual_sync(report_path, label=result_content_id)
-                if outcome["success"]:
-                    sync_service.update_ledger_after_sync(
-                        ledger_id,
-                        summary_type,
-                        targets=outcome["targets"],
-                    )
-                    try:
-                        await _safe_edit_status(query, "✅ Synced to dashboard. Formatting reply…")
-                    except Exception:
-                        pass
-                # run_dual_sync logs failures; no additional handling required here.
-            else:
-                json_path_obj = Path(json_path)
-                stem = json_path_obj.stem
-                report_path = json_path_obj
+                        logging.info("📡 DUAL-SYNC START: Uploading to configured targets...")
+                        outcome = sync_service.run_dual_sync(report_path, label=result_content_id)
+                        if outcome["success"]:
+                            sync_service.update_ledger_after_sync(
+                                ledger_id,
+                                summary_type,
+                                targets=outcome["targets"],
+                            )
+                            try:
+                                await _safe_edit_status(query, "✅ Synced to dashboard.")
+                            except Exception:
+                                pass
+                    else:
+                        json_path_obj = Path(json_path)
+                        stem = json_path_obj.stem
+                        report_path = json_path_obj
 
-                logging.info("📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for %s", result.get('id'))
+                        logging.info("📡 DUAL-SYNC (content-only): Audio summary - syncing metadata for %s", result.get('id'))
 
-                max_retries = 3
-                for attempt in range(max_retries):
-                    if report_path.exists():
-                        break
-                    logging.debug("📄 Waiting for file to be written (attempt %s/%s): %s", attempt + 1, max_retries, report_path)
-                    time.sleep(0.1)
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            if report_path.exists():
+                                break
+                            logging.debug("📄 Waiting for file to be written (attempt %s/%s): %s", attempt + 1, max_retries, report_path)
+                            time.sleep(0.1)
 
-                if report_path.exists():
-                    outcome = sync_service.run_dual_sync(report_path, label=result.get('id'))
-                    if outcome["success"]:
-                        sync_service.update_ledger_after_sync(
-                            ledger_id,
-                            summary_type,
-                            targets=outcome["targets"],
-                        )
-                        logging.info("⏳ Audio sync will happen after TTS generation")
-                        try:
-                            await _safe_edit_status(query, "✅ Synced metadata. ⏳ Audio will upload after TTS…")
-                        except Exception:
-                            pass
-                else:
-                    logging.warning("⚠️ JSON report not found for content sync: %s", report_path)
+                        if report_path.exists():
+                            outcome = sync_service.run_dual_sync(report_path, label=result.get('id'))
+                            if outcome["success"]:
+                                sync_service.update_ledger_after_sync(
+                                    ledger_id,
+                                    summary_type,
+                                    targets=outcome["targets"],
+                                )
+                                logging.info("⏳ Audio sync will happen after TTS generation")
+                                try:
+                                    await _safe_edit_status(query, "✅ Synced metadata. ⏳ Audio will upload after TTS…")
+                                except Exception:
+                                    pass
+                        else:
+                            logging.warning("⚠️ JSON report not found for content sync: %s", report_path)
+                except Exception as e:
+                    logging.warning("⚠️ Background dual-sync failed: %s", e)
+
+            # Launch background task - don't await it
+            import asyncio
+            asyncio.create_task(_run_dual_sync_background())
 
         except Exception as e:
             logging.warning("⚠️ Export failed: %s", e)
