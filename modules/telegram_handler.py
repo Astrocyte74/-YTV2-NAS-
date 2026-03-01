@@ -7331,8 +7331,16 @@ class YouTubeTelegramBot:
 
         return InlineKeyboardMarkup(keyboard) if keyboard else None
 
-    async def _send_long_message(self, query, header_text: str, summary_text: str, reply_markup=None):
-        """Send long messages by splitting into multiple Telegram messages if needed."""
+    async def _send_long_message(self, query, header_text: str, summary_text: str, reply_markup=None, force_new_message: bool = False):
+        """Send long messages by splitting into multiple Telegram messages if needed.
+
+        Args:
+            query: CallbackQuery or message object
+            header_text: Header text for the message
+            summary_text: Summary content
+            reply_markup: Inline keyboard markup
+            force_new_message: If True, send as new message instead of editing status
+        """
         try:
             summary_text = summary_text or ""
             safe_summary = self._escape_markdown(summary_text)
@@ -7341,6 +7349,9 @@ class YouTubeTelegramBot:
             async def _edit_with_retry(text: str, markup=None):
                 while True:
                     try:
+                        # If force_new_message is True, send as a new message instead of editing
+                        if force_new_message:
+                            return await query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
                         return await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
                     except RetryAfter as exc:
                         await asyncio.sleep(exc.retry_after)

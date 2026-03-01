@@ -450,7 +450,7 @@ def validate_quiz_payload(data: dict, explanations: bool = True) -> bool:
         return False
 
 
-async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None) -> None:
+async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None, force_new_message: bool = False) -> None:
     try:
         video_info = result.get('metadata', {})
         source = result.get('content_source') or handler._current_source()
@@ -676,7 +676,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             else:
                 logging.warning("⚠️ No DASHBOARD_URL set - skipping link buttons")
 
-        sent_msg = await handler._send_long_message(query, header_text, summary, reply_markup)
+        sent_msg = await handler._send_long_message(query, header_text, summary, reply_markup, force_new_message=force_new_message)
 
         image_meta = result.get("summary_image") or {}
         image_path_value = (
@@ -1388,9 +1388,9 @@ async def process_content_summary(
             if json_path_obj.exists():
                 logging.info("✅ Exported JSON report: %s", json_path)
 
-                # Send summary to Telegram FIRST, before sync operations
+                # Send summary to Telegram FIRST as a NEW message, before sync operations
                 # This ensures users see the summary immediately
-                await send_formatted_response(handler, query, result, summary_type, export_info)
+                await send_formatted_response(handler, query, result, summary_type, export_info, force_new_message=True)
 
                 # Now show sync message and proceed with background operations
                 try:
