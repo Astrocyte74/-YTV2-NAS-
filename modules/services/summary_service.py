@@ -1436,10 +1436,7 @@ async def process_content_summary(
                 img_enabled = os.getenv('SUMMARY_IMAGE_ENABLED','false').lower() in ('1','true','yes','on')
                 if tts_base and img_enabled:
                     from modules.services import draw_service as _ds
-                    # For this one-time check, prefer the standard health path to verify DT image backend
-                    # (overrides meta) so we don't get false "reachable" signals.
-                    prev_mode = os.getenv('TTSHUB_HEALTH_MODE')
-                    os.environ['TTSHUB_HEALTH_MODE'] = 'standard'
+                    # Use meta mode for health check (/api/meta returns JSON, /drawthings/health returns HTML)
                     health = None
                     health_error = None
                     try:
@@ -1447,11 +1444,6 @@ async def process_content_summary(
                     except Exception as exc:
                         health_error = exc
                         logging.debug("summary image health probe failed: %s", exc)
-                    finally:
-                        if prev_mode is None:
-                            os.environ.pop('TTSHUB_HEALTH_MODE', None)
-                        else:
-                            os.environ['TTSHUB_HEALTH_MODE'] = prev_mode
 
                     reachable = bool((health or {}).get('reachable', False)) if health is not None else False
                     # Detect if report already has an image URL
