@@ -1615,7 +1615,8 @@ class YouTubeTelegramBot:
             if auto_mode_enabled:
                 try:
                     # Get auto-mode configuration
-                    auto_model = os.getenv('AUTO_MODE_MODEL', 'mercury-2')
+                    auto_models_str = os.getenv('AUTO_MODE_MODELS', 'mercury-2,google/gemini-2.5-flash-lite')
+                    auto_models = [m.strip() for m in auto_models_str.split(',') if m.strip()]
                     auto_variant = os.getenv('AUTO_MODE_VARIANT', 'key-insights')
 
                     # Check if variant already exists
@@ -1628,10 +1629,10 @@ class YouTubeTelegramBot:
                         )
                         return
 
-                    # Send processing message - save message reference for later updates
+                    # Get primary model for initial message
+                    from llm_config import llm_config as _lc
                     try:
-                        from llm_config import llm_config as _lc
-                        provider, model, api_key = _lc.get_model_config(None, auto_model)
+                        provider, model, api_key = _lc.get_model_config(None, auto_models[0])
                         model_label = f"{provider} • {model}"
                     except Exception as e:
                         logging.info(f"[AUTO-MODE] llm_config failed: {e}")
@@ -1650,15 +1651,14 @@ class YouTubeTelegramBot:
                     logging.error(traceback.format_exc())
                     raise
 
-                # Execute summary directly
-                await self._execute_auto_summary(
+                # Execute summary directly with fallback support
+                await self._execute_auto_summary_with_fallback(
                     status_msg,
                     source="youtube",
                     url=video_url,
                     content_id=normalized_id,
                     summary_type=auto_variant,
-                    provider=provider,
-                    model=model,
+                    models=auto_models,
                     user_name=user_name,
                     original_message=update.message,
                 )
@@ -7567,6 +7567,111 @@ class YouTubeTelegramBot:
         if old and not old.done():
             old.cancel()
         self._auto_tasks[key] = asyncio.create_task(_runner())
+
+    async def _execute_auto_summary_with_fallback(
+        self,
+        status_message,
+        *,
+        source: str,
+        url: str,
+        content_id: str,
+        summary_type: str,
+        models: list,
+        user_name: str,
+        original_message=None,
+    ) -> None:
+        """Execute auto-summary with fallback models on failure."""
+        from llm_config import llm_config as _lc
+
+        # Create a message wrapper for editing
+        class _MessageWrapper:
+            def __init__(self, status_msg, original=None):
+                self.message = status_msg
+                self.original_message = original
+                self._status_message = status_msg
+
+            async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+                try:
+                    return await self._status_message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                except Exception as e:
+                    logging.warning(f"edit_message_text failed: {e}")
+                    if self.original_message:
+                        return await self.original_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                    return await self._status_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+            async def answer(self, text, show_alert=False):
+                pass
+
+        fake_query = _MessageWrapper(status_message, original_message)
+
+        # Try each model in sequence
+        last_error = None
+        for i, model_slug in enumerate(models):
+            try:
+                provider, model, api_key = _lc.get_model_config(None, model_slug)
+
+                # Update status to show which model is being tried
+                if i > 0:
+                    # Fallback scenario
+                    await fake_query.edit_message_text(
+                        f"⚠️ *Previous model failed, trying fallback...*\n"
+                        f"▪️ Model: `{provider}/{model}`\n"
+                        f"▪️ Variant: `{summary_type}`\n"
+                        f"▪️ Processing...",
+                        parse_mode='Markdown'
+                    )
+
+                # Set current_item context
+                self.current_item = {
+                    "source": source,
+                    "url": url,
+                    "content_id": content_id if source != "youtube" else f"yt:{content_id}",
+                    "raw_id": content_id,
+                    "normalized_id": content_id,
+                }
+
+                # Prepare model option
+                model_option = {
+                    "provider": provider,
+                    "model": model,
+                    "label": f"{provider} • {model}",
+                    "button_label": f"{self._short_label(model, 24)}",
+                }
+
+                # Prepare session payload
+                session_payload = {
+                    "summary_type": summary_type,
+                    "proficiency_level": None,
+                    "user_name": user_name,
+                    "provider_options": {},
+                    "auto_mode": True,
+                }
+
+                # Execute the summary
+                await self._execute_summary_with_model(
+                    fake_query,
+                    session_payload,
+                    provider,
+                    model_option,
+                )
+
+                # Success! Return early
+                return
+
+            except Exception as exc:
+                last_error = exc
+                logging.warning(f"[AUTO-MODE] Model {model_slug} failed: {exc}")
+
+        # All models failed
+        error_msg = f"❌ All models failed. Last error: {str(last_error)[:100]}"
+        logging.error(f"[AUTO-MODE] All fallback models exhausted")
+        try:
+            if original_message:
+                await original_message.reply_text(error_msg)
+            else:
+                await status_message.reply_text(error_msg)
+        except Exception:
+            pass
 
     async def _execute_auto_summary(
         self,
