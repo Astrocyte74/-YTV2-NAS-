@@ -1392,9 +1392,10 @@ async def process_content_summary(
                 # This ensures users see the summary immediately
                 await send_formatted_response(handler, query, result, summary_type, export_info, force_new_message=True)
 
-                # Update status to indicate report is saved (sync happens in background)
+                # Update status to indicate processing complete
+                # Sync happens in background, confirmation will appear as new message
                 try:
-                    await _safe_edit_status(query, "✅ Report saved. Syncing to dashboard in background…")
+                    await _safe_edit_status(query, "✅ Summary complete.")
                 except Exception:
                     pass
             else:
@@ -1522,8 +1523,9 @@ async def process_content_summary(
                                 summary_type,
                                 targets=outcome["targets"],
                             )
+                            # Send as NEW message after the summary
                             try:
-                                await _safe_edit_status(query, "✅ Synced to dashboard.")
+                                await query.message.reply_text("✅ Synced to dashboard.")
                             except Exception:
                                 pass
                     else:
@@ -1549,8 +1551,9 @@ async def process_content_summary(
                                     targets=outcome["targets"],
                                 )
                                 logging.info("⏳ Audio sync will happen after TTS generation")
+                                # Send as NEW message after the summary
                                 try:
-                                    await _safe_edit_status(query, "✅ Synced metadata. ⏳ Audio will upload after TTS…")
+                                    await query.message.reply_text("✅ Synced metadata. ⏳ Audio will upload after TTS…")
                                 except Exception:
                                     pass
                         else:
