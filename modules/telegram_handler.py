@@ -479,6 +479,7 @@ class YouTubeTelegramBot:
         self,
         existing_variants: Optional[List[str]] = None,
         video_id: Optional[str] = None,
+        show_delete_button: bool = False,
     ) -> InlineKeyboardMarkup:
         dashboard_url = None
         if video_id:
@@ -492,6 +493,7 @@ class YouTubeTelegramBot:
             existing_variants=existing_variants,
             video_id=video_id,
             dashboard_url=dashboard_url,
+            show_delete_button=show_delete_button,
         )
 
     def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
@@ -3694,6 +3696,66 @@ class YouTubeTelegramBot:
             reply_markup=keyboard,
         )
 
+    async def _handle_delete_summary(self, query, callback_data: str) -> None:
+        """Handle delete summary button click."""
+        import urllib.parse
+
+        try:
+            # Extract video ID from callback data
+            parts = callback_data.split(":", 1)
+            if len(parts) != 2:
+                await query.answer("Invalid delete request", show_alert=True)
+                return
+
+            video_id_encoded = parts[1]
+            video_id = urllib.parse.unquote(video_id_encoded)
+
+            # Show confirmation message
+            await query.edit_message_text(
+                f"🗑️ Deleting summary for: `{video_id}`\n\nPlease wait...",
+                parse_mode=ParseMode.MARKDOWN
+            )
+
+            # Get dashboard URL from environment
+            dashboard_url = os.getenv('DASHBOARD_URL') or os.getenv('RENDER_DASHBOARD_URL') or os.getenv('RENDER_API_URL')
+            if not dashboard_url:
+                await query.edit_message_text("❌ Dashboard URL not configured")
+                return
+
+            # Build delete API URL
+            delete_url = f"{dashboard_url}/api/delete/{urllib.parse.quote(video_id, safe='')}"
+
+            # Get authentication token
+            auth_token = os.getenv('SYNC_SECRET')
+            headers = {}
+            if auth_token:
+                headers['Authorization'] = f'Bearer {auth_token}'
+
+            # Call dashboard DELETE API
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.delete(delete_url, headers=headers)
+                if response.status_code == 200:
+                    result = response.json()
+                    deleted_count = len(result.get('deleted_files', []))
+                    errors = result.get('errors', [])
+
+                    if errors:
+                        error_msg = f"⚠️ Deleted {deleted_count} item(s) with errors:\n" + "\n".join(errors[:3])
+                        if len(errors) > 3:
+                            error_msg += f"\n...and {len(errors) - 3} more"
+                        await query.edit_message_text(error_msg)
+                    else:
+                        await query.edit_message_text(f"✅ Summary deleted successfully ({deleted_count} item(s))")
+                elif response.status_code == 404:
+                    await query.edit_message_text("ℹ️ Summary not found (may have been already deleted)")
+                else:
+                    await query.edit_message_text(f"❌ Delete failed: HTTP {response.status_code}")
+
+        except Exception as exc:
+            logging.error(f"Delete summary failed: {exc}")
+            await query.edit_message_text(f"❌ Delete failed: {str(exc)[:100]}")
+
     # ------------------------- Ollama chat integration -------------------------
     def _ollama_models_list(self, raw: Dict[str, Any]) -> List[str]:
         models = []
@@ -6435,6 +6497,10 @@ class YouTubeTelegramBot:
                 except Exception:
                     pass
                 return
+        elif callback_data.startswith("summary_delete:"):
+            # Handle delete summary button
+            await self._handle_delete_summary(query, callback_data)
+            return
         elif callback_data.startswith("summary_model:"):
             suffix = callback_data.split(":", 1)[1]
             if suffix == "back":

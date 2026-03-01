@@ -20,6 +20,7 @@ def build_summary_keyboard(
     existing_variants: Optional[List[str]] = None,
     video_id: Optional[str] = None,
     dashboard_url: Optional[str] = None,
+    show_delete_button: bool = False,
 ) -> InlineKeyboardMarkup:
     existing_variants = existing_variants or []
     existing_bases = {variant.split(':', 1)[0] for variant in existing_variants}
@@ -51,6 +52,13 @@ def build_summary_keyboard(
         report_id_encoded = urllib.parse.quote(video_id, safe='')
         keyboard.append([
             InlineKeyboardButton("📄 Open summary", url=f"{dashboard_url}#report={report_id_encoded}"),
+        ])
+
+    # Add delete button when showing summary results (not in initial selection)
+    if show_delete_button and video_id:
+        report_id_encoded = urllib.parse.quote(video_id, safe='')
+        keyboard.append([
+            InlineKeyboardButton("🗑️ Delete", callback_data=f"summary_delete:{report_id_encoded}"),
         ])
 
     return InlineKeyboardMarkup(keyboard)

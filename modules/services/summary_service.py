@@ -668,6 +668,11 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     if row2:
                         keyboard.append(row2)
 
+                    # Add delete button
+                    delete_cb = f"summary_delete:{report_id_encoded}"
+                    row3 = [InlineKeyboardButton("🗑️ Delete", callback_data=delete_cb)]
+                    keyboard.append(row3)
+
                     keyboard.append([
                         InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")
                     ])
