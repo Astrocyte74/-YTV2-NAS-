@@ -1610,6 +1610,61 @@ class YouTubeTelegramBot:
             reply_markup = self._build_summary_keyboard(existing_variants, normalized_id)
             message_text = self._existing_variants_message(normalized_id, existing_variants, source="youtube")
 
+            # === AUTO-MODE: Skip keyboard, process immediately ===
+            auto_mode_enabled = str(os.getenv('TELEGRAM_AUTO_MODE', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+            if auto_mode_enabled:
+                try:
+                    # Get auto-mode configuration
+                    auto_model = os.getenv('AUTO_MODE_MODEL', 'mercury-2')
+                    auto_variant = os.getenv('AUTO_MODE_VARIANT', 'key-insights')
+
+                    # Check if variant already exists
+                    current_variants = set(existing_variants or [])
+                    if any((auto_variant == v.split(':', 1)[0]) for v in current_variants):
+                        # Variant exists, show normal keyboard
+                        reply_msg = await update.message.reply_text(
+                            message_text,
+                            reply_markup=reply_markup
+                        )
+                        return
+
+                    # Send processing message - save message reference for later updates
+                    try:
+                        from llm_config import llm_config as _lc
+                        provider, model, api_key = _lc.get_model_config(None, auto_model)
+                        model_label = f"{provider} • {model}"
+                    except Exception as e:
+                        logging.info(f"[AUTO-MODE] llm_config failed: {e}")
+                        provider, model = "inception", "mercury-2"
+
+                    status_msg = await update.message.reply_text(
+                        f"🚀 *Auto-Mode enabled*\n"
+                        f"▪️ Model: `{provider}/{model}`\n"
+                        f"▪️ Variant: `{auto_variant}`\n"
+                        f"▪️ Processing summary...",
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logging.error(f"[AUTO-MODE] Exception: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    raise
+
+                # Execute summary directly
+                await self._execute_auto_summary(
+                    status_msg,
+                    source="youtube",
+                    url=video_url,
+                    content_id=normalized_id,
+                    summary_type=auto_variant,
+                    provider=provider,
+                    model=model,
+                    user_name=user_name,
+                    original_message=update.message,
+                )
+                return
+
+            # === NORMAL MODE: Show keyboard ===
             reply_msg = await update.message.reply_text(
                 message_text,
                 reply_markup=reply_markup
@@ -6146,6 +6201,9 @@ class YouTubeTelegramBot:
                 await self._show_main_summary_options(query)
                 return
 
+            # === AUTO-MODE: Skip all prompts if enabled ===
+            auto_mode_enabled = str(os.getenv('TELEGRAM_AUTO_MODE', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+            # === NORMAL MODE: Show prompts ===
             parts = raw.split(":", 1)
             summary_type = parts[0]  # "audio-fr" / "audio-es" / "audio"
             proficiency_level = parts[1] if len(parts) == 2 else None
@@ -7509,6 +7567,91 @@ class YouTubeTelegramBot:
         if old and not old.done():
             old.cancel()
         self._auto_tasks[key] = asyncio.create_task(_runner())
+
+    async def _execute_auto_summary(
+        self,
+        status_message,
+        *,
+        source: str,
+        url: str,
+        content_id: str,
+        summary_type: str,
+        provider: str,
+        model: str,
+        user_name: str,
+        original_message=None,
+    ) -> None:
+        """Execute an immediate auto-summary without user interaction."""
+        try:
+            # Get summarizer
+            summarizer = self._get_summary_summarizer(provider, model)
+
+            # Create a fake query wrapper for the summary execution
+            class _MessageWrapper:
+                def __init__(self, status_msg, original=None):
+                    self.message = status_msg
+                    self.original_message = original
+                    self._status_message = status_msg
+
+                async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+                    try:
+                        # Try to edit the status message
+                        return await self._status_message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                    except Exception as e:
+                        # If edit fails, send a new message
+                        logging.warning(f"edit_message_text failed: {e}")
+                        if self.original_message:
+                            return await self.original_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                        return await self._status_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+                async def answer(self, text, show_alert=False):
+                    pass
+
+            fake_query = _MessageWrapper(status_message, original_message)
+
+            # Prepare model option
+            model_option = {
+                "provider": provider,
+                "model": model,
+                "label": f"{provider} • {model}",
+                "button_label": f"{self._short_label(model, 24)}",
+            }
+
+            # Prepare session payload
+            session_payload = {
+                "summary_type": summary_type,
+                "proficiency_level": None,
+                "user_name": user_name,
+                "provider_options": {},
+                "auto_mode": True,
+            }
+
+            # Ensure current_item context is set
+            self.current_item = {
+                "source": source,
+                "url": url,
+                "content_id": content_id if source != "youtube" else f"yt:{content_id}",
+                "raw_id": content_id,
+                "normalized_id": content_id,
+            }
+
+            # Execute the summary
+            await self._execute_summary_with_model(
+                fake_query,
+                session_payload,
+                provider,
+                model_option,
+            )
+
+        except Exception as exc:
+            logging.error(f"Auto-mode summary failed: {exc}")
+            try:
+                if original_message:
+                    await original_message.reply_text(f"❌ Auto-mode failed: {str(exc)[:100]}")
+                else:
+                    await status_message.reply_text(f"❌ Auto-mode failed: {str(exc)[:100]}")
+            except Exception:
+                pass
 
     def _ai2ai_audio_caption(self, session: Dict[str, Any]) -> str:
         defaults = self._ollama_persona_defaults()

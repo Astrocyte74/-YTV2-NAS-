@@ -116,6 +116,17 @@ show_status() {
     # Recent activity
     print_section "Recent Activity (Last 5)"
     docker logs youtube-summarizer-bot 2>&1 | grep -E "PROCESSING:|Syncing|Error" | tail -5 | sed 's/^/  /' || echo "  No recent activity"
+
+    # Agent guidelines
+    print_section "Claude Agent Setup (Copy/Paste for New Agents)"
+    echo -e "${YELLOW}Read /Users/markdarby16/16projects/ytv2/AI_AGENT_GUIDELINES.md first${NC}"
+    echo -e "${YELLOW}Run 'ytv2 agent' for quick reference (or paste the output below)${NC}"
+    echo -e "Active dashboard: ${CYAN}dashboard16/${NC} | Backend: ${CYAN}backend/${NC}"
+    echo -e "${RED}Never touch: backup/ archive/ render_backup/ DO_NOT_TOUCH_*${NC}"
+    echo -e "${GREEN}Dashboard uses PostgreSQL, not JSON files${NC}"
+    echo -e "${RED}⚠️  JS CRITICAL: Always null-check properties (activeFilters, _filterOptions, etc.)${NC}"
+    echo -e "${RED}⚠️  JS CRITICAL: Test EVERY JS change with browser hard refresh before committing${NC}"
+    echo -e "${YELLOW}⚠️  DOCKER: Restart container after JS/HTML changes: docker restart ytv2-dashboard${NC}"
 }
 
 show_stats() {
@@ -344,6 +355,47 @@ verify_setup() {
     fi
 }
 
+show_agent_info() {
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  Claude Agent Quick Reference${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "${BLUE}▶ Project Structure${NC}"
+    echo -e "  Dashboard: ${GREEN}dashboard16/${NC} (port 10000) | PostgreSQL"
+    echo -e "  Backend:   ${GREEN}backend/${NC} (port 6452)       | JSON files"
+    echo -e "  Guidelines: ${YELLOW}AI_AGENT_GUIDELINES.md${NC}"
+    echo ""
+    echo -e "${BLUE}▶ When to Restart Docker${NC}"
+    echo -e "  ${RED}RESTART NEEDED:${NC} requirements*.txt, docker-compose.yml"
+    echo -e "  ${RED}RESTART NEEDED:${NC} Python modules (modules/, server.py) - Python caches imports"
+    echo -e "  ${RED}RESTART NEEDED:${NC} JS/HTML/CSS changes - container must pick up file changes"
+    echo -e "  ${GREEN}Command:${NC}      ${CYAN}docker restart ytv2-dashboard${NC}"
+    echo ""
+    echo -e "${BLUE}▶ JavaScript CRITICAL Rules${NC}"
+    echo -e "  ${RED}⚠️  ALWAYS null-check:${NC} this.activeFilters, this._filterOptions, etc."
+    echo -e "  ${RED}⚠️  TEST EVERY CHANGE:${NC} Hard refresh browser (Cmd+Shift+R) after each edit"
+    echo -e "  ${RED}⚠️  IF PAGE STUCK ON 'Loading...':${NC} There's a JS error - check null checks"
+    echo ""
+    echo -e "${BLUE}▶ How to Restart${NC}"
+    echo -e "  ${GREEN}ytv2 restart${NC}           # Safely restart both containers"
+    echo -e "  ${GREEN}docker restart ytv2-dashboard${NC}  # Dashboard only"
+    echo -e "  ${GREEN}docker restart youtube-summarizer-bot${NC}  # Backend only"
+    echo ""
+    echo -e "${BLUE}▶ Verify After Changes${NC}"
+    echo -e "  ${GREEN}ytv2 status${NC}            # Check container health"
+    echo -e "  ${GREEN}ytv2 logs ytv2-dashboard 20${NC}  # Check dashboard logs"
+    echo -e "  ${GREEN}ytv2 logs youtube-summarizer-bot 20${NC}  # Check backend logs"
+    echo ""
+    echo -e "${BLUE}▶ Critical Rules${NC}"
+    echo -e "  ${RED}NEVER touch:${NC} backup/, archive/, render_backup/, DO_NOT_TOUCH_*"
+    echo -e "  ${YELLOW}Dashboard data source:${NC} PostgreSQL (NOT backend JSON files)"
+    echo ""
+    echo -e "${BLUE}▶ Git Repos (separate!)${NC}"
+    echo -e "  ${GREEN}cd /Users/markdarby16/16projects/ytv2/dashboard16 && git status${NC}"
+    echo -e "  ${GREEN}cd /Users/markdarby16/16projects/ytv2/backend && git status${NC}"
+    echo ""
+}
+
 show_help() {
     cat << EOF
 ${CYAN}YTV2 Management CLI${NC}
@@ -356,6 +408,7 @@ Commands:
   ${GREEN}restart${NC}             Safely restart all servers (preserves URLs)
   ${GREEN}logs [service] [n]${NC}  Show recent logs (default: backend, 50 lines)
   ${GREEN}verify${NC}              Verify setup and detect issues
+  ${GREEN}agent${NC}               Show quick reference for Claude agents
   ${GREEN}help${NC}                Show this help message
 
 Examples:
@@ -364,6 +417,7 @@ Examples:
   ytv2 restart             # Restart all servers safely
   ytv2 logs ytv2-dashboard # Show dashboard logs
   ytv2 verify              # Verify everything is configured correctly
+  ytv2 agent               # Show agent quick reference
 
 Shortcut: You can use 'ytv2' without arguments to show status.
 EOF
@@ -387,6 +441,9 @@ case "${1:-status}" in
         ;;
     verify)
         verify_setup
+        ;;
+    agent)
+        show_agent_info
         ;;
     help|--help|-h)
         show_help

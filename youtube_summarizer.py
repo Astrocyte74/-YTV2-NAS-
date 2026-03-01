@@ -465,6 +465,11 @@ class YouTubeSummarizer:
                     "X-Title": "YouTube Summarizer"
                 }
             )
+        elif self.llm_provider == "inception":
+            # Inception Labs Mercury-2 - Direct API client
+            # Supports "instant" mode for fast responses via reasoning_effort parameter
+            from modules.services.mercury_service import create_mercury_llm
+            self.llm = create_mercury_llm(self.model)
         elif self.llm_provider == "ollama":
             # If a local base is configured, route via our helper and skip ChatOllama
             local_env = os.getenv("TTSHUB_API_BASE") or os.getenv("OLLAMA_URL") or os.getenv("OLLAMA_HOST")
@@ -2737,7 +2742,7 @@ Preview:
             Organize the content into thematic categories based on the material itself (no external analysis).
 
             Output:
-            - 3–5 short category headings derived from the content.
+            - Use an appropriate number of thematic category headings based on the content structure.
             - Under each heading, provide 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
 
             Rules:
@@ -3800,7 +3805,7 @@ Multiple Categories (when content genuinely spans areas):
         {summary}
 
         Output:
-        - 3–5 short category headings derived from the content.
+        - Use an appropriate number of thematic category headings based on the content structure.
         - Under each heading, include 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
 
         Rules:

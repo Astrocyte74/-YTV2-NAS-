@@ -55,14 +55,14 @@ class LLMConfig:
             "primary": [("openrouter", "moonshotai/kimi-k2"), ("openrouter", "z-ai/glm-4.5"), ("openrouter", "qwen/qwen3-coder")],
             "fallback": [("openrouter", "anthropic/claude-3-5-sonnet-20241022"), ("openrouter", "openai/gpt-4o")]
         },
-        # User-preferred OpenRouter defaults
+        # User-preferred defaults - Mercury-2 is the primary choice
         "openrouter_defaults": {
             # Models requested to appear first in the Cloud picker
             "primary": [
+                ("inception", "mercury-2"),
+                ("inception", "mercury-2-instant"),
                 ("openrouter", "google/gemini-2.5-flash-lite"),
                 ("openrouter", "x-ai/grok-4-fast"),
-                ("openrouter", "openai/gpt-5-mini"),
-                ("openrouter", "openai/gpt-5-nano"),
             ],
             # Safe fallbacks that commonly exist on OpenRouter
             "fallback": [],
@@ -78,7 +78,8 @@ class LLMConfig:
         "openai": "gpt-4o-mini",
         "anthropic": "claude-3-sonnet-20240229",
         "openrouter": "openai/gpt-4o-mini",
-        "ollama": "llama3.2"
+        "ollama": "llama3.2",
+        "inception": "mercury-2"
     }
     
     def __init__(self):
@@ -95,8 +96,9 @@ class LLMConfig:
         
         # Load API keys
         self.openai_key = os.getenv('OPENAI_API_KEY')
-        self.anthropic_key = os.getenv('ANTHROPIC_API_KEY') 
+        self.anthropic_key = os.getenv('ANTHROPIC_API_KEY')
         self.openrouter_key = os.getenv('OPENROUTER_API_KEY')
+        self.inception_key = os.getenv('INCEPTION_API_KEY')
         
         # Ollama settings
         self.ollama_host = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
@@ -249,6 +251,8 @@ class LLMConfig:
             return self.anthropic_key
         elif provider == "openrouter":
             return self.openrouter_key
+        elif provider == "inception":
+            return self.inception_key
         elif provider == "ollama":
             return None  # Ollama doesn't need API key
         return None
@@ -262,18 +266,22 @@ class LLMConfig:
                 return "openrouter"
             if head == "ollama":
                 return "ollama"
+            if head == "inception":
+                return "inception"
             return "openrouter"
         if any(prefix in lowered for prefix in ['gpt', 'chatgpt', 'openai']):
             return "openai"
         elif any(prefix in lowered for prefix in ['claude', 'anthropic']):
             return "anthropic"
+        elif any(prefix in lowered for prefix in ['mercury', 'inception']):
+            return "inception"
         elif any(suffix in lowered for suffix in [':latest', ':3b', ':7b', ':9b', ':12b']):
             return "ollama"
         return None
 
     def _normalize_model_for_provider(self, model: str, provider: str) -> str:
         """Strip vendor prefixes when direct provider APIs are used."""
-        if provider in {"openai", "anthropic"} and "/" in model:
+        if provider in {"openai", "anthropic", "inception"} and "/" in model:
             return model.split("/", 1)[1].strip()
         if provider == "ollama" and model.lower().startswith("ollama/"):
             return model.split("/", 1)[1].strip()
@@ -285,6 +293,7 @@ class LLMConfig:
             "openai": bool(self.openai_key),
             "anthropic": bool(self.anthropic_key),
             "openrouter": bool(self.openrouter_key),
+            "inception": bool(self.inception_key),
             "ollama": True  # Assume Ollama is available if needed
         }
     
