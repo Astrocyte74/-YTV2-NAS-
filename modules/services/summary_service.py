@@ -1430,7 +1430,7 @@ async def process_content_summary(
             ledger.upsert(ledger_id, summary_type, ledger_entry)
             logging.info("📊 Added to ledger: %s:%s", display_id, summary_type)
 
-            # Ensure an image job exists when hub is offline: enqueue here if needed and notify.
+            # Ensure an image job exists: enqueue here if needed and notify
             try:
                 tts_base = os.getenv('TTSHUB_API_BASE') or ''
                 img_enabled = os.getenv('SUMMARY_IMAGE_ENABLED','false').lower() in ('1','true','yes','on')
@@ -1457,7 +1457,8 @@ async def process_content_summary(
                     except Exception:
                         pass
 
-                    if not reachable and not has_image:
+                    # Always enqueue if no image exists (queue processor will generate immediately if hub is online)
+                    if not has_image:
                         # Build minimal content payload and enqueue if missing
                         try:
                             from modules import image_queue as _iq
@@ -1472,7 +1473,9 @@ async def process_content_summary(
                                     'analysis': report_dict.get('analysis') or {},
                                 }
                                 _iq.enqueue({'mode':'summary_image','content':payload,'reason':'summary_offline_enqueue'})
-                                notice = f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))} (hub offline)"
+                                notice = f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))}"
+                                if not reachable:
+                                    notice += " (hub offline, will retry when online)"
                                 try:
                                     await query.message.reply_text(notice, parse_mode=ParseMode.MARKDOWN)
                                 except Exception:
