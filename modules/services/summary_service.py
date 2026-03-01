@@ -1387,7 +1387,12 @@ async def process_content_summary(
             json_path_obj = Path(json_path)
             if json_path_obj.exists():
                 logging.info("✅ Exported JSON report: %s", json_path)
-                # UX: nudge status so Telegram users see progress during longer runs
+
+                # Send summary to Telegram FIRST, before sync operations
+                # This ensures users see the summary immediately
+                await send_formatted_response(handler, query, result, summary_type, export_info)
+
+                # Now show sync message and proceed with background operations
                 try:
                     await _safe_edit_status(query, "📄 Report saved. Syncing to dashboard…")
                 except Exception:
@@ -1550,7 +1555,10 @@ async def process_content_summary(
         except Exception as e:
             logging.warning("⚠️ Export failed: %s", e)
 
-        await send_formatted_response(handler, query, result, summary_type, export_info)
+        # Send summary to Telegram if not already sent (happens early if JSON export succeeded)
+        # Only send here if json_path is not set (meaning early send didn't happen)
+        if not export_info.get("json_path"):
+            await send_formatted_response(handler, query, result, summary_type, export_info)
 
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)
