@@ -92,3 +92,69 @@ That yields:
 - `requests`
 
 If the Intel app already has its own web framework, Flask is only needed if you also want to run the standalone API wrapper.
+
+## Recommended test order
+
+Do not start by debugging the Flask wrapper and the provider stack at the same time.
+Validate the system in this order:
+
+1. import the package successfully
+2. verify `.env` loading and required keys
+3. verify stage overrides
+4. run one direct `run_research(...)` call
+5. only then test the standalone HTTP wrapper
+6. only after that test `provider_mode=auto` and Brave behavior
+
+The shortest path is:
+
+```bash
+cd portable/research_api
+python3 smoke_test.py --check-only
+python3 smoke_test.py
+```
+
+The default smoke test intentionally uses:
+
+- `provider_mode=tavily`
+- `depth=quick`
+
+That avoids Brave rate limiting as a first debugging variable.
+
+## What success looks like
+
+With the preferred hybrid config:
+
+- planner should be `openrouter (google/gemini-3.1-flash-lite-preview)`
+- synthesis should be `inception (mercury-2)`
+
+If that is not what you see, stop and fix configuration before testing more prompts.
+
+## Common failure signals
+
+If planner and synthesis both show Mercury:
+
+- the stage override env vars were not loaded
+
+If planner is Gemini but synthesis is `fallback (deterministic)`:
+
+- Mercury synthesis failed
+- or the Inception key/config is wrong
+
+If the query list is too narrow or one-sided on compare prompts:
+
+- planner override is probably not active
+
+If the answer preview starts with plain sections like `Research summary` and `Top findings`:
+
+- deterministic synthesis fired
+
+## After the smoke test passes
+
+Once direct import works, then test:
+
+1. `python3 app.py`
+2. `GET /health`
+3. `GET /api/research/status`
+4. `POST /api/research`
+
+If `/api/research/status` does not show the expected `llm_stage_overrides`, fix env loading before anything else.

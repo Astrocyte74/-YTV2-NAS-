@@ -53,6 +53,18 @@ python3 app.py
 
 Default port is `8090`.
 
+## Quick validation
+
+Before debugging provider behavior or HTTP integration, run the included smoke test:
+
+```bash
+cd /path/to/research_api
+python3 smoke_test.py --check-only
+python3 smoke_test.py
+```
+
+See [INTEL_INTEGRATION.md](./INTEL_INTEGRATION.md) for the recommended validation order and failure signals.
+
 ## Example request
 
 ```bash
