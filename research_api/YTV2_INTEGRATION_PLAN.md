@@ -95,6 +95,7 @@ class FollowUpSuggestion:
 class FollowUpResearchPlan:
     approved_questions: list[str]
     question_provenance: list[str]  # ["suggested", "preset", "custom"]
+    question_kinds: list[str]  # ["pricing", "comparison", "what_changed", etc.]
     planned_queries: list[str]
     coverage_map: list[dict]
     dedupe_notes: str
@@ -175,22 +176,36 @@ CREATE TABLE follow_up_research_runs (
   video_id TEXT NOT NULL REFERENCES content(video_id),
   summary_id BIGINT REFERENCES summaries(id),
   approved_questions TEXT[] NOT NULL,
-  question_provenance TEXT[],
+  question_provenance TEXT[],  -- ["suggested", "preset", "custom"]
+  question_kinds TEXT[],       -- ["pricing", "comparison", "what_changed"]
   planned_queries TEXT[],
   coverage_map JSONB,
   research_response TEXT,
   research_meta JSONB,
-  cache_key TEXT,
+  cache_key TEXT UNIQUE NOT NULL,
   created_at TIMESTAMPTZ DEFAULT now(),
   completed_at TIMESTAMPTZ,
   status TEXT DEFAULT 'pending'
 );
-CREATE UNIQUE INDEX idx_follow_up_cache ON follow_up_research_runs(cache_key);
+
+-- Source of truth: follow_up_research_runs stores the canonical result
+-- summaries table stores a lightweight reference (if needed for variant UI)
 ```
 
-**New Summary Variant**: Add to summaries table
-```sql
--- No schema change needed, just use variant = 'deep-research'
+**Storage Model Decision**:
+- `follow_up_research_runs` = **Canonical source of truth** (full response, metadata, cache)
+- `summaries` table = **Optional reference only** (stores variant name for UI tab discovery)
+- No duplicate storage — summaries stores `variant='deep-research'` + `follow_up_run_id` reference
+
+**Cache Key Composition**:
+```python
+cache_key = f"{video_id}:{summary_id}:{normalized_questions}:{provider_mode}:{depth}"
+# Includes:
+# - video_id: content identity
+# - summary_id: specific summary revision
+# - normalized_questions: sorted, deduped approved questions
+# - provider_mode: research provider strategy
+# - depth: research depth setting
 ```
 
 #### 1.4 Telegram Handler Extensions
@@ -255,7 +270,8 @@ async def _execute_follow_up_research(
         source_context=source_context,
         summary=summary,
         approved_questions=approved_questions,
-        provider_mode="tavily",  # Start with tavily to avoid rate limits
+        provider_mode="tavily",  # TEMPORARY v1: bypass Brave rate limits during rollout
+                               # TODO: Switch to "auto" after monitoring
         depth="balanced",
     )
 
@@ -385,9 +401,12 @@ async def run_followup_research(request: FollowUpResearchRequest):
 #### 3.2 React Integration
 
 ```tsx
-// Import the research reader
+// TEMPORARY import path - move to proper shared location before production
 import { ResearchReportView } from '../../research_reader_react/src';
 import '../../research_reader_react/src/research-reader.css';
+
+// TODO: Move research_reader_react to shared frontend package or monorepo location
+// Current path is relative from dashboard/src, not portable across deployments
 
 function DeepResearchTab({ videoId, summary }) {
   const [suggestions, setSuggestions] = useState([]);
@@ -519,32 +538,38 @@ async def _follow_up_confirm_handler(self, update, video_id, selected_questions)
 
 ## Implementation Order
 
-### Sprint 1: Backend Foundation
-1. ✅ Create `follow_up.py` module
-2. ✅ Add `run_follow_up_research()` to `service.py`
-3. ✅ Create database migrations for new tables
-4. ✅ Add suggestion generation logic
-5. ✅ Add caching layer
+### Sprint 1: Backend Foundation (Core logic only, no integration)
+1. ✅ Create `follow_up.py` module with core types and functions
+2. ✅ Add `plan_follow_up_research()` planner function
+3. ✅ Add `suggest_follow_up_questions()` generator function
+4. ✅ Create database migrations for new tables
+5. ✅ Add `run_follow_up_research()` entry point to `service.py`
+6. ✅ Add caching layer with proper cache key composition
+7. ✅ Unit tests for follow-up planning logic
 
-### Sprint 2: API Layer
-1. ✅ Add `/api/follow-up-suggestions` endpoint
-2. ✅ Add `/api/follow-up-research` endpoint
-3. ✅ Integrate with existing summary flow
-4. ✅ Add cache key generation
+### Sprint 2: API Layer (YTV2 API integration)
+1. ✅ Add `/api/follow-up-suggestions` endpoint to `ytv2_api/main.py`
+2. ✅ Add `/api/follow-up-research` endpoint to `ytv2_api/main.py`
+3. ✅ Add cache lookup before research execution
+4. ✅ Add storage to `follow_up_research_runs` table
+5. ✅ Add summary variant reference creation
+6. ✅ API validation and error handling
 
-### Sprint 3: Telegram Bot
-1. ✅ Add suggestion trigger after summary
-2. ✅ Add suggestion keyboard handler
-3. ✅ Add research execution handler
-4. ✅ Add result formatting for Telegram
-5. ✅ Add progress indicators
+### Sprint 3: Telegram Bot Integration
+1. ✅ Add suggestion trigger after summary completion
+2. ✅ Add suggestion keyboard/selection handlers
+3. ✅ Add research execution handler with progress
+4. ✅ Add result formatting for Telegram markdown
+5. ✅ Add error handling and retry logic
+6. ✅ Test with auto-mode enabled/disabled
 
 ### Sprint 4: Dashboard UI
-1. ✅ Add "Deep Research" tab to variant tabs
-2. ✅ Implement suggestion selection UI
-3. ✅ Integrate ResearchReportView component
-4. ✅ Add loading states and error handling
-5. ✅ Add result display with sections
+1. ✅ Add "Deep Research" tab detection logic
+2. ✅ Implement suggestion selection UI components
+3. ✅ Integrate ResearchReportView component (temporary import path)
+4. ✅ Add loading states and progress indicators
+5. ✅ Add error handling and user feedback
+6. ✅ Test variant switching and result display
 
 ---
 
@@ -605,6 +630,141 @@ async def _follow_up_confirm_handler(self, update, video_id, selected_questions)
 3. **Should research results be regenerable?** Allow re-running with different questions?
 4. **Should we add analytics?** Track which suggestion kinds are most popular?
 5. **Should we add preset modes instead of suggestions?** Simpler but less flexible?
+
+---
+
+## Critical Implementation Decision: Executor Design
+
+**Before coding starts, choose explicitly between:**
+
+### Option A: Add `execute_research_plan(plan=...)`
+```python
+# New function that accepts a pre-built plan
+def execute_research_plan(
+    *,
+    plan: FollowUpResearchPlan,
+    source_context: dict,
+    progress: ProgressCallback | None = None,
+) -> tuple[list[ResearchBatchResult], list[ResearchSource], dict]:
+    """
+    Execute research using a pre-built plan (skip internal planning).
+
+    Uses plan.planned_queries directly instead of calling plan_research().
+    """
+    # Skip planning, use plan.queries directly
+    batches = _execute_search_queries(
+        queries=plan.planned_queries,
+        provider_mode=plan.provider_mode,
+        ...
+    )
+    return batches, sources, meta
+```
+
+### Option B: Add `queries_override` parameter to `execute_research()`
+```python
+# Extend existing function signature
+def execute_research(
+    *,
+    message: str,
+    history: list[dict[str, str]] | None,
+    provider_mode: str,
+    tool_mode: str,
+    depth: str,
+    compare: bool,
+    manual_tools: dict | None,
+    progress: ProgressCallback | None = None,
+    queries_override: list[str] | None = None,  # NEW: skip planning
+    planning_meta: dict | None = None,          # NEW: include plan metadata
+) -> tuple[list[ResearchBatchResult], list[ResearchSource], dict, str | None]:
+    """
+    Run planned research and return normalized results + sources + meta.
+
+    If queries_override is provided, skip internal planning and use
+    those queries directly. Include planning_meta in output.
+    """
+    if queries_override:
+        # Skip planning, use override queries
+        plan = ResearchPlan(
+            objective="follow_up_research",
+            queries=queries_override,
+            provider_mode=provider_mode,
+            ...
+        )
+    else:
+        plan = plan_research(...)
+    # ... rest of execution
+```
+
+### Decision: **Option A** (Preferred)
+
+**Rationale**:
+- Cleaner separation: planning vs execution are distinct operations
+- Follow-up planning returns a proper `FollowUpResearchPlan` object
+- Type-safe: plan structure is explicit, not hidden in override parameters
+- Easier to test: can test executor with mock plans
+- Clearer intent: `execute_research_plan(plan)` vs `execute_research(..., queries_override=...)`
+
+**Implementation**:
+```python
+# research_service/executor.py
+
+def execute_research_plan(
+    *,
+    plan: FollowUpResearchPlan,
+    source_context: dict,
+    progress: ProgressCallback | None = None,
+) -> tuple[list[ResearchBatchResult], list[ResearchSource], dict]:
+    """
+    Execute research using a pre-built follow-up plan.
+
+    This bypasses internal planning and uses the plan's consolidated
+    query set directly. Used by follow-up research to avoid redundant
+    planning when user has already approved research directions.
+    """
+    clean_depth = source_context.get("depth", DEFAULT_DEPTH)
+
+    _emit_progress(
+        progress,
+        type="progress",
+        stage="follow_up_execution_started",
+        label=f"Executing follow-up research ({len(plan.planned_queries)} queries)",
+        approved_questions=plan.approved_questions,
+        planned_queries=plan.planned_queries,
+    )
+
+    # Resolve providers from plan (not from message)
+    providers = _resolve_providers_from_plan(
+        plan.provider_mode,
+        plan.planned_queries,
+        plan.compare or False,
+    )
+
+    # Execute search using planned queries
+    batches = _execute_search_queries(
+        queries=plan.planned_queries,
+        providers=providers,
+        depth=clean_depth,
+        progress=progress,
+    )
+
+    # Dedupe sources
+    sources = _dedupe_sources(batches)
+
+    # Build meta with coverage info
+    meta = {
+        "status": "ok",
+        "objective": "follow_up_research",
+        "queries": plan.planned_queries,
+        "approved_questions": plan.approved_questions,
+        "question_provenance": plan.question_provenance,
+        "coverage_map": plan.coverage_map,
+        "dedupe_notes": plan.dedupe_notes,
+    }
+
+    return batches, sources, meta
+```
+
+**This decision is locked in before Sprint 1 begins.**
 
 ---
 
