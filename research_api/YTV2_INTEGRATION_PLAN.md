@@ -275,7 +275,8 @@ async def _execute_follow_up_research(
         depth="balanced",
     )
 
-    # Store result as 'deep-research' variant
+    # Store lightweight UI reference as 'deep-research' variant
+    # Canonical result stored in follow_up_research_runs table
     await self._store_research_result(video_id, result)
 
     # Send result
@@ -421,12 +422,12 @@ function DeepResearchTab({ videoId, summary }) {
 
   const runResearch = async () => {
     setLoading(true);
+    const selectedSuggestions = suggestions.filter(s => selectedQuestions.includes(s.question));
+
     const result = await api.runFollowUpResearch({
       video_id: videoId,
       approved_questions: selectedQuestions,
-      question_provenance: suggestions
-        .filter(s => selectedQuestions.includes(s.question))
-        .map(s => s.kind)
+      question_provenance: selectedSuggestions.map(s => s.provenance),  // "suggested" | "preset" | "custom"
     });
     setResearchResult(result);
     setLoading(false);
@@ -584,7 +585,7 @@ async def _follow_up_confirm_handler(self, update, video_id, selected_questions)
 **Rationale**: Clear separation, preserves original summary, allows independent updates
 
 ### 3. Cache-First Strategy
-**Decision**: Cache results by (video_id + normalized_questions)
+**Decision**: Cache results by (video_id + summary_id + normalized_questions + provider_mode + depth)
 **Rationale**: Users may re-run with different tab combinations, expensive to re-run
 
 ### 4. Suggestion Throttling
