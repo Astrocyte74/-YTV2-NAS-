@@ -108,7 +108,7 @@ class FollowUpStore:
             return ResolvedFollowUpContext(
                 video_id=resolved_video_id,
                 summary_id=int(row["id"]),
-                summary=(summary or row.get("text") or "").strip(),
+                summary=(row.get("text") or "").strip(),
                 source_context=merged_context,
             )
 
@@ -301,7 +301,8 @@ class FollowUpStore:
         return int(row[0])
 
     def create_summary_variant_reference(self, *, video_id: str, text: str) -> dict[str, int]:
-        html = format_summary_html(text)
+        reference_text = "Follow-up research available. Canonical result stored in follow_up_research_runs."
+        html = format_summary_html(reference_text)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 "SELECT COALESCE(MAX(revision), 0) + 1 FROM summaries WHERE video_id = %s AND variant = 'deep-research'",
@@ -314,7 +315,7 @@ class FollowUpStore:
                 VALUES (%s, 'deep-research', %s, %s, %s, now())
                 RETURNING id, revision
                 """,
-                (video_id, revision, text, html),
+                (video_id, revision, reference_text, html),
             )
             row = cur.fetchone()
             conn.commit()

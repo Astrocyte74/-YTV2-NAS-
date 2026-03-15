@@ -9,6 +9,7 @@ from ytv2_api.follow_up_store import ResolvedFollowUpContext
 from ytv2_api.models import FollowUpRunRequest, FollowUpSuggestionsRequest
 
 try:
+    from fastapi import HTTPException
     from ytv2_api.main import (
         check_cached_research,
         get_follow_up_suggestions_endpoint,
@@ -58,6 +59,29 @@ class TestFollowUpSuggestionEndpoint(unittest.TestCase):
         self.assertEqual(len(response.suggestions), 1)
         store.store_suggestions.assert_called_once()
         store.mark_follow_up_available.assert_called_once_with(55)
+
+    def test_suggestions_require_persisted_summary(self):
+        request = FollowUpSuggestionsRequest(
+            video_id="abc123",
+            summary="Request summary",
+            source_context={"title": "Original"},
+        )
+        store = MagicMock()
+        store.resolve_context.return_value = ResolvedFollowUpContext(
+            video_id="abc123",
+            summary_id=None,
+            summary="Resolved summary",
+            source_context={"title": "Original", "video_id": "abc123", "id": "abc123"},
+        )
+        service = {"get_follow_up_suggestions": MagicMock()}
+
+        with patch("ytv2_api.main.get_follow_up_store", return_value=store), \
+             patch("ytv2_api.main.get_research_service", return_value=service), \
+             self.assertRaises(HTTPException) as context:
+            asyncio.run(get_follow_up_suggestions_endpoint(request))
+
+        self.assertEqual(context.exception.status_code, 400)
+        service["get_follow_up_suggestions"].assert_not_called()
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed in this environment")
@@ -162,6 +186,54 @@ class TestFollowUpRunEndpoint(unittest.TestCase):
         self.assertEqual(response.meta["summary_variant_revision"], 3)
         store.store_research_run.assert_called_once()
         store.mark_follow_up_available.assert_called_once_with(55)
+
+    def test_run_endpoint_requires_persisted_summary(self):
+        request = FollowUpRunRequest(
+            video_id="abc123",
+            summary="Request summary",
+            source_context={},
+            approved_questions=["What changed?"],
+        )
+        store = MagicMock()
+        store.resolve_context.return_value = ResolvedFollowUpContext(
+            video_id="abc123",
+            summary_id=None,
+            summary="Request summary",
+            source_context={"video_id": "abc123", "id": "abc123"},
+        )
+        service = {
+            "build_cache_key": MagicMock(),
+            "run_follow_up_research": MagicMock(),
+        }
+
+        with patch("ytv2_api.main.get_follow_up_store", return_value=store), \
+             patch("ytv2_api.main.get_research_service", return_value=service), \
+             self.assertRaises(HTTPException) as context:
+            asyncio.run(run_follow_up_research_endpoint(request))
+
+        self.assertEqual(context.exception.status_code, 400)
+        service["run_follow_up_research"].assert_not_called()
+
+    def test_run_endpoint_maps_lookup_error_to_404(self):
+        request = FollowUpRunRequest(
+            video_id="abc123",
+            summary="Request summary",
+            source_context={},
+            approved_questions=["What changed?"],
+        )
+        store = MagicMock()
+        store.resolve_context.side_effect = LookupError("Summary 999 does not belong to video_id abc123")
+        service = {
+            "build_cache_key": MagicMock(),
+            "run_follow_up_research": MagicMock(),
+        }
+
+        with patch("ytv2_api.main.get_follow_up_store", return_value=store), \
+             patch("ytv2_api.main.get_research_service", return_value=service), \
+             self.assertRaises(HTTPException) as context:
+            asyncio.run(run_follow_up_research_endpoint(request))
+
+        self.assertEqual(context.exception.status_code, 404)
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "fastapi is not installed in this environment")

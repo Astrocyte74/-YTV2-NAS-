@@ -647,6 +647,11 @@ async def get_follow_up_suggestions_endpoint(
             summary=request.summary,
             source_context=dict(request.source_context),
         )
+        if resolved.summary_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A persisted summary is required for follow-up suggestions. Provide a valid summary_id or existing video_id."
+            )
 
         # Get suggestions from research service
         raw_suggestions = service['get_follow_up_suggestions'](
@@ -655,13 +660,12 @@ async def get_follow_up_suggestions_endpoint(
             max_suggestions=request.max_suggestions,
         )
 
-        if resolved.summary_id is not None:
-            store.store_suggestions(
-                video_id=request.video_id,
-                summary_id=resolved.summary_id,
-                suggestions=raw_suggestions,
-            )
-            store.mark_follow_up_available(resolved.summary_id)
+        store.store_suggestions(
+            video_id=request.video_id,
+            summary_id=resolved.summary_id,
+            suggestions=raw_suggestions,
+        )
+        store.mark_follow_up_available(resolved.summary_id)
 
         # Convert to response model
         suggestions = [
@@ -685,6 +689,11 @@ async def get_follow_up_suggestions_endpoint(
             should_suggest=len(suggestions) > 0,
         )
 
+    except LookupError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
     except Exception as e:
         import traceback
         print(f"[YTV2 API] Error generating suggestions: {e}")
@@ -723,6 +732,11 @@ async def run_follow_up_research_endpoint(
             summary=request.summary,
             source_context=dict(request.source_context),
         )
+        if resolved.summary_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A persisted summary is required for follow-up research. Provide a valid summary_id or existing video_id."
+            )
         cache_key = service['build_cache_key'](
             video_id=request.video_id,
             summary_id=resolved.summary_id,
@@ -759,20 +773,19 @@ async def run_follow_up_research_endpoint(
             manual_tools=request.manual_tools,
         )
 
-        if resolved.summary_id is not None:
-            run_id = store.store_research_run(
-                video_id=request.video_id,
-                summary_id=resolved.summary_id,
-                approved_questions=request.approved_questions,
-                question_provenance=request.question_provenance,
-                result=result,
-            )
-            result.meta["follow_up_run_id"] = run_id
-            result.meta.update(store.create_summary_variant_reference(
-                video_id=request.video_id,
-                text=result.answer,
-            ))
-            store.mark_follow_up_available(resolved.summary_id)
+        run_id = store.store_research_run(
+            video_id=request.video_id,
+            summary_id=resolved.summary_id,
+            approved_questions=request.approved_questions,
+            question_provenance=request.question_provenance,
+            result=result,
+        )
+        result.meta["follow_up_run_id"] = run_id
+        result.meta.update(store.create_summary_variant_reference(
+            video_id=request.video_id,
+            text=result.answer,
+        ))
+        store.mark_follow_up_available(resolved.summary_id)
 
         return _build_follow_up_run_response(
             video_id=request.video_id,
@@ -788,6 +801,11 @@ async def run_follow_up_research_endpoint(
         # Validation errors (too many questions, etc.)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except LookupError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
