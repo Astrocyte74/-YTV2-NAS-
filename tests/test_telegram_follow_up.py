@@ -10,7 +10,7 @@ if "pydub" not in sys.modules:
 
 from modules.services.summary_service import extract_summary_text_for_variant
 from modules.telegram_handler import YouTubeTelegramBot
-from ytv2_api.follow_up_store import ResolvedFollowUpContext
+from ytv2_api.follow_up_store import ResolvedFollowUpContext, _candidate_video_ids
 
 
 class _DummyChat:
@@ -78,6 +78,12 @@ class TestSummaryVariantExtraction(unittest.TestCase):
         self.assertEqual(extract_summary_text_for_variant(result, "comprehensive"), "Comprehensive version")
         self.assertEqual(extract_summary_text_for_variant(result, "bullet-points"), "Bullet version")
         self.assertEqual(extract_summary_text_for_variant(result, "key-insights"), "Insights version")
+
+    def test_candidate_video_ids_include_source_prefixed_alias(self):
+        self.assertEqual(
+            _candidate_video_ids("Z_MMxvZyOJs", "youtube"),
+            ["Z_MMxvZyOJs", "yt:Z_MMxvZyOJs"],
+        )
 
 
 class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):

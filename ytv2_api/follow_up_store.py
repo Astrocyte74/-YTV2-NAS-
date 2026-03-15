@@ -44,6 +44,33 @@ def _infer_source_type(url: str) -> str:
     return "unknown"
 
 
+def _candidate_video_ids(video_id: str, source_type: str | None = None) -> list[str]:
+    candidates: list[str] = []
+
+    def _add(value: str) -> None:
+        cleaned = str(value or "").strip()
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+
+    _add(video_id)
+    if ":" in (video_id or ""):
+        _add(video_id.split(":", 1)[1])
+        return candidates
+
+    normalized_source = (source_type or "").strip().lower()
+    alias_prefix = {
+        "youtube": "yt",
+        "reddit": "reddit",
+        "web": "web",
+    }.get(normalized_source)
+    if alias_prefix:
+        _add(f"{alias_prefix}:{video_id}")
+    else:
+        for prefix in ("yt", "reddit", "web"):
+            _add(f"{prefix}:{video_id}")
+    return candidates
+
+
 def _coerce_json(value: Any, default: Any) -> Any:
     if value is None:
         return default
@@ -94,15 +121,17 @@ class FollowUpStore:
     ) -> ResolvedFollowUpContext:
         """Resolve summary metadata from Postgres and merge with request context."""
         merged_context = dict(source_context or {})
+        source_type = str(merged_context.get("type") or "").strip().lower() or None
         row = self._fetch_summary_row(
             video_id=video_id,
             summary_id=summary_id,
             preferred_variant=preferred_variant,
+            source_type=source_type,
         )
 
         if row is not None:
             resolved_video_id = str(row["video_id"])
-            if resolved_video_id != video_id:
+            if summary_id is not None and resolved_video_id != video_id:
                 raise LookupError(f"Summary {summary_id} does not belong to video_id {video_id}")
             merged_context.setdefault("title", row.get("title") or "")
             merged_context.setdefault("url", row.get("canonical_url") or "")
@@ -133,8 +162,10 @@ class FollowUpStore:
         video_id: str,
         summary_id: int | None,
         preferred_variant: str | None = None,
+        source_type: str | None = None,
     ) -> dict[str, Any] | None:
         with self._connect() as conn, conn.cursor() as cur:
+            row = None
             if summary_id is not None:
                 cur.execute(
                     """
@@ -146,13 +177,16 @@ class FollowUpStore:
                     """,
                     (summary_id,),
                 )
+                row = cur.fetchone()
             elif preferred_variant:
+                candidate_ids = _candidate_video_ids(video_id, source_type)
+                placeholders = ", ".join(["%s"] * len(candidate_ids))
                 cur.execute(
-                    """
+                    f"""
                     SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
                     FROM summaries s
                     LEFT JOIN content c ON c.video_id = s.video_id
-                    WHERE s.video_id = %s
+                    WHERE s.video_id IN ({placeholders})
                       AND COALESCE(s.text, '') <> ''
                       AND s.variant = %s
                     ORDER BY
@@ -161,16 +195,16 @@ class FollowUpStore:
                       s.id DESC
                     LIMIT 1
                     """,
-                    (video_id, preferred_variant),
+                    (*candidate_ids, preferred_variant),
                 )
                 row = cur.fetchone()
                 if row is None:
                     cur.execute(
-                        """
+                        f"""
                         SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
                         FROM summaries s
                         LEFT JOIN content c ON c.video_id = s.video_id
-                        WHERE s.video_id = %s
+                        WHERE s.video_id IN ({placeholders})
                           AND COALESCE(s.text, '') <> ''
                           AND s.variant NOT LIKE 'audio%%'
                           AND s.variant <> 'deep-research'
@@ -186,15 +220,18 @@ class FollowUpStore:
                           s.id DESC
                         LIMIT 1
                         """,
-                        (video_id,),
+                        tuple(candidate_ids),
                     )
+                    row = cur.fetchone()
             else:
+                candidate_ids = _candidate_video_ids(video_id, source_type)
+                placeholders = ", ".join(["%s"] * len(candidate_ids))
                 cur.execute(
-                    """
+                    f"""
                     SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
                     FROM summaries s
                     LEFT JOIN content c ON c.video_id = s.video_id
-                    WHERE s.video_id = %s
+                    WHERE s.video_id IN ({placeholders})
                       AND COALESCE(s.text, '') <> ''
                       AND s.variant NOT LIKE 'audio%%'
                       AND s.variant <> 'deep-research'
@@ -210,9 +247,9 @@ class FollowUpStore:
                       s.id DESC
                     LIMIT 1
                     """,
-                    (video_id,),
+                    tuple(candidate_ids),
                 )
-            row = cur.fetchone()
+                row = cur.fetchone()
         if row is None:
             return None
         return {
