@@ -90,10 +90,15 @@ class FollowUpStore:
         summary_id: int | None = None,
         summary: str = "",
         source_context: dict[str, Any] | None = None,
+        preferred_variant: str | None = None,
     ) -> ResolvedFollowUpContext:
         """Resolve summary metadata from Postgres and merge with request context."""
         merged_context = dict(source_context or {})
-        row = self._fetch_summary_row(video_id=video_id, summary_id=summary_id)
+        row = self._fetch_summary_row(
+            video_id=video_id,
+            summary_id=summary_id,
+            preferred_variant=preferred_variant,
+        )
 
         if row is not None:
             resolved_video_id = str(row["video_id"])
@@ -122,7 +127,13 @@ class FollowUpStore:
             source_context=merged_context,
         )
 
-    def _fetch_summary_row(self, *, video_id: str, summary_id: int | None) -> dict[str, Any] | None:
+    def _fetch_summary_row(
+        self,
+        *,
+        video_id: str,
+        summary_id: int | None,
+        preferred_variant: str | None = None,
+    ) -> dict[str, Any] | None:
         with self._connect() as conn, conn.cursor() as cur:
             if summary_id is not None:
                 cur.execute(
@@ -135,6 +146,48 @@ class FollowUpStore:
                     """,
                     (summary_id,),
                 )
+            elif preferred_variant:
+                cur.execute(
+                    """
+                    SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
+                    FROM summaries s
+                    LEFT JOIN content c ON c.video_id = s.video_id
+                    WHERE s.video_id = %s
+                      AND COALESCE(s.text, '') <> ''
+                      AND s.variant = %s
+                    ORDER BY
+                      s.created_at DESC,
+                      COALESCE(s.revision, 1) DESC,
+                      s.id DESC
+                    LIMIT 1
+                    """,
+                    (video_id, preferred_variant),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute(
+                        """
+                        SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
+                        FROM summaries s
+                        LEFT JOIN content c ON c.video_id = s.video_id
+                        WHERE s.video_id = %s
+                          AND COALESCE(s.text, '') <> ''
+                          AND s.variant NOT LIKE 'audio%%'
+                          AND s.variant <> 'deep-research'
+                        ORDER BY
+                          CASE
+                            WHEN s.variant = 'comprehensive' THEN 0
+                            WHEN s.variant = 'bullet-points' THEN 1
+                            WHEN s.variant = 'key-insights' THEN 2
+                            ELSE 10
+                          END,
+                          s.created_at DESC,
+                          COALESCE(s.revision, 1) DESC,
+                          s.id DESC
+                        LIMIT 1
+                        """,
+                        (video_id,),
+                    )
             else:
                 cur.execute(
                     """
@@ -198,6 +251,23 @@ class FollowUpStore:
                 (video_id, summary_id, json.dumps(suggestions), planner_provider, planner_model),
             )
             conn.commit()
+
+    def get_stored_suggestions(self, summary_id: int) -> list[dict[str, Any]]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT suggestions
+                FROM follow_up_suggestions
+                WHERE summary_id = %s
+                LIMIT 1
+                """,
+                (summary_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return []
+        suggestions = _coerce_json(row[0], [])
+        return suggestions if isinstance(suggestions, list) else []
 
     def get_cached_research(self, cache_key: str) -> dict[str, Any] | None:
         with self._connect() as conn, conn.cursor() as cur:

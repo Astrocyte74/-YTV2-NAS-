@@ -314,6 +314,8 @@ class YouTubeTelegramBot:
         self.tts_preselect_by_content: Dict[str, Dict[str, Any]] = {}
         # Interactive summary sessions keyed by (chat_id, message_id)
         self.summary_sessions: Dict[tuple, Dict[str, Any]] = {}
+        # Interactive follow-up research sessions keyed by (chat_id, message_id)
+        self.follow_up_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Interactive Draw Things sessions keyed by (chat_id, message_id)
         self.draw_sessions: Dict[tuple, Dict[str, Any]] = {}
         # Cache of instantiated summarizers keyed by provider/model
@@ -338,6 +340,9 @@ class YouTubeTelegramBot:
 
         # Delete button ID mapping: short_hash -> full video_id (for callback_data size limits)
         self._delete_id_map: Dict[str, str] = {}
+        self._follow_up_store = None
+        self._follow_up_service = None
+        self._follow_up_offered: Set[Tuple[str, int]] = set()
 
         # Persisted user preferences (e.g., last-used cloud/local models for quick picks)
         self.user_prefs_path = Path("./data/user_prefs.json")
@@ -1879,6 +1884,456 @@ class YouTubeTelegramBot:
 
     def _remove_summary_session(self, chat_id: int, message_id: int) -> None:
         self.summary_sessions.pop(self._summary_session_key(chat_id, message_id), None)
+
+    def _follow_up_session_key(self, chat_id: int, message_id: int) -> tuple:
+        return (chat_id, message_id)
+
+    def _store_follow_up_session(self, chat_id: int, message_id: int, payload: Dict[str, Any]) -> None:
+        self.follow_up_sessions[self._follow_up_session_key(chat_id, message_id)] = payload
+
+    def _get_follow_up_session(self, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+        return self.follow_up_sessions.get(self._follow_up_session_key(chat_id, message_id))
+
+    def _remove_follow_up_session(self, chat_id: int, message_id: int) -> None:
+        self.follow_up_sessions.pop(self._follow_up_session_key(chat_id, message_id), None)
+
+    def _follow_up_enabled(self) -> bool:
+        raw = str(os.getenv("TELEGRAM_FOLLOW_UP_ENABLED", "true")).strip().lower()
+        return raw in ("1", "true", "yes", "on")
+
+    def _get_follow_up_store(self):
+        if self._follow_up_store is not None:
+            return self._follow_up_store
+        from ytv2_api.follow_up_store import FollowUpStore
+
+        self._follow_up_store = FollowUpStore()
+        return self._follow_up_store
+
+    def _get_follow_up_service(self) -> Dict[str, Any]:
+        if self._follow_up_service is not None:
+            return self._follow_up_service
+        from research_api.research_service.service import (
+            build_cache_key,
+            get_follow_up_suggestions,
+            run_follow_up_research,
+        )
+
+        self._follow_up_service = {
+            "build_cache_key": build_cache_key,
+            "get_follow_up_suggestions": get_follow_up_suggestions,
+            "run_follow_up_research": run_follow_up_research,
+        }
+        return self._follow_up_service
+
+    def _follow_up_button_label(self, suggestion: Dict[str, Any], selected: bool) -> str:
+        label = str(suggestion.get("label") or suggestion.get("question") or "Question").strip()
+        compact = (label[:45] + "…") if len(label) > 46 else label
+        prefix = "✅" if selected else "⬜"
+        return f"{prefix} {compact}"
+
+    def _build_follow_up_keyboard(self, session: Dict[str, Any]) -> InlineKeyboardMarkup:
+        stage = session.get("stage") or "prompt"
+        if stage == "prompt":
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔍 Deep Research", callback_data="followup:open")],
+                [InlineKeyboardButton("Dismiss", callback_data="followup:dismiss")],
+            ])
+
+        selected_ids = set(session.get("selected_ids") or [])
+        suggestions = session.get("suggestions") or []
+        rows: List[List[InlineKeyboardButton]] = []
+        for idx, suggestion in enumerate(suggestions):
+            suggestion_id = str(suggestion.get("id") or f"s{idx}")
+            rows.append([
+                InlineKeyboardButton(
+                    self._follow_up_button_label(suggestion, suggestion_id in selected_ids),
+                    callback_data=f"followup:toggle:{idx}",
+                )
+            ])
+        rows.append([
+            InlineKeyboardButton("▶️ Run", callback_data="followup:run"),
+            InlineKeyboardButton("Cancel", callback_data="followup:cancel"),
+        ])
+        return InlineKeyboardMarkup(rows)
+
+    def _follow_up_prompt_text(self, session: Dict[str, Any]) -> str:
+        title = str(session.get("title") or "").strip()
+        lines = [
+            "🔍 *Deep Research Available*",
+            "",
+            "This summary looks like it could benefit from a current research pass.",
+        ]
+        if title:
+            lines.extend(["", f"*Content:* {self._escape_markdown(title)}"])
+        lines.extend([
+            "",
+            "Review the suggested follow-up questions before running research.",
+        ])
+        return "\n".join(lines)
+
+    def _follow_up_selection_text(self, session: Dict[str, Any]) -> str:
+        selected_ids = set(session.get("selected_ids") or [])
+        suggestions = session.get("suggestions") or []
+        max_questions = min(3, len(suggestions) or 3)
+        lines = [
+            "🔍 *Deep Research Questions*",
+            "",
+            f"Select up to {max_questions} questions to research.",
+            "",
+        ]
+        for idx, suggestion in enumerate(suggestions, start=1):
+            suggestion_id = str(suggestion.get("id") or f"s{idx - 1}")
+            marker = "✅" if suggestion_id in selected_ids else "⬜"
+            label = self._escape_markdown(str(suggestion.get("label") or suggestion.get("question") or "Question"))
+            reason = str(suggestion.get("reason") or "").strip()
+            lines.append(f"{marker} *{idx}.* {label}")
+            if reason:
+                lines.append(f"_{self._escape_markdown(reason)}_")
+            lines.append("")
+        lines.append(f"*Selected:* {len(selected_ids)}/{max_questions}")
+        return "\n".join(lines).strip()
+
+    def _follow_up_result_text(self, session: Dict[str, Any], result: Dict[str, Any]) -> tuple[str, str]:
+        title = str(session.get("title") or "").strip()
+        questions = session.get("approved_questions") or []
+        sources = result.get("sources") or []
+        meta = result.get("meta") or {}
+        status = str(result.get("status") or "ok").strip()
+        header_lines = ["🔍 *Deep Research*"]
+        if title:
+            header_lines.append(f"*Content:* {self._escape_markdown(title)}")
+        if questions:
+            header_lines.append("*Questions:*")
+            for question in questions:
+                header_lines.append(f"• {self._escape_markdown(str(question))}")
+        cache_note = "yes" if meta.get("cache_hit") else "no"
+        header_lines.append(f"*Sources:* {len(sources)}")
+        header_lines.append(f"*Cache hit:* {cache_note}")
+        if status != "ok":
+            header_lines.append(f"*Status:* {self._escape_markdown(status)}")
+
+        body_parts = [str(result.get("answer") or "").strip()]
+        if sources:
+            body_parts.append("")
+            body_parts.append("Sources:")
+            for source in sources[:8]:
+                name = str(source.get("name") or source.get("domain") or source.get("url") or "Source").strip()
+                url = str(source.get("url") or "").strip()
+                line = f"- {name}"
+                if url:
+                    line += f": {url}"
+                body_parts.append(line)
+        return "\n".join(header_lines), "\n".join(body_parts).strip()
+
+    async def _maybe_offer_follow_up_research(
+        self,
+        reply_message,
+        *,
+        video_id: str,
+        summary_type: str,
+        summary: str,
+        source_context: Dict[str, Any],
+        sync_targets: Optional[List[str]] = None,
+    ) -> None:
+        base_type = (summary_type or "").split(":", 1)[0]
+        if base_type.startswith("audio") or base_type == "deep-research":
+            return
+        if not self._follow_up_enabled():
+            return
+        if sync_targets is not None and "PostgreSQL" not in set(sync_targets):
+            return
+
+        try:
+            store = self._get_follow_up_store()
+            service = self._get_follow_up_service()
+        except Exception as exc:
+            logging.info("Follow-up research unavailable in Telegram: %s", exc)
+            return
+
+        loop = asyncio.get_running_loop()
+        preferred_variant = base_type
+        resolved = None
+        for _ in range(5):
+            try:
+                resolved = await asyncio.to_thread(
+                    store.resolve_context,
+                    video_id=video_id,
+                    summary=summary,
+                    source_context=dict(source_context),
+                    preferred_variant=preferred_variant,
+                )
+            except Exception as exc:
+                logging.debug("Follow-up resolve retry for %s failed: %s", video_id, exc)
+                resolved = None
+            if resolved is not None and resolved.summary_id is not None:
+                break
+            await asyncio.sleep(1.0)
+
+        if resolved is None or resolved.summary_id is None:
+            logging.info("Skipping follow-up offer for %s: persisted summary was not resolvable", video_id)
+            return
+
+        offer_key = (resolved.video_id, resolved.summary_id)
+        if offer_key in self._follow_up_offered:
+            return
+
+        suggestions = await asyncio.to_thread(store.get_stored_suggestions, resolved.summary_id)
+        if not suggestions:
+            suggestions = await asyncio.to_thread(
+                service["get_follow_up_suggestions"],
+                source_context=resolved.source_context,
+                summary=resolved.summary,
+                max_suggestions=3,
+            )
+            if suggestions:
+                await asyncio.to_thread(
+                    store.store_suggestions,
+                    video_id=resolved.video_id,
+                    summary_id=resolved.summary_id,
+                    suggestions=suggestions,
+                )
+                await asyncio.to_thread(store.mark_follow_up_available, resolved.summary_id)
+
+        if not suggestions:
+            return
+
+        selected_ids = [
+            str(suggestion.get("id") or f"s{idx}")
+            for idx, suggestion in enumerate(suggestions)
+            if suggestion.get("default_selected")
+        ][:3]
+        session = {
+            "stage": "prompt",
+            "video_id": resolved.video_id,
+            "summary_id": resolved.summary_id,
+            "summary": resolved.summary,
+            "summary_type": summary_type,
+            "source_context": resolved.source_context,
+            "suggestions": suggestions,
+            "selected_ids": selected_ids,
+            "title": resolved.source_context.get("title") or source_context.get("title") or "",
+            "provider_mode": str(os.getenv("TELEGRAM_FOLLOW_UP_PROVIDER_MODE", "auto") or "auto").strip().lower(),
+            "tool_mode": str(os.getenv("TELEGRAM_FOLLOW_UP_TOOL_MODE", "auto") or "auto").strip().lower(),
+            "depth": str(os.getenv("TELEGRAM_FOLLOW_UP_DEPTH", "balanced") or "balanced").strip().lower(),
+        }
+        prompt_message = await reply_message.reply_text(
+            self._follow_up_prompt_text(session),
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self._build_follow_up_keyboard(session),
+        )
+        self._store_follow_up_session(prompt_message.chat_id, prompt_message.message_id, session)
+        self._follow_up_offered.add(offer_key)
+
+    def _execute_follow_up_research_sync(
+        self,
+        session: Dict[str, Any],
+        approved_questions: List[str],
+        question_provenance: List[str],
+        progress: Optional[Callable[[dict], None]] = None,
+    ) -> Dict[str, Any]:
+        store = self._get_follow_up_store()
+        service = self._get_follow_up_service()
+        cache_key = service["build_cache_key"](
+            video_id=session["video_id"],
+            summary_id=session["summary_id"],
+            approved_questions=approved_questions,
+            provider_mode=session["provider_mode"],
+            depth=session["depth"],
+        )
+        cached = store.get_cached_research(cache_key)
+        if cached is not None:
+            cached_meta = dict(cached.get("meta") or {})
+            cached_meta["cache_key"] = cache_key
+            cached_meta["cache_hit"] = True
+            cached_meta.setdefault("follow_up_run_id", cached.get("run_id"))
+            return {
+                "status": cached.get("status") or "ok",
+                "answer": cached.get("answer") or "",
+                "sources": list(cached.get("sources") or []),
+                "meta": cached_meta,
+            }
+
+        result = service["run_follow_up_research"](
+            source_context=dict(session["source_context"]),
+            summary=session["summary"],
+            approved_questions=approved_questions,
+            question_provenance=question_provenance,
+            summary_id=session["summary_id"],
+            provider_mode=session["provider_mode"],
+            tool_mode=session["tool_mode"],
+            depth=session["depth"],
+            progress=progress,
+        )
+        run_id = store.store_research_run(
+            video_id=session["video_id"],
+            summary_id=session["summary_id"],
+            approved_questions=approved_questions,
+            question_provenance=question_provenance,
+            result=result,
+        )
+        result.meta["follow_up_run_id"] = run_id
+        result.meta.update(store.create_summary_variant_reference(
+            video_id=session["video_id"],
+            text=result.answer,
+        ))
+        store.mark_follow_up_available(session["summary_id"])
+        return {
+            "status": result.status,
+            "answer": result.answer,
+            "sources": [
+                {
+                    "name": source.name,
+                    "url": source.url,
+                    "domain": source.domain,
+                    "tier": source.tier,
+                    "providers": list(source.providers),
+                    "tools": list(source.tools),
+                }
+                for source in result.sources
+            ],
+            "meta": dict(result.meta or {}),
+        }
+
+    async def _send_follow_up_result(self, query, session: Dict[str, Any], result: Dict[str, Any]) -> None:
+        header_text, body_text = self._follow_up_result_text(session, result)
+
+        class _MessageWrapper:
+            def __init__(self, message):
+                self.message = message
+
+            async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+                return await self.message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+        await self._send_long_message(_MessageWrapper(query.message), header_text, body_text, force_new_message=True)
+
+    async def _handle_follow_up_callback(self, query, callback_data: str) -> None:
+        chat_id = query.message.chat.id
+        message_id = query.message.message_id
+        session = self._get_follow_up_session(chat_id, message_id)
+        if not session:
+            await query.answer("This follow-up session expired. Generate the summary again to reopen it.", show_alert=True)
+            return
+
+        parts = callback_data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        if action == "dismiss":
+            self._remove_follow_up_session(chat_id, message_id)
+            await query.edit_message_text("Deep research prompt dismissed.")
+            return
+        if action == "open":
+            session["stage"] = "selection"
+            self._store_follow_up_session(chat_id, message_id, session)
+            await query.edit_message_text(
+                self._follow_up_selection_text(session),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._build_follow_up_keyboard(session),
+            )
+            return
+        if action == "cancel":
+            session["stage"] = "prompt"
+            self._store_follow_up_session(chat_id, message_id, session)
+            await query.edit_message_text(
+                self._follow_up_prompt_text(session),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._build_follow_up_keyboard(session),
+            )
+            return
+        if action == "toggle":
+            if len(parts) < 3:
+                await query.answer("Invalid selection.", show_alert=True)
+                return
+            try:
+                index = int(parts[2])
+            except ValueError:
+                await query.answer("Invalid selection.", show_alert=True)
+                return
+            suggestions = session.get("suggestions") or []
+            if not (0 <= index < len(suggestions)):
+                await query.answer("Invalid selection.", show_alert=True)
+                return
+            selected_ids = set(session.get("selected_ids") or [])
+            suggestion = suggestions[index]
+            suggestion_id = str(suggestion.get("id") or f"s{index}")
+            if suggestion_id in selected_ids:
+                selected_ids.remove(suggestion_id)
+            elif len(selected_ids) >= 3:
+                await query.answer("Select at most 3 questions.", show_alert=True)
+                return
+            else:
+                selected_ids.add(suggestion_id)
+            session["selected_ids"] = list(selected_ids)
+            session["stage"] = "selection"
+            self._store_follow_up_session(chat_id, message_id, session)
+            await query.edit_message_text(
+                self._follow_up_selection_text(session),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._build_follow_up_keyboard(session),
+            )
+            return
+        if action != "run":
+            await query.answer("Unknown action.", show_alert=True)
+            return
+
+        suggestions = session.get("suggestions") or []
+        selected_ids = set(session.get("selected_ids") or [])
+        selected = [
+            suggestion
+            for idx, suggestion in enumerate(suggestions)
+            if str(suggestion.get("id") or f"s{idx}") in selected_ids
+        ]
+        if not selected:
+            await query.answer("Select at least one question first.", show_alert=True)
+            return
+
+        approved_questions = [str(item.get("question") or item.get("label") or "").strip() for item in selected]
+        question_provenance = [str(item.get("provenance") or "suggested").strip() for item in selected]
+        session["approved_questions"] = approved_questions
+        self._store_follow_up_session(chat_id, message_id, session)
+
+        loop = asyncio.get_running_loop()
+        last_label = {"value": ""}
+
+        async def _push_progress(label: str) -> None:
+            await self._safe_edit_message(
+                query,
+                f"🔍 *Deep Research*\n\n{self._escape_markdown(label)}",
+            )
+
+        def progress(event: dict) -> None:
+            label = str((event or {}).get("label") or "").strip()
+            if not label or label == last_label["value"]:
+                return
+            last_label["value"] = label
+            loop.call_soon_threadsafe(
+                asyncio.create_task,
+                _push_progress(label),
+            )
+
+        try:
+            await query.edit_message_text(
+                "🔍 *Deep Research*\n\nPreparing research run...",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            result = await asyncio.to_thread(
+                self._execute_follow_up_research_sync,
+                session,
+                approved_questions,
+                question_provenance,
+                progress,
+            )
+        except Exception as exc:
+            logging.error("Telegram follow-up research failed for %s: %s", session.get("video_id"), exc)
+            await query.edit_message_text(
+                self._follow_up_selection_text(session),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self._build_follow_up_keyboard(session),
+            )
+            await query.message.reply_text(f"⚠️ Deep research failed: {str(exc)[:180]}")
+            return
+
+        self._remove_follow_up_session(chat_id, message_id)
+        await query.edit_message_text("✅ Deep research complete.", parse_mode=ParseMode.MARKDOWN)
+        await self._send_follow_up_result(query, session, result)
 
     def _summarizer_cache_key(self, provider: Optional[str], model: Optional[str]) -> str:
         provider_key = (provider or "unknown").strip().lower()
@@ -6718,6 +7173,8 @@ class YouTubeTelegramBot:
 
         elif callback_data.startswith("tts_"):
             await self._handle_tts_callback(query, callback_data)
+        elif callback_data.startswith("followup:"):
+            await self._handle_follow_up_callback(query, callback_data)
         elif callback_data.startswith("draw:"):
             await self._handle_draw_callback(query, callback_data)
         elif callback_data.startswith("ollama_"):

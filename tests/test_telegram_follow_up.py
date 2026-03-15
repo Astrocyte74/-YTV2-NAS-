@@ -1,0 +1,188 @@
+import unittest
+from unittest.mock import AsyncMock, MagicMock
+import sys
+import types
+
+if "pydub" not in sys.modules:
+    pydub_stub = types.ModuleType("pydub")
+    pydub_stub.AudioSegment = object
+    sys.modules["pydub"] = pydub_stub
+
+from modules.services.summary_service import extract_summary_text_for_variant
+from modules.telegram_handler import YouTubeTelegramBot
+from ytv2_api.follow_up_store import ResolvedFollowUpContext
+
+
+class _DummyChat:
+    def __init__(self, chat_id: int):
+        self.id = chat_id
+
+
+class _DummySentMessage:
+    def __init__(self, chat_id: int, message_id: int):
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.chat = _DummyChat(chat_id)
+        self.replies = []
+
+    async def reply_text(self, text, parse_mode=None, reply_markup=None):
+        self.replies.append({
+            "text": text,
+            "parse_mode": parse_mode,
+            "reply_markup": reply_markup,
+        })
+        next_id = self.message_id + len(self.replies)
+        return _DummySentMessage(self.chat_id, next_id)
+
+
+class _DummyQuery:
+    def __init__(self, chat_id: int, message_id: int):
+        self.message = _DummySentMessage(chat_id, message_id)
+        self.edits = []
+        self.answers = []
+
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+        self.edits.append({
+            "text": text,
+            "parse_mode": parse_mode,
+            "reply_markup": reply_markup,
+        })
+        return self.message
+
+    async def answer(self, text=None, show_alert=False):
+        self.answers.append({
+            "text": text,
+            "show_alert": show_alert,
+        })
+
+
+def _build_bot() -> YouTubeTelegramBot:
+    bot = object.__new__(YouTubeTelegramBot)
+    bot.follow_up_sessions = {}
+    bot._follow_up_store = None
+    bot._follow_up_service = None
+    bot._follow_up_offered = set()
+    return bot
+
+
+class TestSummaryVariantExtraction(unittest.TestCase):
+    def test_extracts_requested_variant_text(self):
+        result = {
+            "summary": {
+                "comprehensive": "Comprehensive version",
+                "bullet_points": "Bullet version",
+                "key_insights": "Insights version",
+            }
+        }
+
+        self.assertEqual(extract_summary_text_for_variant(result, "comprehensive"), "Comprehensive version")
+        self.assertEqual(extract_summary_text_for_variant(result, "bullet-points"), "Bullet version")
+        self.assertEqual(extract_summary_text_for_variant(result, "key-insights"), "Insights version")
+
+
+class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
+    async def test_offer_follow_up_uses_stored_suggestions(self):
+        bot = _build_bot()
+        store = MagicMock()
+        store.resolve_context.return_value = ResolvedFollowUpContext(
+            video_id="abc123",
+            summary_id=55,
+            summary="Persisted summary",
+            source_context={"title": "Cursor review", "video_id": "abc123"},
+        )
+        store.get_stored_suggestions.return_value = [
+            {
+                "id": "q1",
+                "label": "Latest pricing",
+                "question": "What is the latest pricing?",
+                "reason": "Pricing often changes.",
+                "default_selected": True,
+                "provenance": "suggested",
+            }
+        ]
+        bot._get_follow_up_store = MagicMock(return_value=store)
+        bot._get_follow_up_service = MagicMock(return_value={"get_follow_up_suggestions": MagicMock()})
+
+        reply_message = _DummySentMessage(chat_id=10, message_id=20)
+        await bot._maybe_offer_follow_up_research(
+            reply_message,
+            video_id="abc123",
+            summary_type="comprehensive",
+            summary="Current summary",
+            source_context={"title": "Cursor review", "url": "https://youtube.com/watch?v=abc123"},
+            sync_targets=["PostgreSQL"],
+        )
+
+        session = bot._get_follow_up_session(10, 21)
+        self.assertIsNotNone(session)
+        self.assertEqual(session["summary_id"], 55)
+        self.assertEqual(session["selected_ids"], ["q1"])
+        self.assertEqual(session["suggestions"][0]["label"], "Latest pricing")
+
+    async def test_toggle_follow_up_selection_updates_session(self):
+        bot = _build_bot()
+        bot._store_follow_up_session(1, 2, {
+            "stage": "selection",
+            "suggestions": [
+                {
+                    "id": "q1",
+                    "label": "Latest pricing",
+                    "question": "What is the latest pricing?",
+                    "reason": "Pricing shifts over time.",
+                }
+            ],
+            "selected_ids": [],
+        })
+        query = _DummyQuery(chat_id=1, message_id=2)
+
+        await bot._handle_follow_up_callback(query, "followup:toggle:0")
+
+        session = bot._get_follow_up_session(1, 2)
+        self.assertEqual(session["selected_ids"], ["q1"])
+        self.assertIn("*Selected:* 1/1", query.edits[-1]["text"])
+
+    async def test_run_follow_up_research_completes_and_clears_session(self):
+        bot = _build_bot()
+        bot._store_follow_up_session(3, 4, {
+            "stage": "selection",
+            "video_id": "abc123",
+            "summary_id": 55,
+            "summary": "Persisted summary",
+            "source_context": {"title": "Cursor review", "video_id": "abc123"},
+            "suggestions": [
+                {
+                    "id": "q1",
+                    "label": "Latest pricing",
+                    "question": "What is the latest pricing?",
+                    "reason": "Pricing changes.",
+                    "provenance": "suggested",
+                }
+            ],
+            "selected_ids": ["q1"],
+            "title": "Cursor review",
+            "provider_mode": "auto",
+            "tool_mode": "auto",
+            "depth": "balanced",
+        })
+        bot._execute_follow_up_research_sync = MagicMock(return_value={
+            "status": "ok",
+            "answer": "Pricing now starts at $20/month.",
+            "sources": [{"name": "Cursor", "url": "https://cursor.com/pricing"}],
+            "meta": {"cache_hit": False},
+        })
+        bot._send_follow_up_result = AsyncMock()
+
+        query = _DummyQuery(chat_id=3, message_id=4)
+        await bot._handle_follow_up_callback(query, "followup:run")
+
+        self.assertIsNone(bot._get_follow_up_session(3, 4))
+        bot._execute_follow_up_research_sync.assert_called_once()
+        call_args = bot._execute_follow_up_research_sync.call_args.args
+        self.assertEqual(call_args[1], ["What is the latest pricing?"])
+        self.assertEqual(call_args[2], ["suggested"])
+        bot._send_follow_up_result.assert_awaited_once()
+        self.assertEqual(query.edits[-1]["text"], "✅ Deep research complete.")
+
+
+if __name__ == "__main__":
+    unittest.main()

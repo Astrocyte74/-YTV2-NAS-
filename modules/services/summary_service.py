@@ -182,6 +182,49 @@ def _extract_primary_summary_text(result: Dict[str, Any]) -> str:
     return ""
 
 
+def extract_summary_text_for_variant(result: Dict[str, Any], summary_type: str) -> str:
+    summary_data = result.get("summary", {})
+    if isinstance(summary_data, dict):
+        if summary_type == "audio":
+            return (
+                summary_data.get("audio")
+                or summary_data.get("content", {}).get("audio")
+                or summary_data.get("content", {}).get("comprehensive")
+                or summary_data.get("comprehensive")
+                or summary_data.get("summary")
+                or ""
+            )
+        if summary_type == "bullet-points":
+            return (
+                summary_data.get("bullet_points")
+                or summary_data.get("content", {}).get("bullet_points")
+                or summary_data.get("content", {}).get("comprehensive")
+                or summary_data.get("comprehensive")
+                or summary_data.get("summary")
+                or ""
+            )
+        if summary_type == "key-insights":
+            return (
+                summary_data.get("key_insights")
+                or summary_data.get("content", {}).get("key_insights")
+                or summary_data.get("content", {}).get("comprehensive")
+                or summary_data.get("comprehensive")
+                or summary_data.get("summary")
+                or ""
+            )
+        return (
+            summary_data.get("comprehensive")
+            or summary_data.get("content", {}).get("comprehensive")
+            or summary_data.get("content", {}).get("audio")
+            or summary_data.get("audio")
+            or summary_data.get("summary")
+            or ""
+        )
+    if isinstance(summary_data, str):
+        return summary_data
+    return ""
+
+
 def _summary_has_useful_content(result: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     text = _extract_primary_summary_text(result)
     if not text:
@@ -468,48 +511,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
         video_id = handler._normalize_content_id(universal_id)
         base_type = (summary_type or '').split(':', 1)[0]
 
-        summary_data = result.get('summary', {})
-        summary = 'No summary available'
-
-        if isinstance(summary_data, dict):
-            if summary_type == "audio":
-                summary = (
-                    summary_data.get('audio')
-                    or summary_data.get('content', {}).get('audio')
-                    or summary_data.get('content', {}).get('comprehensive')
-                    or summary_data.get('comprehensive')
-                    or summary_data.get('summary')
-                    or 'No audio summary available'
-                )
-            elif summary_type == "bullet-points":
-                summary = (
-                    summary_data.get('bullet_points')
-                    or summary_data.get('content', {}).get('bullet_points')
-                    or summary_data.get('content', {}).get('comprehensive')
-                    or summary_data.get('comprehensive')
-                    or summary_data.get('summary')
-                    or 'No bullet points available'
-                )
-            elif summary_type == "key-insights":
-                summary = (
-                    summary_data.get('key_insights')
-                    or summary_data.get('content', {}).get('key_insights')
-                    or summary_data.get('content', {}).get('comprehensive')
-                    or summary_data.get('comprehensive')
-                    or summary_data.get('summary')
-                    or 'No key insights available'
-                )
-            else:
-                summary = (
-                    summary_data.get('comprehensive')
-                    or summary_data.get('content', {}).get('comprehensive')
-                    or summary_data.get('content', {}).get('audio')
-                    or summary_data.get('audio')
-                    or summary_data.get('summary')
-                    or 'No comprehensive summary available'
-                )
-        elif isinstance(summary_data, str):
-            summary = summary_data
+        summary = extract_summary_text_for_variant(result, summary_type) or 'No summary available'
 
         source_icon = {
             'youtube': '🎬',
@@ -1533,6 +1535,26 @@ async def process_content_summary(
                                 await query.message.reply_text("✅ Synced to dashboard.")
                             except Exception:
                                 pass
+                            try:
+                                source_meta = ((result.get("source_metadata") or {}).get(source) or {}) if isinstance(result, dict) else {}
+                                source_context = {
+                                    "video_id": video_id,
+                                    "id": video_id,
+                                    "type": source,
+                                    "title": result.get("title") or video_info.get("title") or "",
+                                    "url": source_meta.get("canonical_url") or source_meta.get("url") or url or "",
+                                    "published_at": source_meta.get("published_at") or video_info.get("upload_date"),
+                                }
+                                await handler._maybe_offer_follow_up_research(
+                                    query.message,
+                                    video_id=video_id,
+                                    summary_type=summary_type,
+                                    summary=extract_summary_text_for_variant(result, summary_type),
+                                    source_context=source_context,
+                                    sync_targets=outcome["targets"],
+                                )
+                            except Exception as exc:
+                                logging.debug("follow-up offer skipped for %s: %s", video_id, exc)
                     else:
                         json_path_obj = Path(json_path)
                         stem = json_path_obj.stem
