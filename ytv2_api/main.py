@@ -26,11 +26,13 @@ from .models import (
     ProcessResponse,
     TranscriptResponse,
     HealthResponse,
+    FollowUpSuggestion,
     FollowUpSuggestionsRequest,
     FollowUpSuggestionsResponse,
     FollowUpRunRequest,
     FollowUpRunResponse,
     FollowUpCachedResponse,
+    ResearchSource,
 )
 
 # Lazy-initialized service instances
@@ -48,6 +50,7 @@ REDDIT_PATTERN = re.compile(
 
 # Research service constants
 _RESEARCH_PATH_ADDED = False
+_follow_up_store = None
 
 
 def _extract_video_id(url: str) -> Optional[str]:
@@ -529,10 +532,12 @@ def get_research_service():
                 run_follow_up_research,
                 get_research_capabilities,
             )
+            from research_service.follow_up import build_cache_key
             _research_service = {
                 'get_follow_up_suggestions': get_follow_up_suggestions,
                 'run_follow_up_research': run_follow_up_research,
                 'get_research_capabilities': get_research_capabilities,
+                'build_cache_key': build_cache_key,
             }
             print("[YTV2 API] Research service loaded successfully")
         except Exception as e:
@@ -550,6 +555,48 @@ def require_research_service():
             detail=f"Research service not available: {service['error']}"
         )
     return service
+
+
+def get_follow_up_store():
+    """Get or lazy-import the follow-up persistence layer."""
+    global _follow_up_store
+    if _follow_up_store is None:
+        from .follow_up_store import FollowUpStore
+        _follow_up_store = FollowUpStore()
+    return _follow_up_store
+
+
+def _build_follow_up_run_response(
+    *,
+    video_id: str,
+    summary_id: Optional[int],
+    status: str,
+    answer: str,
+    sources: list,
+    meta: Dict[str, Any],
+    error: Optional[str] = None,
+) -> FollowUpRunResponse:
+    api_sources = [
+        ResearchSource(
+            name=src.name if hasattr(src, "name") else src.get("name", ""),
+            url=src.url if hasattr(src, "url") else src.get("url", ""),
+            domain=src.domain if hasattr(src, "domain") else src.get("domain", ""),
+            tier=src.tier if hasattr(src, "tier") else src.get("tier", ""),
+            providers=list(src.providers) if hasattr(src, "providers") else list(src.get("providers", [])),
+            tools=list(src.tools) if hasattr(src, "tools") else list(src.get("tools", [])),
+        )
+        for src in sources
+    ]
+    return FollowUpRunResponse(
+        video_id=video_id,
+        summary_id=summary_id,
+        status=status,
+        answer=answer,
+        sources=api_sources,
+        meta=meta,
+        cache_key=meta.get('cache_key', ''),
+        error=error,
+    )
 
 
 @app.get("/api/research/capabilities")
@@ -574,6 +621,7 @@ async def research_capabilities(
         )
 
 
+@app.post("/api/follow-up-suggestions", response_model=FollowUpSuggestionsResponse)
 @app.post("/api/research/follow-up/suggestions", response_model=FollowUpSuggestionsResponse)
 async def get_follow_up_suggestions_endpoint(
     request: FollowUpSuggestionsRequest,
@@ -590,19 +638,30 @@ async def get_follow_up_suggestions_endpoint(
     and should not be passed in the URL query string.
     """
     service = get_research_service()
-
-    # Build source context from request
-    source_context = dict(request.source_context)
-    source_context.setdefault('video_id', request.video_id)
-    source_context.setdefault('id', request.video_id)
+    store = get_follow_up_store()
 
     try:
+        resolved = store.resolve_context(
+            video_id=request.video_id,
+            summary_id=request.summary_id,
+            summary=request.summary,
+            source_context=dict(request.source_context),
+        )
+
         # Get suggestions from research service
         raw_suggestions = service['get_follow_up_suggestions'](
-            source_context=source_context,
-            summary=request.summary,
+            source_context=resolved.source_context,
+            summary=resolved.summary,
             max_suggestions=request.max_suggestions,
         )
+
+        if resolved.summary_id is not None:
+            store.store_suggestions(
+                video_id=request.video_id,
+                summary_id=resolved.summary_id,
+                suggestions=raw_suggestions,
+            )
+            store.mark_follow_up_available(resolved.summary_id)
 
         # Convert to response model
         suggestions = [
@@ -620,7 +679,7 @@ async def get_follow_up_suggestions_endpoint(
         ]
 
         return FollowUpSuggestionsResponse(
-            summary_id=request.summary_id,
+            summary_id=resolved.summary_id,
             video_id=request.video_id,
             suggestions=suggestions,
             should_suggest=len(suggestions) > 0,
@@ -636,6 +695,7 @@ async def get_follow_up_suggestions_endpoint(
         )
 
 
+@app.post("/api/follow-up-research", response_model=FollowUpRunResponse)
 @app.post("/api/research/follow-up/run", response_model=FollowUpRunResponse)
 async def run_follow_up_research_endpoint(
     request: FollowUpRunRequest,
@@ -654,47 +714,73 @@ async def run_follow_up_research_endpoint(
     Results are cached by cache_key for efficient re-use.
     """
     service = get_research_service()
-
-    # Ensure video_id is in source_context
-    source_context = dict(request.source_context)
-    source_context.setdefault('video_id', request.video_id)
-    source_context.setdefault('id', request.video_id)
+    store = get_follow_up_store()
 
     try:
+        resolved = store.resolve_context(
+            video_id=request.video_id,
+            summary_id=request.summary_id,
+            summary=request.summary,
+            source_context=dict(request.source_context),
+        )
+        cache_key = service['build_cache_key'](
+            video_id=request.video_id,
+            summary_id=resolved.summary_id,
+            approved_questions=request.approved_questions,
+            provider_mode=request.provider_mode,
+            depth=request.depth,
+        )
+        cached = store.get_cached_research(cache_key)
+        if cached is not None:
+            cached_meta = dict(cached["meta"])
+            cached_meta["cache_key"] = cache_key
+            cached_meta["cache_hit"] = True
+            cached_meta.setdefault("follow_up_run_id", cached["run_id"])
+            return _build_follow_up_run_response(
+                video_id=request.video_id,
+                summary_id=cached["summary_id"],
+                status=cached["status"],
+                answer=cached["answer"],
+                sources=cached["sources"],
+                meta=cached_meta,
+                error=cached_meta.get("error") if cached["status"] == "error" else None,
+            )
+
         # Run follow-up research
         result = service['run_follow_up_research'](
-            source_context=source_context,
-            summary=request.summary,
+            source_context=resolved.source_context,
+            summary=resolved.summary,
             approved_questions=request.approved_questions,
             question_provenance=request.question_provenance,
-            summary_id=request.summary_id,
+            summary_id=resolved.summary_id,
             provider_mode=request.provider_mode,
             tool_mode=request.tool_mode,
             depth=request.depth,
             manual_tools=request.manual_tools,
         )
 
-        # Convert sources to response model
-        sources = [
-            ResearchSource(
-                name=src.name,
-                url=src.url,
-                domain=src.domain,
-                tier=src.tier,
-                providers=src.providers,
-                tools=src.tools,
+        if resolved.summary_id is not None:
+            run_id = store.store_research_run(
+                video_id=request.video_id,
+                summary_id=resolved.summary_id,
+                approved_questions=request.approved_questions,
+                question_provenance=request.question_provenance,
+                result=result,
             )
-            for src in result.sources
-        ]
+            result.meta["follow_up_run_id"] = run_id
+            result.meta.update(store.create_summary_variant_reference(
+                video_id=request.video_id,
+                text=result.answer,
+            ))
+            store.mark_follow_up_available(resolved.summary_id)
 
-        return FollowUpRunResponse(
+        return _build_follow_up_run_response(
             video_id=request.video_id,
-            summary_id=request.summary_id,
+            summary_id=resolved.summary_id,
             status=result.status,
             answer=result.answer,
-            sources=sources,
+            sources=result.sources,
             meta=result.meta,
-            cache_key=result.meta.get('cache_key', ''),
             error=result.meta.get('error') if result.status == 'error' else None,
         )
 
@@ -714,7 +800,7 @@ async def run_follow_up_research_endpoint(
         )
 
 
-@app.get("/api/research/follow-up/cached")
+@app.get("/api/research/follow-up/cached", response_model=FollowUpCachedResponse)
 async def check_cached_research(
     cache_key: str,
     _auth: None = Depends(require_auth),
@@ -722,14 +808,29 @@ async def check_cached_research(
     """
     Check if follow-up research results are cached.
 
-    NOT YET IMPLEMENTED - Returns 501 until database integration is complete.
-
-    When implemented, this endpoint will query the follow_up_research_runs
-    table to avoid re-running expensive research.
+    Queries follow_up_research_runs for a prior matching run.
     """
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="Cache lookup not yet implemented. This requires database integration for the follow_up_research_runs table."
+    store = get_follow_up_store()
+    cached = store.get_cached_research(cache_key)
+    if cached is None:
+        return FollowUpCachedResponse(cached=False, result=None, cache_key=cache_key)
+
+    cached_meta = dict(cached["meta"])
+    cached_meta["cache_key"] = cache_key
+    cached_meta["cache_hit"] = True
+    cached_meta.setdefault("follow_up_run_id", cached["run_id"])
+    return FollowUpCachedResponse(
+        cached=True,
+        result=_build_follow_up_run_response(
+            video_id=cached["video_id"],
+            summary_id=cached["summary_id"],
+            status=cached["status"],
+            answer=cached["answer"],
+            sources=cached["sources"],
+            meta=cached_meta,
+            error=cached_meta.get("error") if cached["status"] == "error" else None,
+        ),
+        cache_key=cache_key,
     )
 
 
@@ -745,9 +846,11 @@ async def root():
             "health": "/health",
             "research": {
                 "capabilities": "/api/research/capabilities",
+                "legacy_follow_up_suggestions": "/api/follow-up-suggestions (POST)",
+                "legacy_follow_up_research": "/api/follow-up-research (POST)",
                 "follow_up_suggestions": "/api/research/follow-up/suggestions (POST)",
                 "run_follow_up": "/api/research/follow-up/run (POST)",
-                "check_cached": "/api/research/follow-up/cached (NOT IMPLEMENTED)"
+                "check_cached": "/api/research/follow-up/cached"
             }
         }
     }
