@@ -22,6 +22,13 @@ def friendly_variant_label(variant: str, variant_labels: Dict[str, str]) -> str:
     return base_label
 
 
+def build_summary_callback(action: str, content_id: Optional[str] = None) -> str:
+    callback = f"summarize_{action}"
+    if content_id:
+        callback += f"|{content_id}"
+    return callback
+
+
 def build_summary_keyboard(
     variant_labels: Dict[str, str],
     existing_variants: Optional[List[str]] = None,
@@ -49,18 +56,18 @@ def build_summary_keyboard(
     # Arrange primary options compactly: Comprehensive + Insights on row 1, Audio on row 2.
     keyboard: List[List[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(label_for('comprehensive'), callback_data="summarize_comprehensive"),
-            InlineKeyboardButton(label_for('key-insights'), callback_data="summarize_key-insights"),
+            InlineKeyboardButton(label_for('comprehensive'), callback_data=build_summary_callback("comprehensive", video_id)),
+            InlineKeyboardButton(label_for('key-insights'), callback_data=build_summary_callback("key-insights", video_id)),
         ],
         [
-            InlineKeyboardButton(label_for('bullet-points'), callback_data="summarize_bullet-points"),
+            InlineKeyboardButton(label_for('bullet-points'), callback_data=build_summary_callback("bullet-points", video_id)),
         ],
         [
-            InlineKeyboardButton(label_for('audio'), callback_data="summarize_audio"),
+            InlineKeyboardButton(label_for('audio'), callback_data=build_summary_callback("audio", video_id)),
         ],
         [
-            InlineKeyboardButton(label_for('audio-fr'), callback_data="summarize_audio-fr"),
-            InlineKeyboardButton(label_for('audio-es'), callback_data="summarize_audio-es"),
+            InlineKeyboardButton(label_for('audio-fr'), callback_data=build_summary_callback("audio-fr", video_id)),
+            InlineKeyboardButton(label_for('audio-es'), callback_data=build_summary_callback("audio-es", video_id)),
         ],
     ]
 
@@ -112,6 +119,7 @@ def build_summary_provider_keyboard(
     cloud_label: str,
     *,
     local_label: Optional[str] = None,
+    content_id: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
     """Render provider selection keyboard for summary generation."""
     rows: List[List[InlineKeyboardButton]] = [
@@ -119,7 +127,7 @@ def build_summary_provider_keyboard(
     ]
     if local_label:
         rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=build_summary_callback("back_to_main", content_id))])
     return InlineKeyboardMarkup(rows)
 
 

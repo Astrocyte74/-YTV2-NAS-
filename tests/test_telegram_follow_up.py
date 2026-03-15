@@ -10,6 +10,11 @@ if "pydub" not in sys.modules:
 
 from modules.services.summary_service import extract_summary_text_for_variant
 from modules.telegram_handler import YouTubeTelegramBot
+from modules.telegram.ui.summary import (
+    build_summary_callback,
+    build_summary_keyboard,
+    build_summary_provider_keyboard,
+)
 from ytv2_api.follow_up_store import ResolvedFollowUpContext, _candidate_video_ids
 
 
@@ -85,8 +90,47 @@ class TestSummaryVariantExtraction(unittest.TestCase):
             ["Z_MMxvZyOJs", "yt:Z_MMxvZyOJs"],
         )
 
+    def test_summary_callback_can_embed_content_id(self):
+        self.assertEqual(
+            build_summary_callback("back_to_main", "Z_MMxvZyOJs"),
+            "summarize_back_to_main|Z_MMxvZyOJs",
+        )
+
+    def test_summary_keyboard_uses_contextual_callbacks(self):
+        keyboard, _ = build_summary_keyboard(
+            {"comprehensive": "Comprehensive"},
+            existing_variants=[],
+            video_id="Z_MMxvZyOJs",
+        )
+        self.assertEqual(
+            keyboard.inline_keyboard[0][0].callback_data,
+            "summarize_comprehensive|Z_MMxvZyOJs",
+        )
+
+    def test_summary_provider_keyboard_uses_contextual_back(self):
+        keyboard = build_summary_provider_keyboard(
+            "Cloud",
+            local_label="Local",
+            content_id="Z_MMxvZyOJs",
+        )
+        self.assertEqual(
+            keyboard.inline_keyboard[-1][0].callback_data,
+            "summarize_back_to_main|Z_MMxvZyOJs",
+        )
+
 
 class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
+    def test_restore_current_item_from_content_id(self):
+        bot = _build_bot()
+        bot._resolve_video_url = MagicMock(return_value="https://www.youtube.com/watch?v=Z_MMxvZyOJs")
+
+        restored = bot._restore_current_item_from_content_id("Z_MMxvZyOJs")
+
+        self.assertTrue(restored)
+        self.assertEqual(bot.current_item["source"], "youtube")
+        self.assertEqual(bot.current_item["content_id"], "Z_MMxvZyOJs")
+        self.assertEqual(bot.current_item["url"], "https://www.youtube.com/watch?v=Z_MMxvZyOJs")
+
     async def test_offer_follow_up_uses_stored_suggestions(self):
         bot = _build_bot()
         store = MagicMock()

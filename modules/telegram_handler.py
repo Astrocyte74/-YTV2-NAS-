@@ -58,6 +58,7 @@ from modules.telegram.handlers import single as single_handler
 from modules.telegram.ui.keyboards import build_ollama_models_keyboard as ui_build_models_keyboard
 from modules.telegram.ui.summary import (
     build_summary_keyboard as ui_build_summary_keyboard,
+    build_summary_callback as ui_build_summary_callback,
     existing_variants_message as ui_existing_variants_message,
     friendly_variant_label as ui_friendly_variant_label,
     build_summary_provider_keyboard as ui_build_summary_provider_keyboard,
@@ -538,6 +539,26 @@ class YouTubeTelegramBot:
         if delete_id_map:
             self._delete_id_map.update(delete_id_map)
         return keyboard
+
+    def _build_summary_callback(self, action: str, content_id: Optional[str] = None) -> str:
+        return ui_build_summary_callback(action, content_id)
+
+    def _restore_current_item_from_content_id(self, content_id: str) -> bool:
+        normalized = self._normalize_content_id(content_id)
+        source = "youtube"
+        if content_id.startswith("reddit:"):
+            source = "reddit"
+        elif content_id.startswith("web:"):
+            source = "web"
+        url = self._resolve_video_url(content_id)
+        self.current_item = {
+            "source": source,
+            "url": url,
+            "content_id": normalized if source == "youtube" else content_id,
+            "raw_id": normalized,
+            "normalized_id": normalized,
+        }
+        return bool(self.current_item.get("content_id"))
 
     def _existing_variants_message(self, content_id: str, variants: List[str], source: str = "youtube") -> str:
         return ui_existing_variants_message(self.VARIANT_LABELS, content_id, variants, source)
@@ -3829,6 +3850,7 @@ class YouTubeTelegramBot:
         quick_local_slug: Optional[str],
     ) -> InlineKeyboardMarkup:
         rows: List[List[InlineKeyboardButton]] = []
+        content_id = self._current_content_id()
         if quick_cloud_slug:
             rows.append([
                 InlineKeyboardButton(
@@ -3846,7 +3868,7 @@ class YouTubeTelegramBot:
         rows.append([InlineKeyboardButton(cloud_label, callback_data="summary_provider:cloud")])
         if local_label:
             rows.append([InlineKeyboardButton(local_label, callback_data="summary_provider:ollama")])
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=self._build_summary_callback("back_to_main", content_id))])
         return InlineKeyboardMarkup(rows)
 
     def _build_provider_with_combos_keyboard(
@@ -3857,6 +3879,7 @@ class YouTubeTelegramBot:
         quick_local_slug: Optional[str],
     ) -> InlineKeyboardMarkup:
         rows: List[List[InlineKeyboardButton]] = []
+        content_id = self._current_content_id()
         # Determine availability of combos from env
         cloud_model = get_quick_cloud_env_model()
         local_model = (os.getenv("QUICK_LOCAL_MODEL") or "").strip()
@@ -3893,7 +3916,7 @@ class YouTubeTelegramBot:
         rows.append([InlineKeyboardButton("Other LLM from Cloud", callback_data="summary_provider:cloud")])
         if local_label:
             rows.append([InlineKeyboardButton("Other LLM (Local)", callback_data="summary_provider:ollama")])
-        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=self._build_summary_callback("back_to_main", content_id))])
         return InlineKeyboardMarkup(rows)
 
     async def _start_tts_preselect_flow(self, query, summary_session: Dict[str, Any], provider_key: str, model_option: Dict[str, Any]) -> None:
@@ -4247,7 +4270,11 @@ class YouTubeTelegramBot:
         local_button = (provider_options.get("ollama") or {}).get("button_label")
         summary_type = session.get("summary_type") or "comprehensive"
         summary_label = self._friendly_variant_label(summary_type)
-        keyboard = ui_build_summary_provider_keyboard(cloud_button, local_label=local_button)
+        keyboard = ui_build_summary_provider_keyboard(
+            cloud_button,
+            local_label=local_button,
+            content_id=session.get("content_id"),
+        )
         await query.edit_message_text(
             f"⚙️ Choose summarization engine for {summary_label}",
             reply_markup=keyboard,
@@ -6902,6 +6929,10 @@ class YouTubeTelegramBot:
         # Handle summary requests
         if callback_data.startswith("summarize_"):
             raw = callback_data.replace("summarize_", "")  # e.g. "audio-fr" or "audio-fr:beginner"
+            raw, _, callback_content_id = raw.partition("|")
+
+            if callback_content_id:
+                self._restore_current_item_from_content_id(callback_content_id)
 
             # Handle back button
             if raw == "back_to_main":
@@ -6994,6 +7025,7 @@ class YouTubeTelegramBot:
                     "summary_type": summary_type,
                     "proficiency_level": proficiency_level,
                     "user_name": user_name,
+                    "content_id": self._current_content_id(),
                     "provider_options": provider_options,
                 }
                 if len(model_options) <= 1:
@@ -7017,6 +7049,7 @@ class YouTubeTelegramBot:
                 "summary_type": summary_type,
                 "proficiency_level": proficiency_level,
                 "user_name": user_name,
+                "content_id": self._current_content_id(),
                 "provider_options": provider_options,
             }
             self._store_summary_session(query.message.chat.id, query.message.message_id, session_payload)
@@ -7511,7 +7544,7 @@ class YouTubeTelegramBot:
                     [InlineKeyboardButton("▶️ Play in Quizzernator", url=qz)],
                     [InlineKeyboardButton("📂 See in Dashboard", url=f"{dash.rstrip('/')}/api/quiz/{final_name}")],
                     [InlineKeyboardButton("🧩 Generate Again", callback_data=f"gen_quiz:{video_id}"),
-                     InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")]
+                     InlineKeyboardButton("➕ Add Variant", callback_data=self._build_summary_callback("back_to_main", video_id))]
                 ])
                 await query.message.reply_text(
                     f"✅ Saved quiz: {final_name}\n\nUse the buttons below to play or view details.",
@@ -7970,15 +8003,16 @@ class YouTubeTelegramBot:
 
     async def _show_proficiency_selector(self, query, summary_type: str):
         """Show proficiency level selector for language learning"""
+        content_id = self._current_content_id()
         if summary_type == "audio-fr":
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("🟢 Débutant", callback_data="summarize_audio-fr:beginner"),
-                    InlineKeyboardButton("🟡 Intermédiaire", callback_data="summarize_audio-fr:intermediate"),
-                    InlineKeyboardButton("🔵 Avancé", callback_data="summarize_audio-fr:advanced"),
+                    InlineKeyboardButton("🟢 Débutant", callback_data=self._build_summary_callback("audio-fr:beginner", content_id)),
+                    InlineKeyboardButton("🟡 Intermédiaire", callback_data=self._build_summary_callback("audio-fr:intermediate", content_id)),
+                    InlineKeyboardButton("🔵 Avancé", callback_data=self._build_summary_callback("audio-fr:advanced", content_id)),
                 ],
                 [
-                    InlineKeyboardButton("⬅️ Retour", callback_data="summarize_back_to_main")
+                    InlineKeyboardButton("⬅️ Retour", callback_data=self._build_summary_callback("back_to_main", content_id))
                 ]
             ])
             await query.edit_message_text("🇫🇷 **Choisissez votre niveau de français :**", 
@@ -7986,12 +8020,12 @@ class YouTubeTelegramBot:
         else:  # audio-es
             keyboard = InlineKeyboardMarkup([
                 [
-                    InlineKeyboardButton("🟢 Principiante", callback_data="summarize_audio-es:beginner"),
-                    InlineKeyboardButton("🟡 Intermedio", callback_data="summarize_audio-es:intermediate"),
-                    InlineKeyboardButton("🔵 Avanzado", callback_data="summarize_audio-es:advanced"),
+                    InlineKeyboardButton("🟢 Principiante", callback_data=self._build_summary_callback("audio-es:beginner", content_id)),
+                    InlineKeyboardButton("🟡 Intermedio", callback_data=self._build_summary_callback("audio-es:intermediate", content_id)),
+                    InlineKeyboardButton("🔵 Avanzado", callback_data=self._build_summary_callback("audio-es:advanced", content_id)),
                 ],
                 [
-                    InlineKeyboardButton("⬅️ Volver", callback_data="summarize_back_to_main")
+                    InlineKeyboardButton("⬅️ Volver", callback_data=self._build_summary_callback("back_to_main", content_id))
                 ]
             ])
             await query.edit_message_text("🇪🇸 **Elige tu nivel de español:**", 
@@ -8094,7 +8128,7 @@ class YouTubeTelegramBot:
                 InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb) if len(gen_cb.encode('utf-8')) <= 64 else None,
             ],
             [
-                InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")
+                InlineKeyboardButton("➕ Add Variant", callback_data=self._build_summary_callback("back_to_main", video_id))
             ]
         ]
 

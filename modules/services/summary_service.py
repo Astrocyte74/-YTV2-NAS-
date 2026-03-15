@@ -283,7 +283,7 @@ async def _handle_summary_placeholder(
                         )
                     ]
                 )
-            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=handler._build_summary_callback("back_to_main"))])
             reply_markup = InlineKeyboardMarkup(buttons)
 
     await query.edit_message_text("\n".join(message_lines), reply_markup=reply_markup)
@@ -681,7 +681,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     keyboard.append(row3)
 
                     keyboard.append([
-                        InlineKeyboardButton("➕ Add Variant", callback_data="summarize_back_to_main")
+                        InlineKeyboardButton("➕ Add Variant", callback_data=handler._build_summary_callback("back_to_main", video_id))
                     ])
 
                 reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1693,11 +1693,12 @@ async def _handle_local_summary_unavailable(
             "summary_type": summary_type,
             "proficiency_level": proficiency_level,
             "user_name": user_name,
+            "content_id": content_id,
             "provider_options": {"cloud": cloud_option},
         }
         handler._store_summary_session(chat_id, message_id, session_payload)
         buttons.append([InlineKeyboardButton(cloud_option["button_label"], callback_data="summary_provider:cloud")])
-    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="summarize_back_to_main")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=handler._build_summary_callback("back_to_main", content_id))])
 
     if job_path:
         queue_line = f"🗂️ Queued job ID: {job_path.name}"
