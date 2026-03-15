@@ -842,3 +842,395 @@ def execute_research(
         )
 
     return batches, sources, meta, None
+
+
+def execute_research_plan(
+    *,
+    plan,
+    message: str,
+    depth: str,
+    compare: bool,
+    manual_tools: dict | None = None,
+    progress: ProgressCallback | None = None,
+) -> tuple[list[ResearchBatchResult], list[ResearchSource], dict]:
+    """Execute a pre-planned research plan (for follow-up research).
+
+    Unlike execute_research which plans then executes, this function takes
+    an existing FollowUpResearchPlan and executes only.
+
+    Args:
+        plan: FollowUpResearchPlan with pre-planned queries and settings
+        message: Original user message (for context)
+        depth: Research depth setting
+        compare: Whether to run comparison mode
+        manual_tools: Optional manual tool selection per provider
+        progress: Optional progress callback
+
+    Returns:
+        (batches, deduped_sources, meta)
+    """
+    clean_depth = depth if depth in {"quick", "balanced", "deep"} else DEFAULT_DEPTH
+
+    _emit_progress(
+        progress,
+        type="progress",
+        stage="followup_execution_started",
+        label=f"Executing follow-up research with {len(plan.planned_queries)} quer{'y' if len(plan.planned_queries) == 1 else 'ies'}",
+        planned_queries=plan.planned_queries,
+        approved_questions=plan.approved_questions,
+    )
+
+    providers = _resolve_providers(
+        plan.provider_mode,
+        compare,
+        plan.planned_queries,
+        tool_mode=plan.tool_mode,
+        requires_source_backed_answer=True,  # Follow-up research always source-backed
+    )
+    result_limit = DEPTH_RESULT_LIMIT.get(clean_depth, DEPTH_RESULT_LIMIT[DEFAULT_DEPTH])
+    allow_community_reviews = _looks_like_review_request(message)
+
+    provider_clients = {
+        "brave": BraveProvider(),
+        "tavily": TavilyProvider(),
+    }
+
+    batches: list[ResearchBatchResult] = []
+    provider_errors: list[str] = []
+    rate_limit_events: list[dict] = []
+    fallback_events: list[dict] = []
+    tool_decisions: list[dict] = []
+
+    for provider in providers:
+        tool_count_hint = 1
+        if provider == "brave" and plan.planned_queries:
+            hinted_tools, _ = _resolve_tools(
+                provider,
+                plan.planned_queries[0],
+                message,
+                plan.tool_mode,
+                manual_tools,
+                freshness_sensitive=plan.freshness_sensitive,
+                requires_source_backed_answer=True,
+                compare=compare,
+            )
+            tool_count_hint = len(hinted_tools) or 1
+        provider_queries = _limit_queries_for_provider(provider, plan.planned_queries, clean_depth, tool_count_hint)
+
+        for query in provider_queries:
+            client = provider_clients.get(provider)
+            if client is None:
+                continue
+
+            tools, tool_reason = _resolve_tools(
+                provider,
+                query,
+                message,
+                plan.tool_mode,
+                manual_tools,
+                freshness_sensitive=plan.freshness_sensitive,
+                requires_source_backed_answer=True,
+                compare=compare,
+            )
+
+            for tool in tools:
+                provider_options = _build_provider_options(
+                    provider=provider,
+                    tool=tool,
+                    query=query,
+                    message=message,
+                    depth=clean_depth,
+                    freshness_sensitive=plan.freshness_sensitive,
+                )
+                tool_decisions.append({
+                    "provider": provider,
+                    "query": query,
+                    "tools": [tool],
+                    "reason": tool_reason,
+                    "site_target": _extract_site_target(query) or _extract_site_target(message) or None,
+                    "options": provider_options or None,
+                })
+
+                effective_query = (
+                    _ensure_site_target(query, message)
+                    if provider == "tavily" and tool in {"map", "crawl"}
+                    else query
+                )
+
+                verb = "Checking"
+                if tool == "extract":
+                    verb = "Extracting"
+                elif tool == "crawl":
+                    verb = "Crawling"
+                elif tool == "map":
+                    verb = "Mapping"
+                elif tool == "research":
+                    verb = "Researching"
+                elif tool == "news":
+                    verb = "Checking news"
+
+                _emit_progress(
+                    progress,
+                    type="progress",
+                    stage="provider_run_started",
+                    label=f"{verb} {provider} {tool}: {query}",
+                    provider=provider,
+                    tool=tool,
+                    query=query,
+                    reason=tool_reason,
+                )
+
+                batch = client.execute(query=effective_query, tool=tool, max_results=result_limit, options=provider_options)
+
+                if batch.errors:
+                    provider_errors.extend(batch.errors)
+
+                if (
+                    provider == "tavily"
+                    and tool == "research"
+                    and not batch.results
+                    and any(
+                        marker in str(err).lower()
+                        for err in batch.errors
+                        for marker in (
+                            "432",
+                            "set usage limit",
+                            "research exceeded the current plan limit",
+                        )
+                    )
+                ):
+                    _emit_progress(
+                        progress,
+                        type="progress",
+                        stage="fallback_triggered",
+                        label=f"Tavily research unavailable; falling back to search/extract for: {query}",
+                        from_provider="tavily",
+                        to_provider="tavily",
+                        reason="research_432",
+                        query=query,
+                    )
+                    fallback_events.append({
+                        "from": "tavily",
+                        "to": "tavily",
+                        "reason": "research_432",
+                        "query": query,
+                    })
+                    fallback_tools = ["search", "extract"]
+                    for fallback_tool in fallback_tools:
+                        fallback_batch = client.execute(query=query, tool=fallback_tool, max_results=result_limit, options={})
+                        if fallback_batch.errors:
+                            provider_errors.extend(fallback_batch.errors)
+                        if fallback_batch.results:
+                            batches.append(fallback_batch)
+                    continue
+
+                if batch.results:
+                    batches.append(batch)
+
+                top_domains: list[str] = []
+                seen_domains: set[str] = set()
+                for item in batch.results:
+                    domain = extract_domain(item.url)
+                    if not domain or domain in seen_domains:
+                        continue
+                    seen_domains.add(domain)
+                    top_domains.append(domain)
+                    if len(top_domains) >= 3:
+                        break
+
+                _emit_progress(
+                    progress,
+                    type="progress",
+                    stage="provider_run_finished",
+                    label=(
+                        f"{provider} {tool}: {len(batch.results)} result{'s' if len(batch.results) != 1 else ''}"
+                        + (f" from {', '.join(top_domains)}" if top_domains else "")
+                    ),
+                    provider=provider,
+                    tool=tool,
+                    query=query,
+                    result_count=len(batch.results),
+                    latency_ms=batch.latency_ms,
+                    domains=top_domains,
+                    errors=batch.errors[:3],
+                )
+
+                if batch.rate_limited:
+                    rate_limit_events.append({
+                        "provider": provider,
+                        "tool": tool,
+                        "query": query,
+                        "retry_count": batch.retry_count,
+                    })
+                    tavily = provider_clients.get("tavily")
+                    if tavily and not batch.results:
+                        _emit_progress(
+                            progress,
+                            type="progress",
+                            stage="fallback_triggered",
+                            label=f"Falling back from brave to tavily for: {query}",
+                            from_provider="brave",
+                            to_provider="tavily",
+                            reason="rate_limited",
+                            query=query,
+                        )
+                        tavily_batch = tavily.execute(query=query, tool="search", max_results=result_limit, options={})
+                        if tavily_batch.results:
+                            batches.append(tavily_batch)
+                            fallback_events.append({
+                                "from": "brave",
+                                "to": "tavily",
+                                "reason": "rate_limited",
+                                "query": query,
+                            })
+                        if tavily_batch.errors:
+                            provider_errors.extend(tavily_batch.errors)
+
+    # Auto fallback if no data returned from Brave-only path
+    if not batches and providers == ["brave"]:
+        tavily = provider_clients["tavily"]
+        for query in plan.planned_queries:
+            _emit_progress(
+                progress,
+                type="progress",
+                stage="fallback_triggered",
+                label=f"No brave results; trying tavily for: {query}",
+                from_provider="brave",
+                to_provider="tavily",
+                reason="empty_results",
+                query=query,
+            )
+            fallback = tavily.execute(query=query, tool="search", max_results=result_limit, options={})
+            if fallback.results:
+                batches.append(fallback)
+                fallback_events.append({
+                    "from": "brave",
+                    "to": "tavily",
+                    "reason": "empty_results",
+                    "query": query,
+                })
+            if fallback.errors:
+                provider_errors.extend(fallback.errors)
+
+    for batch in batches:
+        _rank_batch_results(batch, allow_community_reviews=allow_community_reviews)
+
+    batches, quality_meta = _filter_low_quality_results(
+        batches,
+        allow_community_reviews=allow_community_reviews,
+    )
+
+    source_map: OrderedDict[str, ResearchSource] = OrderedDict()
+    provider_source_urls: dict[str, set[str]] = {}
+    for batch in batches:
+        provider_urls = provider_source_urls.setdefault(batch.provider, set())
+        for item in batch.results:
+            url = item.url.strip()
+            if not url:
+                continue
+            provider_urls.add(url)
+            existing = source_map.get(url)
+            if existing is None:
+                domain = extract_domain(url)
+                source_map[url] = ResearchSource(
+                    name=item.title.strip() or extract_domain(url),
+                    url=url,
+                    domain=domain,
+                    tier=_classify_source_tier(domain, allow_community_reviews=allow_community_reviews),
+                    providers=[batch.provider],
+                    tools=[batch.tool],
+                )
+                continue
+
+            if batch.provider and batch.provider not in existing.providers:
+                existing.providers.append(batch.provider)
+            if batch.tool and batch.tool not in existing.tools:
+                existing.tools.append(batch.tool)
+
+    sources = list(source_map.values())
+
+    batch_meta = [
+        {
+            "provider": b.provider,
+            "tool": b.tool,
+            "query": b.query,
+            "latency_ms": b.latency_ms,
+            "result_count": len(b.results),
+            "error_count": len(b.errors),
+        }
+        for b in batches
+    ]
+
+    by_provider: dict[str, dict] = {}
+    for row in batch_meta:
+        provider = row["provider"]
+        entry = by_provider.setdefault(provider, {
+            "provider": provider,
+            "tool_runs": 0,
+            "tools": set(),
+            "result_count": 0,
+            "latency_total_ms": 0,
+            "queries": set(),
+        })
+        entry["tool_runs"] += 1
+        entry["tools"].add(row["tool"])
+        entry["queries"].add(row["query"])
+        entry["result_count"] += int(row["result_count"])
+        entry["latency_total_ms"] += int(row["latency_ms"])
+
+    provider_summary = []
+    for provider, row in by_provider.items():
+        tool_runs = max(1, int(row["tool_runs"]))
+        provider_summary.append({
+            "provider": provider,
+            "tool_runs": tool_runs,
+            "tools": sorted(list(row["tools"])),
+            "query_count": len(row["queries"]),
+            "result_count": int(row["result_count"]),
+            "avg_latency_ms": int(row["latency_total_ms"] / tool_runs),
+            "unique_source_count": len(provider_source_urls.get(provider, set())),
+        })
+
+    meta = {
+        "status": "ok" if batches else "fallback",
+        "follow_up_research": True,
+        "approved_questions": plan.approved_questions,
+        "question_provenance": plan.question_provenance,
+        "question_kinds": plan.question_kinds,
+        "planned_queries": plan.planned_queries,
+        "coverage_map": plan.coverage_map,
+        "dedupe_notes": plan.dedupe_notes,
+        "freshness_sensitive": bool(plan.freshness_sensitive),
+        "planner_llm_provider": plan.planner_provider or "unknown",
+        "planner_llm_model": plan.planner_model or "unknown",
+        "allow_community_review_sources": bool(allow_community_reviews),
+        "provider_mode": plan.provider_mode,
+        "tool_mode": plan.tool_mode,
+        "queries": plan.planned_queries,
+        "provider_chain": providers,
+        "batch_count": len(batches),
+        "result_count": sum(len(b.results) for b in batches),
+        "source_count": len(sources),
+        "source_domains": [src.domain for src in sources[:12] if src.domain],
+        "errors": provider_errors[:10],
+        "compare": bool(compare),
+        "depth": clean_depth,
+        "batches": batch_meta,
+        "by_provider": provider_summary,
+        "rate_limit_events": rate_limit_events,
+        "fallback_events": fallback_events,
+        "tool_decisions": tool_decisions,
+        **quality_meta,
+    }
+
+    if rate_limit_events:
+        meta["user_notice"] = (
+            "Brave hit a temporary rate limit on some queries. "
+            "Fallback providers were used where available."
+        )
+    elif quality_meta.get("source_quality_filter_applied"):
+        meta["user_notice"] = (
+            "Lower-quality social, forum, and video sources were filtered out because stronger sources were available."
+        )
+
+    return batches, sources, meta

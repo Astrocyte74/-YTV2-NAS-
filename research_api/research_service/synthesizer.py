@@ -397,3 +397,171 @@ def synthesize_answer(
             sources=sources,
             compare=compare,
         )
+
+
+def synthesize_follow_up(
+    *,
+    source_context: dict,
+    summary: str,
+    approved_questions: list[str],
+    question_kinds: list[str],
+    batches: list[ResearchBatchResult],
+    sources: list[ResearchSource],
+    compare: bool = False,
+) -> tuple[str, dict[str, str]]:
+    """Synthesize a follow-up research report with sectioned answers per question.
+
+    Unlike synthesize_answer which answers a single query, this function
+    generates a structured report with explicit sections for each approved
+    follow-up question.
+
+    Args:
+        source_context: Information about the original content (url, type, title, etc.)
+        summary: The existing summary text
+        approved_questions: User-approved research directions (max 3)
+        question_kinds: Question category for each approved question
+        batches: Research execution results from follow-up queries
+        sources: Deduped source list from all batches
+        compare: Whether to include provider comparison
+
+    Returns:
+        Tuple of (report_text, llm_info) where llm_info contains provider/model.
+    """
+    if not batches:
+        # Fallback for no research results
+        lines = [
+            "# Follow-Up Research Report",
+            "",
+            f"**Source:** {source_context.get('title', 'Unknown')}",
+            f"**URL:** {source_context.get('url', 'N/A')}",
+            "",
+            "## Research Questions",
+            *(f"- {q}" for q in approved_questions),
+            "",
+            "I couldn't retrieve enough current web results to answer these questions reliably. "
+            "Please try again or refine the questions.",
+        ]
+        if sources:
+            lines.extend(["", "Sources:", *(f"- {s.url}" for s in sources[:10])])
+        return "\n".join(lines), {"llm_provider": "fallback", "llm_model": "deterministic"}
+
+    evidence = _build_evidence_block(batches)
+    source_urls = "\n".join(f"- {s.url}" for s in sources[:20])
+
+    # Build question sections
+    question_sections = "\n".join(
+        f"## {i+1}. {question}\n"
+        for i, question in enumerate(approved_questions)
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a follow-up research synthesis assistant. Your job is to write a clear, "
+                "well-structured report that answers EACH of the user's approved follow-up questions "
+                "using ONLY the provided web research evidence.\n\n"
+                "Required format:\n"
+                "# Follow-Up Research Report\n"
+                "## Executive Summary\n"
+                "Brief 2-3 sentence overview of findings.\n\n"
+                "## 1. First Approved Question\n"
+                "Detailed answer with inline citations.\n\n"
+                "## 2. Second Approved Question\n"
+                "Detailed answer with inline citations.\n\n"
+                "(Continue for all approved questions)\n\n"
+                "## Sources\n"
+                "Full list of URLs.\n\n"
+                "Rules:\n"
+                "- Answer EVERY approved question in its own section\n"
+                "- Use ONLY the provided evidence (do not fabricate)\n"
+                "- Be specific about what changed or what's current\n"
+                "- Include timestamps/dates when available\n"
+                "- If evidence is thin for a question, say so clearly"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Original Content:\n"
+                f"- Title: {source_context.get('title', 'Unknown')}\n"
+                f"- URL: {source_context.get('url', 'N/A')}\n"
+                f"- Published: {source_context.get('published_at', 'Unknown')}\n"
+                f"- Type: {source_context.get('type', 'unknown')}\n\n"
+                f"Existing Summary:\n{summary[:2000]}\n\n"
+                f"Approved Follow-Up Questions:\n"
+                f"{question_sections}\n\n"
+                f"Research Evidence:\n{evidence}\n\n"
+                f"Source URLs:\n{source_urls}\n\n"
+                "Generate the follow-up research report."
+            ),
+        },
+    ]
+
+    compare_instruction = (
+        "\n\nInclude a brief 'Research Methodology' section comparing provider/tool results."
+        if compare
+        else ""
+    )
+
+    if compare_instruction:
+        messages[1]["content"] += compare_instruction
+
+    try:
+        result = _call_synth_llm(
+            messages=messages,
+            max_tokens=SYNTH_MAX_TOKENS,
+            timeout=SYNTH_TIMEOUT_SECONDS,
+            provider=RESEARCH_SYNTH_PROVIDER,
+        )
+        out = str(result.get("content") or "")
+        if not out.strip():
+            raise RuntimeError("empty follow-up synthesis output")
+
+        llm_provider = str(result.get("llm_provider") or "unknown")
+        llm_model = str(result.get("llm_model") or "unknown")
+        logger.info("Follow-up synthesis completed via %s (%s)", llm_provider, llm_model)
+
+        finish_reason = str(result.get("finish_reason") or "")
+        continuations_used = 0
+        while continuations_used < SYNTH_MAX_CONTINUATIONS and (
+            finish_reason == "length" or _looks_truncated(out)
+        ):
+            continuation_messages = [
+                messages[0],
+                messages[1],
+                {"role": "assistant", "content": out},
+                {
+                    "role": "user",
+                    "content": (
+                        "Continue exactly where you left off. Do not restart or repeat prior sections. "
+                        "Finish the report cleanly, ensuring all approved questions are answered "
+                        "and the Sources section appears only once at the end."
+                    ),
+                },
+            ]
+            continuation = _call_synth_llm(
+                messages=continuation_messages,
+                max_tokens=SYNTH_CONTINUATION_MAX_TOKENS,
+                timeout=SYNTH_TIMEOUT_SECONDS,
+                provider=RESEARCH_SYNTH_PROVIDER,
+            )
+            chunk = str(continuation.get("content") or "").strip()
+            finish_reason = str(continuation.get("finish_reason") or "")
+            if not chunk:
+                break
+            out = f"{out.rstrip()}\n{chunk.lstrip()}"
+            continuations_used += 1
+
+        out = _normalize_sources_section(out, sources)
+        if "http" not in out:
+            out = f"{out}\n\nSources:\n{source_urls}"
+        return out, {"llm_provider": llm_provider, "llm_model": llm_model}
+    except Exception as e:
+        logger.warning("Follow-up synthesis LLM call failed, using fallback: %s", e)
+        return deterministic_fallback_answer(
+            user_message="; ".join(approved_questions),
+            batches=batches,
+            sources=sources,
+            compare=compare,
+        )

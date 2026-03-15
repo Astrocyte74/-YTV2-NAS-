@@ -17,11 +17,21 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Header, Body
+from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Header, Body, Depends
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from .models import ProcessRequest, ProcessResponse, TranscriptResponse, HealthResponse
+from .models import (
+    ProcessRequest,
+    ProcessResponse,
+    TranscriptResponse,
+    HealthResponse,
+    FollowUpSuggestionsRequest,
+    FollowUpSuggestionsResponse,
+    FollowUpRunRequest,
+    FollowUpRunResponse,
+    FollowUpCachedResponse,
+)
 
 # Lazy-initialized service instances
 _summarizer = None
@@ -35,6 +45,9 @@ YOUTUBE_PATTERN = re.compile(
 REDDIT_PATTERN = re.compile(
     r'^(https?://)?(www\.)?(reddit\.com/|redd\.it/)[\w/]+'
 )
+
+# Research service constants
+_RESEARCH_PATH_ADDED = False
 
 
 def _extract_video_id(url: str) -> Optional[str]:
@@ -72,6 +85,15 @@ def check_auth(authorization: Optional[str]) -> bool:
     # Support both "Bearer <token>" and plain token
     token = authorization.replace('Bearer ', '').strip()
     return token == secret
+
+
+async def require_auth(authorization: Optional[str] = Header(None)) -> None:
+    """FastAPI dependency for authentication - raises if auth fails."""
+    if not check_auth(authorization):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing authorization token"
+        )
 
 
 @asynccontextmanager
@@ -483,6 +505,234 @@ async def health():
     )
 
 
+# =============================================================================
+# Follow-Up Research Endpoints
+# =============================================================================
+
+_research_service = None
+
+
+def get_research_service():
+    """Get or lazy-import the research service."""
+    global _research_service, _RESEARCH_PATH_ADDED
+    if _research_service is None:
+        try:
+            if not _RESEARCH_PATH_ADDED:
+                research_api_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'research_api')
+                import sys
+                if research_api_path not in sys.path:
+                    sys.path.insert(0, research_api_path)
+                _RESEARCH_PATH_ADDED = True
+
+            from research_service.service import (
+                get_follow_up_suggestions,
+                run_follow_up_research,
+                get_research_capabilities,
+            )
+            _research_service = {
+                'get_follow_up_suggestions': get_follow_up_suggestions,
+                'run_follow_up_research': run_follow_up_research,
+                'get_research_capabilities': get_research_capabilities,
+            }
+            print("[YTV2 API] Research service loaded successfully")
+        except Exception as e:
+            print(f"[YTV2 API] Failed to load research service: {e}")
+            _research_service = {'error': str(e)}
+    return _research_service
+
+
+def require_research_service():
+    """Get research service or raise HTTPException if unavailable."""
+    service = get_research_service()
+    if 'error' in service:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Research service not available: {service['error']}"
+        )
+    return service
+
+
+@app.get("/api/research/capabilities")
+async def research_capabilities(
+    _auth: None = Depends(require_auth),
+    _service: None = Depends(require_research_service)
+):
+    """
+    Get research service capabilities and configuration.
+
+    Returns information about available providers, models, and settings.
+    """
+    service = get_research_service()
+
+    try:
+        capabilities = service['get_research_capabilities']()
+        return JSONResponse(content=capabilities)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get capabilities: {str(e)}"
+        )
+
+
+@app.post("/api/research/follow-up/suggestions", response_model=FollowUpSuggestionsResponse)
+async def get_follow_up_suggestions_endpoint(
+    request: FollowUpSuggestionsRequest,
+    _auth: None = Depends(require_auth),
+    _service: None = Depends(require_research_service),
+):
+    """
+    Generate follow-up research suggestions for a summary.
+
+    Uses the planner LLM to analyze the summary and generate contextual
+    follow-up questions that users might want to research.
+
+    POST is used instead of GET because the summary can be very large
+    and should not be passed in the URL query string.
+    """
+    service = get_research_service()
+
+    # Build source context from request
+    source_context = dict(request.source_context)
+    source_context.setdefault('video_id', request.video_id)
+    source_context.setdefault('id', request.video_id)
+
+    try:
+        # Get suggestions from research service
+        raw_suggestions = service['get_follow_up_suggestions'](
+            source_context=source_context,
+            summary=request.summary,
+            max_suggestions=request.max_suggestions,
+        )
+
+        # Convert to response model
+        suggestions = [
+            FollowUpSuggestion(
+                id=s['id'],
+                label=s['label'],
+                question=s['question'],
+                reason=s['reason'],
+                kind=s['kind'],
+                priority=s['priority'],
+                default_selected=s['default_selected'],
+                provenance=s['provenance'],
+            )
+            for s in raw_suggestions
+        ]
+
+        return FollowUpSuggestionsResponse(
+            summary_id=request.summary_id,
+            video_id=request.video_id,
+            suggestions=suggestions,
+            should_suggest=len(suggestions) > 0,
+        )
+
+    except Exception as e:
+        import traceback
+        print(f"[YTV2 API] Error generating suggestions: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate suggestions: {str(e)}"
+        )
+
+
+@app.post("/api/research/follow-up/run", response_model=FollowUpRunResponse)
+async def run_follow_up_research_endpoint(
+    request: FollowUpRunRequest,
+    _auth: None = Depends(require_auth),
+    _service: None = Depends(require_research_service),
+):
+    """
+    Run follow-up research based on approved user questions.
+
+    This endpoint:
+    1. Takes approved follow-up questions
+    2. Consolidates them into a minimal research plan
+    3. Executes web research
+    4. Returns a sectioned report answering each question
+
+    Results are cached by cache_key for efficient re-use.
+    """
+    service = get_research_service()
+
+    # Ensure video_id is in source_context
+    source_context = dict(request.source_context)
+    source_context.setdefault('video_id', request.video_id)
+    source_context.setdefault('id', request.video_id)
+
+    try:
+        # Run follow-up research
+        result = service['run_follow_up_research'](
+            source_context=source_context,
+            summary=request.summary,
+            approved_questions=request.approved_questions,
+            question_provenance=request.question_provenance,
+            summary_id=request.summary_id,
+            provider_mode=request.provider_mode,
+            tool_mode=request.tool_mode,
+            depth=request.depth,
+            manual_tools=request.manual_tools,
+        )
+
+        # Convert sources to response model
+        sources = [
+            ResearchSource(
+                name=src.name,
+                url=src.url,
+                domain=src.domain,
+                tier=src.tier,
+                providers=src.providers,
+                tools=src.tools,
+            )
+            for src in result.sources
+        ]
+
+        return FollowUpRunResponse(
+            video_id=request.video_id,
+            summary_id=request.summary_id,
+            status=result.status,
+            answer=result.answer,
+            sources=sources,
+            meta=result.meta,
+            cache_key=result.meta.get('cache_key', ''),
+            error=result.meta.get('error') if result.status == 'error' else None,
+        )
+
+    except ValueError as e:
+        # Validation errors (too many questions, etc.)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        import traceback
+        print(f"[YTV2 API] Error running follow-up research: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to run follow-up research: {str(e)}"
+        )
+
+
+@app.get("/api/research/follow-up/cached")
+async def check_cached_research(
+    cache_key: str,
+    _auth: None = Depends(require_auth),
+):
+    """
+    Check if follow-up research results are cached.
+
+    NOT YET IMPLEMENTED - Returns 501 until database integration is complete.
+
+    When implemented, this endpoint will query the follow_up_research_runs
+    table to avoid re-running expensive research.
+    """
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Cache lookup not yet implemented. This requires database integration for the follow_up_research_runs table."
+    )
+
+
 @app.get("/")
 async def root():
     """Root endpoint - service info."""
@@ -492,7 +742,13 @@ async def root():
         "endpoints": {
             "process": "/api/process",
             "transcript": "/api/transcript",
-            "health": "/health"
+            "health": "/health",
+            "research": {
+                "capabilities": "/api/research/capabilities",
+                "follow_up_suggestions": "/api/research/follow-up/suggestions (POST)",
+                "run_follow_up": "/api/research/follow-up/run (POST)",
+                "check_cached": "/api/research/follow-up/cached (NOT IMPLEMENTED)"
+            }
         }
     }
 
