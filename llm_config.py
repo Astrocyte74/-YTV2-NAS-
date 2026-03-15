@@ -40,11 +40,12 @@ class LLMConfig:
             "fallback": [("openrouter", "openai/gpt-4o-mini"), ("openrouter", "anthropic/claude-3.7-sonnet")]
         },
         "flash": {
-            "primary": [("openrouter", "google/gemini-2.5-flash-lite")],
+            "primary": [("inception", "mercury-2")],
             "fallback": [
-                ("openrouter", "deepseek/deepseek-v3.1-terminus"),
-                ("openai", "gpt-5-nano"),
-                ("openrouter", "openai/gpt-4o-mini")
+                ("openrouter", "google/gemini-3.1-flash-lite-preview"),
+                ("openrouter", "google/gemini-2.5-flash"),
+                ("openrouter", "google/gemini-3-flash-preview"),
+                ("openai", "gpt-5-nano")
             ]
         },
         "creative": {

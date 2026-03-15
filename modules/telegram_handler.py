@@ -6456,16 +6456,75 @@ class YouTubeTelegramBot:
 
             # === AUTO-MODE: Skip all prompts if enabled ===
             auto_mode_enabled = str(os.getenv('TELEGRAM_AUTO_MODE', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
-            # === NORMAL MODE: Show prompts ===
             parts = raw.split(":", 1)
             summary_type = parts[0]  # "audio-fr" / "audio-es" / "audio"
             proficiency_level = parts[1] if len(parts) == 2 else None
 
-            # If French/Spanish audio without level specified, show level picker
+            # If French/Spanish audio without level specified, show level picker (auto-mode uses intermediate)
             if summary_type in ("audio-fr", "audio-es") and proficiency_level is None:
-                self._remove_summary_session(query.message.chat.id, query.message.message_id)
-                await self._show_proficiency_selector(query, summary_type)
-                return
+                if auto_mode_enabled:
+                    # Auto-mode defaults to intermediate for language learning
+                    proficiency_level = "intermediate"
+                else:
+                    self._remove_summary_session(query.message.chat.id, query.message.message_id)
+                    await self._show_proficiency_selector(query, summary_type)
+                    return
+
+            # === AUTO-MODE: Process immediately ===
+            if auto_mode_enabled:
+                try:
+                    # Get current item info
+                    source = self._current_source()
+                    url = self._current_url()
+                    content_id = self._current_content_id()
+
+                    if not url or not content_id:
+                        await query.edit_message_text("❌ Unable to identify content. Please try again.")
+                        return
+
+                    # Build full summary type with proficiency level
+                    full_summary_type = summary_type
+                    if proficiency_level:
+                        full_summary_type = f"{summary_type}:{proficiency_level}"
+
+                    # Get auto-mode configuration
+                    auto_models_str = os.getenv('AUTO_MODE_MODELS', 'mercury-2,google/gemini-2.5-flash-lite')
+                    auto_models = [m.strip() for m in auto_models_str.split(',') if m.strip()]
+
+                    # Get primary model for initial message
+                    from llm_config import llm_config as _lc
+                    try:
+                        provider, model, api_key = _lc.get_model_config(None, auto_models[0])
+                    except Exception as e:
+                        logging.info(f"[AUTO-MODE] llm_config failed: {e}")
+                        provider, model = "inception", "mercury-2"
+
+                    status_msg = await query.edit_message_text(
+                        f"🚀 *Auto-Mode enabled*\n"
+                        f"▪️ Model: `{provider}/{model}`\n"
+                        f"▪️ Variant: `{full_summary_type}`\n"
+                        f"▪️ Processing audio summary...",
+                        parse_mode='Markdown'
+                    )
+
+                    # Execute summary directly with fallback support
+                    await self._execute_auto_summary_with_fallback(
+                        status_msg,
+                        source=source,
+                        url=url,
+                        content_id=content_id,
+                        summary_type=full_summary_type,
+                        models=auto_models,
+                        user_name=user_name,
+                    )
+                    return
+                except Exception as e:
+                    logging.error(f"[AUTO-MODE] Exception: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    # Fall through to normal mode on error
+
+            # === NORMAL MODE: Show prompts ===
 
             provider_options = self._summary_provider_options()
             if not provider_options:
