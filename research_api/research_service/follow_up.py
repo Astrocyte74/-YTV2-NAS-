@@ -22,8 +22,13 @@ from .config import (
     DEFAULT_DEPTH,
     DEFAULT_PROVIDER_MODE,
     DEFAULT_TOOL_MODE,
+    INCEPTION_API_KEY,
+    INCEPTION_MODEL,
+    OPENROUTER_API_KEY,
     PLANNER_MAX_TOKENS,
     PLANNER_TIMEOUT_SECONDS,
+    RESEARCH_FALLBACK_ENABLED,
+    RESEARCH_FALLBACK_MODEL,
     RESEARCH_PLANNER_PROVIDER,
 )
 from .llm import chat_json_schema
@@ -556,120 +561,94 @@ def _generate_suggestions_with_planner(
         },
     ]
 
-    try:
-        parsed, llm_provider, llm_model = chat_json_schema(
-            messages=messages,
-            schema_name="FollowUpSuggestions",
-            schema=SUGGESTIONS_SCHEMA,
-            max_tokens=PLANNER_MAX_TOKENS,
-            reasoning_effort="low",
-            temperature=0.1,
-            timeout=PLANNER_TIMEOUT_SECONDS,
-            provider=RESEARCH_PLANNER_PROVIDER,
-        )
+    fallback_attempts: list[tuple[str, str, str | None]] = []
+    if RESEARCH_PLANNER_PROVIDER != "inception" and INCEPTION_API_KEY:
+        fallback_attempts.append(("fallback_model", "inception", INCEPTION_MODEL))
+    elif RESEARCH_PLANNER_PROVIDER != "openrouter" and RESEARCH_FALLBACK_ENABLED and OPENROUTER_API_KEY:
+        fallback_attempts.append(("fallback_model", "openrouter", RESEARCH_FALLBACK_MODEL))
 
-        should_suggest = bool(parsed.get("should_suggest", False))
-        if not should_suggest:
-            logger.info("Planner determined follow-up suggestions are not appropriate: %s",
-                       parsed.get("explanation", "No explanation provided"))
-            return []
+    attempts: list[tuple[str, str, str | None]] = [
+        ("primary", RESEARCH_PLANNER_PROVIDER, None),
+        ("retry", RESEARCH_PLANNER_PROVIDER, None),
+        *fallback_attempts,
+    ]
 
-        raw_suggestions = parsed.get("suggestions") or []
-        if not raw_suggestions:
-            logger.warning("Planner returned should_suggest=true but no suggestions")
-            return []
+    for attempt_index, (attempt_kind, provider, model_override) in enumerate(attempts, start=1):
+        try:
+            parsed, llm_provider, llm_model = chat_json_schema(
+                messages=messages,
+                schema_name="FollowUpSuggestions",
+                schema=SUGGESTIONS_SCHEMA,
+                max_tokens=PLANNER_MAX_TOKENS,
+                reasoning_effort="low",
+                temperature=0.1,
+                timeout=PLANNER_TIMEOUT_SECONDS,
+                provider=provider,
+                model_override=model_override,
+            )
 
-        # Convert raw suggestions to FollowUpSuggestion dataclass
-        suggestions = []
-        for i, s in enumerate(raw_suggestions):
-            kind = s.get("kind", "background")
-            # Validate kind is one of the allowed values
-            allowed_kinds = ["current_state", "pricing", "comparison", "alternatives", "fact_check", "background", "what_changed"]
-            if kind not in allowed_kinds:
-                kind = "background"
+            should_suggest = bool(parsed.get("should_suggest", False))
+            if not should_suggest:
+                logger.info("Planner determined follow-up suggestions are not appropriate: %s",
+                           parsed.get("explanation", "No explanation provided"))
+                return []
 
-            suggestions.append(FollowUpSuggestion(
-                id=s.get("id", f"suggestion-{i+1}"),
-                label=s.get("label", f"Follow-up Question {i+1}"),
-                question=s.get("question", ""),
-                reason=s.get("reason", ""),
-                kind=kind,  # type: ignore[arg-type]
-                priority=float(s.get("priority", 0.5)),
-                default_selected=bool(s.get("default_selected", i == 0)),
-                provenance="suggested",  # LLM-generated
-            ))
+            raw_suggestions = parsed.get("suggestions") or []
+            if not raw_suggestions:
+                logger.warning("Planner returned should_suggest=true but no suggestions")
+                return []
 
-        logger.info("Generated %d follow-up suggestions via %s (%s)",
-                   len(suggestions), llm_provider, llm_model)
-        return suggestions[:max_suggestions]
+            # Convert raw suggestions to FollowUpSuggestion dataclass
+            suggestions = []
+            for i, s in enumerate(raw_suggestions):
+                kind = s.get("kind", "background")
+                # Validate kind is one of the allowed values
+                allowed_kinds = ["current_state", "pricing", "comparison", "alternatives", "fact_check", "background", "what_changed"]
+                if kind not in allowed_kinds:
+                    kind = "background"
 
-    except Exception as exc:
-        logger.warning("Failed to generate LLM suggestions, using fallback: %s", exc)
-        # Fallback to heuristic suggestions
-        return _generate_fallback_suggestions(
-            source_context=source_context,
-            summary=summary,
-            entities=entities,
-            max_suggestions=max_suggestions,
-        )
+                suggestions.append(FollowUpSuggestion(
+                    id=s.get("id", f"suggestion-{i+1}"),
+                    label=s.get("label", f"Follow-up Question {i+1}"),
+                    question=s.get("question", ""),
+                    reason=s.get("reason", ""),
+                    kind=kind,  # type: ignore[arg-type]
+                    priority=float(s.get("priority", 0.5)),
+                    default_selected=bool(s.get("default_selected", i == 0)),
+                    provenance="suggested",  # LLM-generated
+                ))
 
+            logger.info("Generated %d follow-up suggestions via %s (%s)",
+                       len(suggestions), llm_provider, llm_model)
+            return suggestions[:max_suggestions]
 
-def _generate_fallback_suggestions(
-    *,
-    source_context: dict,
-    summary: str,
-    entities: list[str],
-    max_suggestions: int,
-) -> list[FollowUpSuggestion]:
-    """Generate heuristic fallback suggestions when LLM fails."""
-    suggestions = []
-    published_at = source_context.get("published_at", "")
-    is_old_content = _is_content_old(published_at)
+        except Exception as exc:
+            total_attempts = len(attempts)
+            if attempt_index < total_attempts:
+                if attempt_kind == "retry":
+                    logger.warning(
+                        "Failed to generate LLM suggestions on attempt %s/%s, escalating to provider=%s model=%s: %s",
+                        attempt_index,
+                        total_attempts,
+                        attempts[attempt_index][1],
+                        attempts[attempt_index][2] or "default",
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to generate LLM suggestions on attempt %s/%s, retrying: %s",
+                        attempt_index,
+                        total_attempts,
+                        exc,
+                    )
+            else:
+                logger.warning(
+                    "Failed to generate LLM suggestions after %s attempts, returning none: %s",
+                    attempt_index,
+                    exc,
+                )
 
-    if is_old_content:
-        suggestions.append(FollowUpSuggestion(
-            id="what-changed-fallback",
-            label="What changed since this was published?",
-            question=f"What has changed since {published_at or 'publication'} regarding the topics in this content?",
-            reason="Content may be outdated, recent updates may be available",
-            kind="what_changed",
-            priority=0.9,
-            default_selected=True,
-            provenance="preset",
-        ))
-
-    # Check for pricing/product mentions
-    has_pricing = any(
-        keyword in summary.lower()
-        for keyword in ["price", "cost", "subscription", "$", "free tier", "paid"]
-    )
-
-    if has_pricing and entities:
-        suggestions.append(FollowUpSuggestion(
-            id="current-pricing-fallback",
-            label="What is the current pricing?",
-            question=f"What is the current pricing and availability for {entities[0]}?",
-            reason="Pricing information changes frequently",
-            kind="pricing",
-            priority=0.8,
-            default_selected=False,
-            provenance="preset",
-        ))
-
-    # Check for comparison opportunity
-    if len(entities) >= 2:
-        suggestions.append(FollowUpSuggestion(
-            id="comparison-fallback",
-            label="How do these compare to alternatives?",
-            question=f"How does {entities[0]} compare to {entities[1]} and alternatives today?",
-            reason="Multiple products/entities mentioned, comparison may be useful",
-            kind="comparison",
-            priority=0.7,
-            default_selected=False,
-            provenance="preset",
-        ))
-
-    return suggestions[:max_suggestions]
+    return []
 
 
 # Helper functions

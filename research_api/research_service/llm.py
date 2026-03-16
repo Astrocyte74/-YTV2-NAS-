@@ -68,32 +68,36 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _post_inception(payload: dict[str, Any], timeout: float) -> LLMResponse:
+def _post_inception(payload: dict[str, Any], timeout: float, model_override: str | None = None) -> LLMResponse:
     """Call Inception Labs Mercury API."""
     if not INCEPTION_API_KEY:
         raise RuntimeError("INCEPTION_API_KEY is not configured")
 
+    model = (model_override or payload.get("model") or INCEPTION_MODEL)
+    request_payload = dict(payload)
+    request_payload["model"] = model
     headers = {
         "Authorization": f"Bearer {INCEPTION_API_KEY}",
         "Content-Type": "application/json",
     }
-    resp = requests.post(INCEPTION_URL, headers=headers, json=payload, timeout=timeout)
+    resp = requests.post(INCEPTION_URL, headers=headers, json=request_payload, timeout=timeout)
     resp.raise_for_status()
     data = resp.json()
     if not isinstance(data, dict):
         raise RuntimeError("Unexpected LLM response")
-    logger.info("LLM request completed via Inception (model=%s)", INCEPTION_MODEL)
-    return LLMResponse(data=data, provider="inception", model=INCEPTION_MODEL)
+    logger.info("LLM request completed via Inception (model=%s)", model)
+    return LLMResponse(data=data, provider="inception", model=str(model))
 
 
-def _post_openrouter(payload: dict[str, Any], timeout: float) -> LLMResponse:
+def _post_openrouter(payload: dict[str, Any], timeout: float, model_override: str | None = None) -> LLMResponse:
     """Call OpenRouter API as fallback."""
     if not OPENROUTER_API_KEY:
         raise RuntimeError("OPENROUTER_API_KEY is not configured")
 
     # OpenRouter doesn't support reasoning_effort - remove it
     clean_payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
-    clean_payload["model"] = RESEARCH_FALLBACK_MODEL
+    model = (model_override or RESEARCH_FALLBACK_MODEL)
+    clean_payload["model"] = model
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -106,11 +110,16 @@ def _post_openrouter(payload: dict[str, Any], timeout: float) -> LLMResponse:
     data = resp.json()
     if not isinstance(data, dict):
         raise RuntimeError("Unexpected LLM response from OpenRouter")
-    logger.info("LLM request completed via OpenRouter fallback (model=%s)", RESEARCH_FALLBACK_MODEL)
-    return LLMResponse(data=data, provider="openrouter", model=RESEARCH_FALLBACK_MODEL)
+    logger.info("LLM request completed via OpenRouter fallback (model=%s)", model)
+    return LLMResponse(data=data, provider="openrouter", model=str(model))
 
 
-def _post_chat(payload: dict[str, Any], timeout: float, provider: ProviderMode = "auto") -> LLMResponse:
+def _post_chat(
+    payload: dict[str, Any],
+    timeout: float,
+    provider: ProviderMode = "auto",
+    model_override: str | None = None,
+) -> LLMResponse:
     """Call LLM with fallback support.
 
     Tries Inception Labs first, falls back to OpenRouter if:
@@ -124,16 +133,16 @@ def _post_chat(payload: dict[str, Any], timeout: float, provider: ProviderMode =
         provider = "auto"
 
     if provider == "inception":
-        return _post_inception(payload, timeout)
+        return _post_inception(payload, timeout, model_override=model_override)
     if provider == "openrouter":
-        return _post_openrouter(payload, timeout)
+        return _post_openrouter(payload, timeout, model_override=model_override)
 
     errors: list[str] = []
 
     # Try Inception first
     if INCEPTION_API_KEY:
         try:
-            return _post_inception(payload, timeout)
+            return _post_inception(payload, timeout, model_override=model_override)
         except Exception as e:
             errors.append(f"Inception: {e}")
             logger.warning("Inception API call failed: %s", e)
@@ -141,8 +150,11 @@ def _post_chat(payload: dict[str, Any], timeout: float, provider: ProviderMode =
     # Fallback to OpenRouter
     if RESEARCH_FALLBACK_ENABLED and OPENROUTER_API_KEY:
         try:
-            logger.info("Falling back to OpenRouter with model: %s", RESEARCH_FALLBACK_MODEL)
-            return _post_openrouter(payload, timeout)
+            logger.info(
+                "Falling back to OpenRouter with model: %s",
+                model_override or RESEARCH_FALLBACK_MODEL,
+            )
+            return _post_openrouter(payload, timeout, model_override=model_override)
         except Exception as e:
             errors.append(f"OpenRouter: {e}")
             logger.error("OpenRouter fallback also failed: %s", e)
@@ -164,6 +176,7 @@ def chat_json_schema(
     temperature: float,
     timeout: float,
     provider: ProviderMode = "auto",
+    model_override: str | None = None,
 ) -> tuple[dict[str, Any], str, str]:
     """Call the configured LLM expecting structured JSON.
 
@@ -189,7 +202,7 @@ def chat_json_schema(
         },
     }
 
-    llm_resp = _post_chat(payload, timeout, provider=provider)
+    llm_resp = _post_chat(payload, timeout, provider=provider, model_override=model_override)
     choices = llm_resp.data.get("choices") or []
     if not choices:
         raise RuntimeError("No choices in LLM response")

@@ -24,6 +24,7 @@ from research_service.follow_up import (
     _should_suggest_follow_up,
     _extract_entities,
     build_cache_key,
+    suggest_follow_up_questions,
 )
 
 
@@ -358,6 +359,99 @@ class TestDataclasses(unittest.TestCase):
         self.assertEqual(plan.provider_mode, "auto")
         self.assertFalse(plan.compare)  # Default value
         self.assertFalse(plan.freshness_sensitive)  # Default value
+
+
+class TestSuggestionGeneration(unittest.TestCase):
+    """Tests for follow-up suggestion generation behavior."""
+
+    @patch("research_service.follow_up.chat_json_schema")
+    def test_suggestions_retry_once_after_parse_failure(self, mock_chat_json_schema):
+        mock_chat_json_schema.side_effect = [
+            RuntimeError("Unable to parse structured JSON response"),
+            (
+                {
+                    "should_suggest": True,
+                    "suggestions": [
+                        {
+                            "id": "s1",
+                            "label": "Has this been independently replicated?",
+                            "question": "Has this research been independently replicated or challenged?",
+                            "reason": "Replication is important for scientific claims.",
+                            "kind": "fact_check",
+                            "priority": 0.9,
+                            "default_selected": True,
+                        }
+                    ],
+                },
+                "openrouter",
+                "google/gemini-3.1-flash-lite-preview",
+            ),
+        ]
+
+        suggestions = suggest_follow_up_questions(
+            source_context={"title": "Butterfly memory", "type": "youtube"},
+            summary="A video about inherited memory in butterflies.",
+            entities=["Joe", "Jonah Guy"],
+            max_suggestions=3,
+        )
+
+        self.assertEqual(mock_chat_json_schema.call_count, 2)
+        self.assertEqual(len(suggestions), 1)
+        self.assertEqual(suggestions[0].kind, "fact_check")
+
+    @patch("research_service.follow_up.chat_json_schema")
+    def test_suggestions_return_none_when_llm_keeps_failing(self, mock_chat_json_schema):
+        mock_chat_json_schema.side_effect = RuntimeError("Unable to parse structured JSON response")
+
+        suggestions = suggest_follow_up_questions(
+            source_context={"title": "Butterfly memory", "type": "youtube"},
+            summary="A video about inherited memory in butterflies.",
+            entities=["Joe", "Jonah Guy"],
+            max_suggestions=3,
+        )
+
+        self.assertEqual(mock_chat_json_schema.call_count, 2)
+        self.assertEqual(suggestions, [])
+
+    @patch("research_service.follow_up.RESEARCH_PLANNER_PROVIDER", "openrouter")
+    @patch("research_service.follow_up.INCEPTION_MODEL", "mercury-2")
+    @patch("research_service.follow_up.INCEPTION_API_KEY", "test-key")
+    @patch("research_service.follow_up.chat_json_schema")
+    def test_suggestions_escalate_to_inception_after_retry(self, mock_chat_json_schema):
+        mock_chat_json_schema.side_effect = [
+            RuntimeError("Unable to parse structured JSON response"),
+            RuntimeError("Unable to parse structured JSON response"),
+            (
+                {
+                    "should_suggest": True,
+                    "suggestions": [
+                        {
+                            "id": "s1",
+                            "label": "Has this been independently replicated?",
+                            "question": "Has this research been independently replicated or challenged?",
+                            "reason": "Replication is important for scientific claims.",
+                            "kind": "fact_check",
+                            "priority": 0.9,
+                            "default_selected": True,
+                        }
+                    ],
+                },
+                "inception",
+                "mercury-2",
+            ),
+        ]
+
+        suggestions = suggest_follow_up_questions(
+            source_context={"title": "Butterfly memory", "type": "youtube"},
+            summary="A video about inherited memory in butterflies.",
+            entities=["Joe", "Jonah Guy"],
+            max_suggestions=3,
+        )
+
+        self.assertEqual(mock_chat_json_schema.call_count, 3)
+        self.assertEqual(mock_chat_json_schema.call_args_list[2].kwargs["provider"], "inception")
+        self.assertEqual(mock_chat_json_schema.call_args_list[2].kwargs["model_override"], "mercury-2")
+        self.assertEqual(len(suggestions), 1)
 
 
 class TestConstants(unittest.TestCase):
