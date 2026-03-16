@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock, MagicMock
 import sys
 import types
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 if "pydub" not in sys.modules:
     pydub_stub = types.ModuleType("pydub")
     pydub_stub.AudioSegment = object
@@ -29,6 +31,7 @@ class _DummySentMessage:
         self.message_id = message_id
         self.chat = _DummyChat(chat_id)
         self.replies = []
+        self.reply_markup = None
 
     async def reply_text(self, text, parse_mode=None, reply_markup=None):
         self.replies.append({
@@ -37,7 +40,13 @@ class _DummySentMessage:
             "reply_markup": reply_markup,
         })
         next_id = self.message_id + len(self.replies)
-        return _DummySentMessage(self.chat_id, next_id)
+        sent = _DummySentMessage(self.chat_id, next_id)
+        sent.reply_markup = reply_markup
+        return sent
+
+    async def edit_reply_markup(self, reply_markup=None):
+        self.reply_markup = reply_markup
+        return self
 
 
 class _DummyQuery:
@@ -169,6 +178,51 @@ class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session["selected_ids"], ["q1"])
         self.assertEqual(session["suggestions"][0]["label"], "Latest pricing")
 
+    async def test_offer_follow_up_can_activate_summary_anchor(self):
+        bot = _build_bot()
+        store = MagicMock()
+        store.resolve_context.return_value = ResolvedFollowUpContext(
+            video_id="abc123",
+            summary_id=55,
+            summary="Persisted summary",
+            source_context={"title": "Cursor review", "video_id": "abc123"},
+        )
+        store.get_stored_suggestions.return_value = [
+            {
+                "id": "q1",
+                "label": "Latest pricing",
+                "question": "What is the latest pricing?",
+                "reason": "Pricing often changes.",
+                "default_selected": True,
+                "provenance": "suggested",
+            }
+        ]
+        bot._get_follow_up_store = MagicMock(return_value=store)
+        bot._get_follow_up_service = MagicMock(return_value={"get_follow_up_suggestions": MagicMock()})
+
+        anchor_message = _DummySentMessage(chat_id=10, message_id=20)
+        anchor_message.reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏳ Deep Research Preparing", callback_data="followup:pending")]
+        ])
+
+        await bot._maybe_offer_follow_up_research(
+            anchor_message,
+            video_id="abc123",
+            summary_type="comprehensive",
+            summary="Current summary",
+            source_context={"title": "Cursor review", "url": "https://youtube.com/watch?v=abc123"},
+            sync_targets=["PostgreSQL"],
+            anchor_message=anchor_message,
+        )
+
+        session = bot._get_follow_up_session(10, 20)
+        self.assertIsNotNone(session)
+        self.assertTrue(session["anchor_summary_message"])
+        self.assertEqual(
+            anchor_message.reply_markup.inline_keyboard[0][0].callback_data,
+            "followup:open",
+        )
+
     async def test_toggle_follow_up_selection_updates_session(self):
         bot = _build_bot()
         bot._store_follow_up_session(1, 2, {
@@ -190,6 +244,47 @@ class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
         session = bot._get_follow_up_session(1, 2)
         self.assertEqual(session["selected_ids"], ["q1"])
         self.assertIn("*Selected:* 1/1", query.edits[-1]["text"])
+
+    async def test_follow_up_pending_callback_answers_without_session(self):
+        bot = _build_bot()
+        query = _DummyQuery(chat_id=1, message_id=2)
+
+        await bot._handle_follow_up_callback(query, "followup:pending")
+
+        self.assertEqual(query.answers[-1]["text"], "Deep Research will be available after sync completes.")
+
+    async def test_follow_up_open_from_summary_anchor_replies_below(self):
+        bot = _build_bot()
+        bot._store_follow_up_session(1, 2, {
+            "stage": "prompt",
+            "video_id": "abc123",
+            "summary_id": 55,
+            "summary": "Persisted summary",
+            "source_context": {"title": "Cursor review", "video_id": "abc123"},
+            "suggestions": [
+                {
+                    "id": "q1",
+                    "label": "Latest pricing",
+                    "question": "What is the latest pricing?",
+                    "reason": "Pricing changes.",
+                    "default_selected": True,
+                    "provenance": "suggested",
+                }
+            ],
+            "selected_ids": ["q1"],
+            "title": "Cursor review",
+            "provider_mode": "auto",
+            "tool_mode": "auto",
+            "depth": "balanced",
+            "anchor_summary_message": True,
+        })
+        query = _DummyQuery(chat_id=1, message_id=2)
+
+        await bot._handle_follow_up_callback(query, "followup:open")
+
+        self.assertFalse(query.edits)
+        self.assertEqual(query.message.replies[-1]["reply_markup"].inline_keyboard[-1][0].callback_data, "followup:run")
+        self.assertEqual(query.answers[-1]["text"], "Deep Research options opened below.")
 
     async def test_run_follow_up_research_completes_and_clears_session(self):
         bot = _build_bot()

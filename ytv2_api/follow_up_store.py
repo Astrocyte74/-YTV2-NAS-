@@ -271,6 +271,8 @@ class FollowUpStore:
         planner_provider: str | None = None,
         planner_model: str | None = None,
     ) -> None:
+        safe_provider = str(planner_provider or "unknown").strip() or "unknown"
+        safe_model = str(planner_model or "unknown").strip() or "unknown"
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 """
@@ -285,7 +287,7 @@ class FollowUpStore:
                   planner_model = EXCLUDED.planner_model,
                   expires_at = EXCLUDED.expires_at
                 """,
-                (video_id, summary_id, json.dumps(suggestions), planner_provider, planner_model),
+                (video_id, summary_id, json.dumps(suggestions), safe_provider, safe_model),
             )
             conn.commit()
 

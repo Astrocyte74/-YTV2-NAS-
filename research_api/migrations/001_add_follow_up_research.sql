@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS follow_up_suggestions (
   video_id TEXT NOT NULL,
   suggestions JSONB NOT NULL DEFAULT '[]'::jsonb,
   generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ,
   planner_provider TEXT NOT NULL DEFAULT 'unknown',
   planner_model TEXT NOT NULL DEFAULT 'unknown',
   source_context JSONB,
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS follow_up_research_runs (
 
   -- Timestamps
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  status TEXT NOT NULL DEFAULT 'ok',
 
   -- Prevent duplicate runs with same inputs
   UNIQUE (cache_key)
@@ -100,6 +103,10 @@ CREATE INDEX IF NOT EXISTS idx_follow_up_research_runs_meta_gin
 -- Add follow_up_research_available column to summaries table
 -- This is a lightweight UI flag that references the runs table
 ALTER TABLE summaries ADD COLUMN IF NOT EXISTS follow_up_research_available BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE follow_up_suggestions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE follow_up_research_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE follow_up_research_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ok';
 
 -- Create index for summaries with available follow-up research
 CREATE INDEX IF NOT EXISTS idx_summaries_follow_up_available

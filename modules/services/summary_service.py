@@ -81,6 +81,61 @@ def get_dashboard_base() -> Optional[str]:
     )
 
 
+def _should_show_follow_up_button(handler, summary_type: str) -> bool:
+    base_type = normalize_variant_id(summary_type or "")
+    if not getattr(handler, "_follow_up_enabled", lambda: False)():
+        return False
+    return bool(base_type and not base_type.startswith("audio") and base_type != "deep-research")
+
+
+def _build_summary_result_keyboard(
+    handler,
+    *,
+    dashboard_url: str,
+    report_id: str,
+    video_id: str,
+    base_type: str,
+    follow_up_state: str | None = None,
+) -> InlineKeyboardMarkup:
+    keyboard: List[List[InlineKeyboardButton]] = []
+    report_id_encoded = urllib.parse.quote(report_id, safe='') if report_id else ''
+
+    row1 = [InlineKeyboardButton("📊 Dashboard", url=dashboard_url)]
+    if report_id_encoded:
+        row1.append(InlineKeyboardButton("📄 Open Summary", url=f"{dashboard_url}#report={report_id_encoded}"))
+    keyboard.append(row1)
+
+    if report_id_encoded:
+        listen_cb = f"listen_this:{video_id}:{base_type}"
+        gen_cb = f"gen_quiz:{video_id}"
+        row2 = []
+        if len(listen_cb.encode('utf-8')) <= 64:
+            row2.append(InlineKeyboardButton("▶️ Listen", callback_data=listen_cb))
+        if len(gen_cb.encode('utf-8')) <= 64:
+            row2.append(InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb))
+        if row2:
+            keyboard.append(row2)
+
+        import hashlib
+
+        short_id = hashlib.md5(video_id.encode()).hexdigest()[:8]
+        delete_cb = f"summary_delete:{short_id}"
+        if hasattr(handler, '_delete_id_map'):
+            handler._delete_id_map[short_id] = video_id
+        keyboard.append([InlineKeyboardButton("🗑️ Delete", callback_data=delete_cb)])
+
+        if follow_up_state == "pending":
+            keyboard.append([InlineKeyboardButton("⏳ Deep Research Preparing", callback_data="followup:pending")])
+        elif follow_up_state == "ready":
+            keyboard.append([InlineKeyboardButton("🔍 Deep Research", callback_data="followup:open")])
+
+        keyboard.append([
+            InlineKeyboardButton("➕ Add Variant", callback_data=handler._build_summary_callback("back_to_main", video_id))
+        ])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def _safe_edit_status(query, text: str, reply_markup=None):
     while True:
         try:
@@ -493,7 +548,8 @@ def validate_quiz_payload(data: dict, explanations: bool = True) -> bool:
         return False
 
 
-async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None, force_new_message: bool = False) -> None:
+async def send_formatted_response(handler, query, result: Dict[str, Any], summary_type: str, export_info: Optional[Dict] = None, force_new_message: bool = False):
+    sent_msg = None
     try:
         video_info = result.get('metadata', {})
         source = result.get('content_source') or handler._current_source()
@@ -650,41 +706,15 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                 report_id = html_path.stem
 
             if dashboard_url:
-                keyboard = []
-
-                report_id_encoded = urllib.parse.quote(report_id, safe='') if report_id else ''
-
-                row1 = [InlineKeyboardButton("📊 Dashboard", url=dashboard_url)]
-                if report_id_encoded:
-                    row1.append(InlineKeyboardButton("📄 Open Summary", url=f"{dashboard_url}#report={report_id_encoded}"))
-                keyboard.append(row1)
-
-                if report_id_encoded:
-                    listen_cb = f"listen_this:{video_id}:{base_type}"
-                    gen_cb = f"gen_quiz:{video_id}"
-                    row2 = []
-                    if len(listen_cb.encode('utf-8')) <= 64:
-                        row2.append(InlineKeyboardButton("▶️ Listen", callback_data=listen_cb))
-                    if len(gen_cb.encode('utf-8')) <= 64:
-                        row2.append(InlineKeyboardButton("🧩 Generate Quiz", callback_data=gen_cb))
-                    if row2:
-                        keyboard.append(row2)
-
-                    # Add delete button with short hash to fit within 64-byte callback_data limit
-                    import hashlib
-                    short_id = hashlib.md5(video_id.encode()).hexdigest()[:8]
-                    delete_cb = f"summary_delete:{short_id}"
-                    # Store mapping for handler to resolve
-                    if hasattr(handler, '_delete_id_map'):
-                        handler._delete_id_map[short_id] = video_id
-                    row3 = [InlineKeyboardButton("🗑️ Delete", callback_data=delete_cb)]
-                    keyboard.append(row3)
-
-                    keyboard.append([
-                        InlineKeyboardButton("➕ Add Variant", callback_data=handler._build_summary_callback("back_to_main", video_id))
-                    ])
-
-                reply_markup = InlineKeyboardMarkup(keyboard)
+                follow_up_state = "pending" if _should_show_follow_up_button(handler, summary_type) else None
+                reply_markup = _build_summary_result_keyboard(
+                    handler,
+                    dashboard_url=dashboard_url,
+                    report_id=report_id or "",
+                    video_id=video_id,
+                    base_type=base_type,
+                    follow_up_state=follow_up_state,
+                )
             else:
                 logging.warning("⚠️ No DASHBOARD_URL set - skipping link buttons")
 
@@ -746,6 +776,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
             await handler._prepare_tts_generation(query, result, summary, summary_type)
     except Exception as e3:
         logging.debug("TTS handoff error after formatted response: %s", e3)
+    return sent_msg
 
 
 async def prepare_tts_generation(handler, query, result: Dict[str, Any], summary_text: str, summary_type: str) -> None:
@@ -1380,6 +1411,7 @@ async def process_content_summary(
                 logging.debug("Unable to refresh audio status message: %s", exc)
 
         export_info.update({"html_path": None, "json_path": None})
+        sent_summary_message = None
         try:
             # Stop periodic spinner once we reach export phase
             try:
@@ -1402,7 +1434,14 @@ async def process_content_summary(
 
                 # Send summary to Telegram FIRST as a NEW message, before sync operations
                 # This ensures users see the summary immediately
-                await send_formatted_response(handler, query, result, summary_type, export_info, force_new_message=True)
+                sent_summary_message = await send_formatted_response(
+                    handler,
+                    query,
+                    result,
+                    summary_type,
+                    export_info,
+                    force_new_message=True,
+                )
 
                 # Update status to indicate processing complete
                 # Sync happens in background, confirmation will appear as new message
@@ -1521,6 +1560,7 @@ async def process_content_summary(
                         stem = json_path_obj.stem
                         report_path = Path(f"/app/data/reports/{stem}.json")
                         result_content_id = result.get('id') or (ledger_id if ledger_id else stem)
+                        metadata = result.get("metadata") or {} if isinstance(result, dict) else {}
 
                         logging.info("📡 DUAL-SYNC START: Uploading to configured targets...")
                         outcome = sync_service.run_dual_sync(report_path, label=result_content_id)
@@ -1541,10 +1581,16 @@ async def process_content_summary(
                                     "video_id": video_id,
                                     "id": video_id,
                                     "type": source,
-                                    "title": result.get("title") or video_info.get("title") or "",
+                                    "title": result.get("title") or metadata.get("title") or "",
                                     "url": source_meta.get("canonical_url") or source_meta.get("url") or url or "",
-                                    "published_at": source_meta.get("published_at") or video_info.get("upload_date"),
+                                    "published_at": source_meta.get("published_at") or metadata.get("upload_date"),
                                 }
+                                logging.info(
+                                    "FOLLOW_UP_OFFER trigger video_id=%s summary_type=%s sync_targets=%s",
+                                    video_id,
+                                    summary_type,
+                                    outcome["targets"],
+                                )
                                 await handler._maybe_offer_follow_up_research(
                                     query.message,
                                     video_id=video_id,
@@ -1552,9 +1598,15 @@ async def process_content_summary(
                                     summary=extract_summary_text_for_variant(result, summary_type),
                                     source_context=source_context,
                                     sync_targets=outcome["targets"],
+                                    anchor_message=sent_summary_message,
                                 )
                             except Exception as exc:
-                                logging.debug("follow-up offer skipped for %s: %s", video_id, exc)
+                                logging.exception(
+                                    "FOLLOW_UP_OFFER failed video_id=%s summary_type=%s: %s",
+                                    video_id,
+                                    summary_type,
+                                    exc,
+                                )
                     else:
                         json_path_obj = Path(json_path)
                         stem = json_path_obj.stem
@@ -1598,7 +1650,7 @@ async def process_content_summary(
         # Send summary to Telegram if not already sent (happens early if JSON export succeeded)
         # Only send here if json_path is not set (meaning early send didn't happen)
         if not export_info.get("json_path"):
-            await send_formatted_response(handler, query, result, summary_type, export_info)
+            sent_summary_message = await send_formatted_response(handler, query, result, summary_type, export_info)
 
     except Exception as e:
         logging.error("Error processing content %s: %s", url, e)

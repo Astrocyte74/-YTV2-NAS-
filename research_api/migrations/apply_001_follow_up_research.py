@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS follow_up_suggestions (
   video_id TEXT NOT NULL,
   suggestions JSONB NOT NULL DEFAULT '[]'::jsonb,
   generated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ,
   planner_provider TEXT NOT NULL DEFAULT 'unknown',
   planner_model TEXT NOT NULL DEFAULT 'unknown',
   source_context JSONB,
@@ -87,6 +88,8 @@ CREATE TABLE IF NOT EXISTS follow_up_research_runs (
 
   -- Timestamps
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  status TEXT NOT NULL DEFAULT 'ok',
 
   -- Prevent duplicate runs with same inputs
   UNIQUE (cache_key)
@@ -130,11 +133,30 @@ CREATE INDEX IF NOT EXISTS idx_follow_up_research_runs_meta_gin
 -- This is a lightweight UI flag that references the runs table
 ALTER TABLE summaries ADD COLUMN IF NOT EXISTS follow_up_research_available BOOLEAN NOT NULL DEFAULT false;
 
+ALTER TABLE follow_up_suggestions ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE follow_up_research_runs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+ALTER TABLE follow_up_research_runs ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ok';
+
 -- Create index for summaries with available follow-up research
 CREATE INDEX IF NOT EXISTS idx_summaries_follow_up_available
   ON summaries (follow_up_research_available)
   WHERE follow_up_research_available = true;
 """
+
+
+def _iter_sql_statements(sql: str) -> list[str]:
+    statements: list[str] = []
+    for chunk in sql.split(";"):
+        lines = []
+        for line in chunk.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                continue
+            lines.append(line)
+        statement = "\n".join(lines).strip()
+        if statement:
+            statements.append(statement)
+    return statements
 
 
 def main() -> int:
@@ -166,25 +188,17 @@ def main() -> int:
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             print("Applying migration 001: Add follow-up research tables...")
-
-            # Split by semicolon and execute each statement
-            statements = [s.strip() for s in MIGRATION_SQL.split(";") if s.strip()]
-
+            statements = _iter_sql_statements(MIGRATION_SQL)
             for i, statement in enumerate(statements, 1):
-                if not statement:
-                    continue
-                # Skip comments
-                if statement.strip().startswith("--"):
-                    continue
-
-                # Print first line of statement for progress
-                first_line = statement.split("\n")[0][:60]
+                first_line = statement.splitlines()[0][:60]
                 print(f"[{i}/{len(statements)}] {first_line}...")
-
                 try:
                     cur.execute(statement)
                 except psycopg.Error as err:
-                    print(f"❌ Error while running:\n{statement[:200]}...\n{err}", file=sys.stderr)
+                    print(
+                        f"❌ Error while running:\n{statement[:200]}...\n{err}",
+                        file=sys.stderr,
+                    )
                     conn.rollback()
                     return 1
 
