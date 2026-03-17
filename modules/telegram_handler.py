@@ -1995,6 +1995,48 @@ class YouTubeTelegramBot:
             rows.append([InlineKeyboardButton("🔍 Deep Research", callback_data="followup:open")])
         return InlineKeyboardMarkup(rows)
 
+    def _deactivate_follow_up_placeholder_markup(self, reply_markup: Optional[InlineKeyboardMarkup]) -> Optional[InlineKeyboardMarkup]:
+        if reply_markup is None:
+            return None
+        rows: List[List[InlineKeyboardButton]] = []
+        replaced = False
+        for row in reply_markup.inline_keyboard:
+            new_row: List[InlineKeyboardButton] = []
+            for button in row:
+                callback_data = getattr(button, "callback_data", None)
+                if callback_data in {"followup:pending", "followup:open"}:
+                    new_row.append(
+                        InlineKeyboardButton("⚪ Deep Research Unavailable", callback_data="followup:unavailable")
+                    )
+                    replaced = True
+                else:
+                    new_row.append(button)
+            rows.append(new_row)
+        return InlineKeyboardMarkup(rows) if replaced else reply_markup
+
+    async def _mark_follow_up_anchor_unavailable(self, anchor_message, *, reason: str) -> None:
+        if anchor_message is None:
+            return
+        self._remove_follow_up_session(anchor_message.chat.id, anchor_message.message_id)
+        try:
+            await anchor_message.edit_reply_markup(
+                reply_markup=self._deactivate_follow_up_placeholder_markup(getattr(anchor_message, "reply_markup", None))
+            )
+            logging.info(
+                "FOLLOW_UP_OFFER unavailable chat_id=%s message_id=%s reason=%s",
+                anchor_message.chat.id,
+                anchor_message.message_id,
+                reason,
+            )
+        except Exception as exc:
+            logging.exception(
+                "FOLLOW_UP_OFFER unavailable_failed chat_id=%s message_id=%s reason=%s: %s",
+                anchor_message.chat.id,
+                anchor_message.message_id,
+                reason,
+                exc,
+            )
+
     def _follow_up_prompt_text(self, session: Dict[str, Any]) -> str:
         title = str(session.get("title") or "").strip()
         lines = [
@@ -2089,9 +2131,11 @@ class YouTubeTelegramBot:
                 video_id,
                 base_type,
             )
+            await self._mark_follow_up_anchor_unavailable(anchor_message, reason="unsupported_summary_type")
             return
         if not self._follow_up_enabled():
             logging.info("FOLLOW_UP_OFFER skip video_id=%s reason=disabled", video_id)
+            await self._mark_follow_up_anchor_unavailable(anchor_message, reason="disabled")
             return
         if sync_targets is not None and "PostgreSQL" not in set(sync_targets):
             logging.info(
@@ -2099,6 +2143,7 @@ class YouTubeTelegramBot:
                 video_id,
                 sync_targets,
             )
+            await self._mark_follow_up_anchor_unavailable(anchor_message, reason="missing_postgres_target")
             return
 
         try:
@@ -2106,6 +2151,7 @@ class YouTubeTelegramBot:
             service = self._get_follow_up_service()
         except Exception as exc:
             logging.exception("FOLLOW_UP_OFFER unavailable video_id=%s: %s", video_id, exc)
+            await self._mark_follow_up_anchor_unavailable(anchor_message, reason="store_or_service_unavailable")
             return
 
         preferred_variant = base_type
@@ -2145,6 +2191,7 @@ class YouTubeTelegramBot:
                 video_id,
                 preferred_variant,
             )
+            await self._mark_follow_up_anchor_unavailable(anchor_message, reason="unresolvable_summary")
             return
 
         offer_key = (resolved.video_id, resolved.summary_id)
@@ -2180,6 +2227,7 @@ class YouTubeTelegramBot:
                 resolved.video_id,
                 resolved.summary_id,
             )
+            await self._mark_follow_up_anchor_unavailable(anchor_message, reason="no_suggestions")
             return
 
         selected_ids = [
@@ -2316,6 +2364,7 @@ class YouTubeTelegramBot:
             text=result.answer,
         )
         result.meta.update(summary_ref_meta)
+        store.update_research_run_meta(run_id, result.meta)
         store.mark_follow_up_available(session["summary_id"])
         logging.info(
             "FOLLOW_UP_RUN persisted video_id=%s summary_id=%s run_id=%s summary_ref_id=%s sources=%s",
@@ -2374,6 +2423,9 @@ class YouTubeTelegramBot:
         action = parts[1] if len(parts) > 1 else ""
         if action == "pending":
             await query.answer("Deep Research will be available after sync completes.", show_alert=False)
+            return
+        if action == "unavailable":
+            await query.answer("Deep Research is not available for this summary.", show_alert=False)
             return
 
         chat_id = query.message.chat.id

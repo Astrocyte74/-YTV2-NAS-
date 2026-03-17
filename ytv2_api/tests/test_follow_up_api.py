@@ -113,7 +113,11 @@ class TestFollowUpRunEndpoint(unittest.TestCase):
             "video_id": "abc123",
             "summary_id": 55,
             "answer": "Cached answer",
-            "meta": {"stored_sources": []},
+            "meta": {
+                "stored_sources": [],
+                "summary_variant_id": 77,
+                "summary_variant_revision": 3,
+            },
             "status": "ok",
             "cache_key": "cache-key",
             "sources": [
@@ -140,6 +144,8 @@ class TestFollowUpRunEndpoint(unittest.TestCase):
         self.assertEqual(response.cache_key, "cache-key")
         self.assertTrue(response.meta["cache_hit"])
         self.assertEqual(response.meta["follow_up_run_id"], 9)
+        self.assertEqual(response.meta["summary_variant_id"], 77)
+        self.assertEqual(response.meta["summary_variant_revision"], 3)
         service["run_follow_up_research"].assert_not_called()
 
     def test_run_endpoint_persists_fresh_result(self):
@@ -185,6 +191,7 @@ class TestFollowUpRunEndpoint(unittest.TestCase):
         self.assertEqual(response.meta["follow_up_run_id"], 42)
         self.assertEqual(response.meta["summary_variant_revision"], 3)
         store.store_research_run.assert_called_once()
+        store.update_research_run_meta.assert_called_once_with(42, result.meta)
         store.mark_follow_up_available.assert_called_once_with(55)
 
     def test_run_endpoint_requires_persisted_summary(self):

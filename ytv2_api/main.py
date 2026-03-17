@@ -785,6 +785,7 @@ async def run_follow_up_research_endpoint(
             video_id=request.video_id,
             text=result.answer,
         ))
+        store.update_research_run_meta(run_id, result.meta)
         store.mark_follow_up_available(resolved.summary_id)
 
         return _build_follow_up_run_response(

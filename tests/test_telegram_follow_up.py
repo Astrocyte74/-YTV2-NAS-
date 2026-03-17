@@ -10,7 +10,10 @@ if "pydub" not in sys.modules:
     pydub_stub.AudioSegment = object
     sys.modules["pydub"] = pydub_stub
 
-from modules.services.summary_service import extract_summary_text_for_variant
+from modules.services.summary_service import (
+    _resolve_content_identity,
+    extract_summary_text_for_variant,
+)
 from modules.telegram_handler import YouTubeTelegramBot
 from modules.telegram.ui.summary import (
     build_summary_callback,
@@ -126,6 +129,20 @@ class TestSummaryVariantExtraction(unittest.TestCase):
             keyboard.inline_keyboard[-1][0].callback_data,
             "summarize_back_to_main|Z_MMxvZyOJs",
         )
+
+    def test_resolve_content_identity_promotes_canonical_result_id(self):
+        bot = _build_bot()
+
+        ledger_id, video_id, display_id = _resolve_content_identity(
+            bot,
+            "web",
+            "web:a29f3499ee02ccd647d50498",
+            {"id": "web:ab53029474d73c67ea7bfd14"},
+        )
+
+        self.assertEqual(ledger_id, "web:ab53029474d73c67ea7bfd14")
+        self.assertEqual(video_id, "ab53029474d73c67ea7bfd14")
+        self.assertEqual(display_id, "web:ab53029474d73c67ea7bfd14")
 
 
 class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
@@ -253,6 +270,14 @@ class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(query.answers[-1]["text"], "Deep Research will be available after sync completes.")
 
+    async def test_follow_up_unavailable_callback_answers_without_session(self):
+        bot = _build_bot()
+        query = _DummyQuery(chat_id=1, message_id=2)
+
+        await bot._handle_follow_up_callback(query, "followup:unavailable")
+
+        self.assertEqual(query.answers[-1]["text"], "Deep Research is not available for this summary.")
+
     async def test_follow_up_open_from_summary_anchor_replies_below(self):
         bot = _build_bot()
         bot._store_follow_up_session(1, 2, {
@@ -327,6 +352,41 @@ class TestTelegramFollowUpFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_args[2], ["suggested"])
         bot._send_follow_up_result.assert_awaited_once()
         self.assertEqual(query.edits[-1]["text"], "✅ Deep research complete.")
+
+    async def test_offer_follow_up_marks_anchor_unavailable_when_no_suggestions(self):
+        bot = _build_bot()
+        store = MagicMock()
+        store.resolve_context.return_value = ResolvedFollowUpContext(
+            video_id="abc123",
+            summary_id=55,
+            summary="Persisted summary",
+            source_context={"title": "Cursor review", "video_id": "abc123"},
+        )
+        store.get_stored_suggestions.return_value = []
+        service = {"get_follow_up_suggestions": MagicMock(return_value=[])}
+        bot._get_follow_up_store = MagicMock(return_value=store)
+        bot._get_follow_up_service = MagicMock(return_value=service)
+
+        anchor_message = _DummySentMessage(chat_id=10, message_id=20)
+        anchor_message.reply_markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⏳ Deep Research Preparing", callback_data="followup:pending")]
+        ])
+
+        await bot._maybe_offer_follow_up_research(
+            anchor_message,
+            video_id="abc123",
+            summary_type="comprehensive",
+            summary="Current summary",
+            source_context={"title": "Cursor review", "url": "https://youtube.com/watch?v=abc123"},
+            sync_targets=["PostgreSQL"],
+            anchor_message=anchor_message,
+        )
+
+        self.assertIsNone(bot._get_follow_up_session(10, 20))
+        self.assertEqual(
+            anchor_message.reply_markup.inline_keyboard[0][0].callback_data,
+            "followup:unavailable",
+        )
 
 
 if __name__ == "__main__":

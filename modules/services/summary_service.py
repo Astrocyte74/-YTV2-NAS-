@@ -88,6 +88,18 @@ def _should_show_follow_up_button(handler, summary_type: str) -> bool:
     return bool(base_type and not base_type.startswith("audio") and base_type != "deep-research")
 
 
+def _resolve_content_identity(handler, source: str, requested_content_id: str, result: Dict[str, Any]) -> tuple[str, str, str]:
+    canonical_content_id = str(
+        result.get("id")
+        or (result.get("metadata") or {}).get("content_id")
+        or requested_content_id
+        or ""
+    ).strip()
+    normalized_video_id = handler._normalize_content_id(canonical_content_id)
+    display_id = f"{source}:{normalized_video_id}" if source != "youtube" else normalized_video_id
+    return canonical_content_id, normalized_video_id, display_id
+
+
 def _build_summary_result_keyboard(
     handler,
     *,
@@ -1379,6 +1391,18 @@ async def process_content_summary(
                     pass
             return
 
+        canonical_ledger_id, canonical_video_id, canonical_display_id = _resolve_content_identity(
+            handler,
+            source,
+            content_id,
+            result,
+        )
+        if canonical_ledger_id and canonical_ledger_id != ledger_id:
+            logging.info("🔁 Canonical content ID resolved: %s → %s", ledger_id, canonical_ledger_id)
+            ledger_id = canonical_ledger_id
+            video_id = canonical_video_id
+            display_id = canonical_display_id
+
         has_summary, placeholder_detail = _summary_has_useful_content(result)
         if not has_summary:
             logging.warning(
@@ -1607,6 +1631,17 @@ async def process_content_summary(
                                     summary_type,
                                     exc,
                                 )
+                                try:
+                                    await handler._mark_follow_up_anchor_unavailable(
+                                        sent_summary_message,
+                                        reason="offer_exception",
+                                    )
+                                except Exception:
+                                    logging.exception(
+                                        "FOLLOW_UP_OFFER cleanup_failed video_id=%s summary_type=%s",
+                                        video_id,
+                                        summary_type,
+                                    )
                     else:
                         json_path_obj = Path(json_path)
                         stem = json_path_obj.stem

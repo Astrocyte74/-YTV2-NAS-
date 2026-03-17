@@ -409,6 +409,19 @@ class FollowUpStore:
             conn.commit()
         return int(row[0])
 
+    def update_research_run_meta(self, run_id: int, meta: dict[str, Any]) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE follow_up_research_runs
+                SET research_meta = %s::jsonb,
+                    completed_at = now()
+                WHERE id = %s
+                """,
+                (json.dumps(meta or {}), run_id),
+            )
+            conn.commit()
+
     def create_summary_variant_reference(self, *, video_id: str, text: str) -> dict[str, int]:
         reference_text = "Follow-up research available. Canonical result stored in follow_up_research_runs."
         html = format_summary_html(reference_text)
