@@ -23,7 +23,7 @@ INCEPTION_URL = _env_str("INCEPTION_URL", "https://api.inceptionlabs.ai/v1/chat/
 INCEPTION_MODEL = _env_str("INCEPTION_MODEL", _env_str("CHAT_INTENT_MODEL", "mercury-2"))
 
 RESEARCH_FALLBACK_ENABLED = _env_bool("RESEARCH_FALLBACK_ENABLED", False)
-RESEARCH_FALLBACK_MODEL = _env_str("RESEARCH_FALLBACK_MODEL", "google/gemini-2.5-flash")
+RESEARCH_FALLBACK_MODEL = _env_str("RESEARCH_FALLBACK_MODEL", "google/gemini-3.1-flash-lite-preview")
 OPENROUTER_API_KEY = _env_str("OPENROUTER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 OPENROUTER_HTTP_REFERER = _env_str("OPENROUTER_HTTP_REFERER", "https://research-service.local")

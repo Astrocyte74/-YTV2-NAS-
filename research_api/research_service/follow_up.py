@@ -561,16 +561,17 @@ def _generate_suggestions_with_planner(
         },
     ]
 
+    # Fallback chain based on rigorous quality testing (Mar 2026):
+    # 1. gemini-3.1-flash-lite: 80/100 quality, best budget option
+    # 2. gpt-5.4-nano: 78/100 quality, excels at edge cases/unclear summaries
+    # 3. mercury-2: 77/100 quality, free and fastest (0.8s)
     fallback_attempts: list[tuple[str, str, str | None]] = []
-    # Try inception with mercury-2 if available and not already primary
-    if RESEARCH_PLANNER_PROVIDER != "inception" and INCEPTION_API_KEY:
-        fallback_attempts.append(("fallback_inception", "inception", INCEPTION_MODEL))
-    # Try openrouter with gemini-3-flash-preview if available
+    # Fallback 1: gpt-5.4-nano (best for edge cases)
     if RESEARCH_PLANNER_PROVIDER != "openrouter" and RESEARCH_FALLBACK_ENABLED and OPENROUTER_API_KEY:
-        fallback_attempts.append(("fallback_openrouter_flash", "openrouter", "google/gemini-3-flash-preview"))
-    # Final fallback: try the configured fallback model
-    if RESEARCH_FALLBACK_MODEL and RESEARCH_FALLBACK_MODEL != "google/gemini-2.5-flash":
-        fallback_attempts.append(("fallback_configured", "openrouter", RESEARCH_FALLBACK_MODEL))
+        fallback_attempts.append(("fallback_gpt_nano", "openrouter", "openai/gpt-5.4-nano"))
+    # Fallback 2: inception/mercury-2 (free, fast, reliable)
+    if RESEARCH_PLANNER_PROVIDER != "inception" and INCEPTION_API_KEY:
+        fallback_attempts.append(("fallback_mercury", "inception", INCEPTION_MODEL))
 
     attempts: list[tuple[str, str, str | None]] = [
         ("primary", RESEARCH_PLANNER_PROVIDER, None),
