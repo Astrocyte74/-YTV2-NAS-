@@ -59,6 +59,31 @@ class TestFollowUpSuggestionEndpoint(unittest.TestCase):
         self.assertEqual(len(response.suggestions), 1)
         store.store_suggestions.assert_called_once()
         store.mark_follow_up_available.assert_called_once_with(55)
+        self.assertIsNone(store.resolve_context.call_args.kwargs.get("preferred_variant"))
+
+    def test_suggestions_forward_preferred_variant(self):
+        request = FollowUpSuggestionsRequest(
+            video_id="abc123",
+            summary="Request summary",
+            preferred_variant="key-insights",
+            source_context={"title": "Original"},
+        )
+        store = MagicMock()
+        store.resolve_context.return_value = ResolvedFollowUpContext(
+            video_id="abc123",
+            summary_id=55,
+            summary="Resolved summary",
+            source_context={"title": "Original", "video_id": "abc123", "id": "abc123"},
+        )
+        service = {
+            "get_follow_up_suggestions": MagicMock(return_value=[]),
+        }
+
+        with patch("ytv2_api.main.get_follow_up_store", return_value=store), \
+             patch("ytv2_api.main.get_research_service", return_value=service):
+            asyncio.run(get_follow_up_suggestions_endpoint(request))
+
+        self.assertEqual(store.resolve_context.call_args.kwargs.get("preferred_variant"), "key-insights")
 
     def test_suggestions_require_persisted_summary(self):
         request = FollowUpSuggestionsRequest(
@@ -193,6 +218,37 @@ class TestFollowUpRunEndpoint(unittest.TestCase):
         store.store_research_run.assert_called_once()
         store.update_research_run_meta.assert_called_once_with(42, result.meta)
         store.mark_follow_up_available.assert_called_once_with(55)
+
+    def test_run_endpoint_forwards_preferred_variant(self):
+        request = FollowUpRunRequest(
+            video_id="abc123",
+            summary="Request summary",
+            preferred_variant="bullet-points",
+            source_context={},
+            approved_questions=["What changed?"],
+        )
+        store = MagicMock()
+        store.resolve_context.return_value = self._resolved_context()
+        store.get_cached_research.return_value = {
+            "run_id": 9,
+            "video_id": "abc123",
+            "summary_id": 55,
+            "answer": "Cached answer",
+            "meta": {"stored_sources": []},
+            "status": "ok",
+            "cache_key": "cache-key",
+            "sources": [],
+        }
+        service = {
+            "build_cache_key": MagicMock(return_value="cache-key"),
+            "run_follow_up_research": MagicMock(),
+        }
+
+        with patch("ytv2_api.main.get_follow_up_store", return_value=store), \
+             patch("ytv2_api.main.get_research_service", return_value=service):
+            asyncio.run(run_follow_up_research_endpoint(request))
+
+        self.assertEqual(store.resolve_context.call_args.kwargs.get("preferred_variant"), "bullet-points")
 
     def test_run_endpoint_requires_persisted_summary(self):
         request = FollowUpRunRequest(

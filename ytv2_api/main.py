@@ -646,6 +646,7 @@ async def get_follow_up_suggestions_endpoint(
             summary_id=request.summary_id,
             summary=request.summary,
             source_context=dict(request.source_context),
+            preferred_variant=request.preferred_variant,
         )
         if resolved.summary_id is None:
             raise HTTPException(
@@ -694,6 +695,8 @@ async def get_follow_up_suggestions_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         print(f"[YTV2 API] Error generating suggestions: {e}")
@@ -731,6 +734,7 @@ async def run_follow_up_research_endpoint(
             summary_id=request.summary_id,
             summary=request.summary,
             source_context=dict(request.source_context),
+            preferred_variant=request.preferred_variant,
         )
         if resolved.summary_id is None:
             raise HTTPException(
@@ -809,6 +813,8 @@ async def run_follow_up_research_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         print(f"[YTV2 API] Error running follow-up research: {e}")

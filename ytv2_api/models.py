@@ -108,6 +108,7 @@ class FollowUpSuggestionsRequest(BaseModel):
     video_id: str = Field(..., description="Content identifier")
     summary: str = Field(..., description="The existing summary text")
     summary_id: Optional[int] = Field(None, description="Summary ID if available")
+    preferred_variant: Optional[str] = Field(None, description="Preferred persisted summary variant to resolve")
     source_context: Dict[str, Any] = Field(default_factory=dict, description="Additional source context")
     max_suggestions: int = Field(default=3, ge=1, le=5, description="Maximum number of suggestions to generate")
 
@@ -127,6 +128,7 @@ class FollowUpRunRequest(BaseModel):
 
     video_id: str = Field(..., description="Content identifier (video ID, URL hash, etc.)")
     summary_id: Optional[int] = Field(None, description="Specific summary revision ID")
+    preferred_variant: Optional[str] = Field(None, description="Preferred persisted summary variant to resolve")
     summary: str = Field(..., description="The existing summary text")
     source_context: Dict[str, Any] = Field(default_factory=dict, description="Information about original content")
     approved_questions: List[str] = Field(..., min_length=1, max_length=3, description="User-approved research questions")
@@ -142,6 +144,7 @@ class FollowUpRunRequest(BaseModel):
                 {
                     "video_id": "abc123",
                     "summary_id": 456,
+                    "preferred_variant": "key-insights",
                     "summary": "This video reviews Cursor AI, covering its pricing and features...",
                     "source_context": {
                         "title": "Cursor AI Review",
