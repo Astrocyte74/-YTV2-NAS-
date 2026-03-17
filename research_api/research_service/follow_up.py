@@ -562,10 +562,15 @@ def _generate_suggestions_with_planner(
     ]
 
     fallback_attempts: list[tuple[str, str, str | None]] = []
+    # Try inception with mercury-2 if available and not already primary
     if RESEARCH_PLANNER_PROVIDER != "inception" and INCEPTION_API_KEY:
-        fallback_attempts.append(("fallback_model", "inception", INCEPTION_MODEL))
-    elif RESEARCH_PLANNER_PROVIDER != "openrouter" and RESEARCH_FALLBACK_ENABLED and OPENROUTER_API_KEY:
-        fallback_attempts.append(("fallback_model", "openrouter", RESEARCH_FALLBACK_MODEL))
+        fallback_attempts.append(("fallback_inception", "inception", INCEPTION_MODEL))
+    # Try openrouter with gemini-3-flash-preview if available
+    if RESEARCH_PLANNER_PROVIDER != "openrouter" and RESEARCH_FALLBACK_ENABLED and OPENROUTER_API_KEY:
+        fallback_attempts.append(("fallback_openrouter_flash", "openrouter", "google/gemini-3-flash-preview"))
+    # Final fallback: try the configured fallback model
+    if RESEARCH_FALLBACK_MODEL and RESEARCH_FALLBACK_MODEL != "google/gemini-2.5-flash":
+        fallback_attempts.append(("fallback_configured", "openrouter", RESEARCH_FALLBACK_MODEL))
 
     attempts: list[tuple[str, str, str | None]] = [
         ("primary", RESEARCH_PLANNER_PROVIDER, None),

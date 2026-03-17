@@ -11,6 +11,7 @@ Security: Binds to 127.0.0.1 only - accessible only from within the NAS.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 from contextlib import asynccontextmanager
@@ -728,6 +729,13 @@ async def run_follow_up_research_endpoint(
     service = get_research_service()
     store = get_follow_up_store()
 
+    logging.info(
+        "FOLLOW_UP_RUN request video_id=%s questions=%s",
+        request.video_id,
+        request.approved_questions,
+    )
+    print(f"[DEBUG] FOLLOW_UP_RUN request video_id={request.video_id} questions={request.approved_questions}", flush=True)
+
     try:
         resolved = store.resolve_context(
             video_id=request.video_id,
@@ -750,6 +758,11 @@ async def run_follow_up_research_endpoint(
         )
         cached = store.get_cached_research(cache_key)
         if cached is not None:
+            logging.info(
+                "FOLLOW_UP_RUN cache_hit video_id=%s status=%s",
+                request.video_id,
+                cached.get("status"),
+            )
             cached_meta = dict(cached["meta"])
             cached_meta["cache_key"] = cache_key
             cached_meta["cache_hit"] = True
@@ -765,6 +778,12 @@ async def run_follow_up_research_endpoint(
             )
 
         # Run follow-up research
+        logging.info(
+            "FOLLOW_UP_RUN start video_id=%s summary_id=%s questions=%s",
+            request.video_id,
+            resolved.summary_id,
+            request.approved_questions,
+        )
         result = service['run_follow_up_research'](
             source_context=resolved.source_context,
             summary=resolved.summary,
@@ -775,6 +794,13 @@ async def run_follow_up_research_endpoint(
             tool_mode=request.tool_mode,
             depth=request.depth,
             manual_tools=request.manual_tools,
+        )
+        logging.info(
+            "FOLLOW_UP_RUN result video_id=%s status=%s cache_hit=%s answer_len=%d",
+            request.video_id,
+            result.status,
+            result.meta.get("cache_hit", False),
+            len(result.answer) if result.answer else 0,
         )
 
         run_id = store.store_research_run(

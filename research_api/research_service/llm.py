@@ -43,8 +43,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             return parsed
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("Direct JSON parse failed: %s", e)
 
     fenced_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
     if fenced_match:
@@ -52,8 +52,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
             parsed = json.loads(fenced_match.group(1))
             if isinstance(parsed, dict):
                 return parsed
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Fenced JSON parse failed: %s", e)
 
     first = text.find("{")
     last = text.rfind("}")
@@ -62,7 +62,8 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
             parsed = json.loads(text[first : last + 1])
             if isinstance(parsed, dict):
                 return parsed
-        except Exception:
+        except Exception as e:
+            logger.debug("Extracted JSON parse failed (first=%d, last=%d): %s", first, last, e)
             return None
 
     return None
@@ -210,6 +211,7 @@ def chat_json_schema(
     content = (choices[0].get("message", {}) or {}).get("content") or ""
     parsed = _extract_json_object(content)
     if parsed is None:
+        logger.warning("JSON parse failed. Full content (%d chars): %s", len(content), content[:2000] if content else "(empty)")
         raise RuntimeError("Unable to parse structured JSON response")
     return parsed, llm_resp.provider, llm_resp.model
 
