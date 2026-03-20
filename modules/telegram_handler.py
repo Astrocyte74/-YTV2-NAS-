@@ -551,6 +551,11 @@ class YouTubeTelegramBot:
         elif content_id.startswith("web:"):
             source = "web"
         url = self._resolve_video_url(content_id)
+
+        # For Reddit content, construct URL directly if not found in reports
+        if not url and source == "reddit":
+            url = f"https://www.reddit.com/comments/{normalized}/"
+
         self.current_item = {
             "source": source,
             "url": url,
@@ -1749,7 +1754,9 @@ class YouTubeTelegramBot:
         reddit_url = self._extract_reddit_url(message_text)
         if reddit_url:
             reddit_url = reddit_url.strip()
-            reddit_id = self._extract_reddit_id(reddit_url)
+            # Resolve share links (/s/<token>) to get the real post ID
+            resolved_reddit_url = self._resolve_redirects(reddit_url)
+            reddit_id = self._extract_reddit_id(resolved_reddit_url)
             if not reddit_id:
                 await update.message.reply_text("❌ Could not determine Reddit thread ID from that link.")
                 return
@@ -1767,6 +1774,60 @@ class YouTubeTelegramBot:
             reply_markup = self._build_summary_keyboard(existing_variants, content_id)
             message_text = self._existing_variants_message(content_id, existing_variants, source="reddit")
 
+            # === AUTO-MODE: Skip keyboard, process immediately (same as YouTube) ===
+            auto_mode_enabled = str(os.getenv('TELEGRAM_AUTO_MODE', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+            if auto_mode_enabled:
+                try:
+                    auto_models_str = os.getenv('AUTO_MODE_MODELS', 'mercury-2,google/gemini-2.5-flash-lite')
+                    auto_models = [m.strip() for m in auto_models_str.split(',') if m.strip()]
+                    auto_variant = os.getenv('AUTO_MODE_VARIANT', 'key-insights')
+
+                    # Check if variant already exists
+                    current_variants = set(existing_variants or [])
+                    if any((auto_variant == v.split(':', 1)[0]) for v in current_variants):
+                        # Variant exists, show normal keyboard
+                        reply_msg = await update.message.reply_text(
+                            message_text,
+                            reply_markup=reply_markup
+                        )
+                        return
+
+                    # Get primary model for initial message
+                    from llm_config import llm_config as _lc
+                    try:
+                        provider, model, api_key = _lc.get_model_config(None, auto_models[0])
+                        model_label = f"{provider} • {model}"
+                    except Exception as e:
+                        logging.info(f"[AUTO-MODE] llm_config failed: {e}")
+                        provider, model = "inception", "mercury-2"
+
+                    status_msg = await update.message.reply_text(
+                        f"🚀 *Auto-Mode enabled*\n"
+                        f"▪️ Model: `{provider}/{model}`\n"
+                        f"▪️ Variant: `{auto_variant}`\n"
+                        f"▪️ Processing summary...",
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logging.error(f"[AUTO-MODE] Exception: {e}")
+                    import traceback
+                    logging.error(traceback.format_exc())
+                    raise
+
+                # Execute summary directly with fallback support
+                await self._execute_auto_summary_with_fallback(
+                    status_msg,
+                    source="reddit",
+                    url=resolved_reddit_url,
+                    content_id=content_id,
+                    summary_type=auto_variant,
+                    models=auto_models,
+                    user_name=user_name,
+                    original_message=update.message,
+                )
+                return
+
+            # === NORMAL MODE: Show keyboard ===
             reply_msg = await update.message.reply_text(
                 message_text,
                 reply_markup=reply_markup
