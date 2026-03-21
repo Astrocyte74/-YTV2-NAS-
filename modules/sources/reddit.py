@@ -49,6 +49,9 @@ class RedditFetchResult:
     comment_snippets: List[Dict[str, Any]] = field(default_factory=list)
     combined_text: str = ""
     language: Optional[str] = None
+    # Link post detection
+    is_self: bool = True
+    external_url: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -68,6 +71,8 @@ class RedditFetchResult:
             "comment_snippets": self.comment_snippets,
             "combined_text": self.combined_text,
             "language": self.language or "en",
+            "is_self": self.is_self,
+            "external_url": self.external_url,
         }
 
 
@@ -200,6 +205,15 @@ class RedditFetcher:
         permalink = getattr(submission, "permalink", "")
         canonical_url = f"https://www.reddit.com{permalink}" if permalink else url
 
+        # Detect link posts (posts that link to external content)
+        is_self = getattr(submission, "is_self", True)
+        external_url = None
+        if not is_self:
+            # submission.url contains the linked URL for link posts
+            linked_url = getattr(submission, "url", None)
+            if linked_url and not linked_url.startswith("https://www.reddit.com"):
+                external_url = linked_url
+
         return RedditFetchResult(
             id=submission.id,
             title=submission.title or "Untitled thread",
@@ -216,4 +230,6 @@ class RedditFetcher:
             comment_snippets=snippets,
             combined_text=combined_text,
             language=getattr(submission, "lang", None),
+            is_self=is_self,
+            external_url=external_url,
         )

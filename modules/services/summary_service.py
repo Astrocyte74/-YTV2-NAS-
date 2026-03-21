@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import os
@@ -90,7 +91,9 @@ def _should_show_follow_up_button(handler, summary_type: str) -> bool:
 
 def _resolve_content_identity(handler, source: str, requested_content_id: str, result: Dict[str, Any]) -> tuple[str, str, str]:
     canonical_content_id = str(
-        result.get("id")
+        result.get("group_content_id")
+        or (result.get("metadata") or {}).get("group_content_id")
+        or result.get("id")
         or (result.get("metadata") or {}).get("content_id")
         or requested_content_id
         or ""
@@ -107,6 +110,7 @@ def _build_summary_result_keyboard(
     report_id: str,
     video_id: str,
     base_type: str,
+    add_variant_content_id: str | None = None,
     follow_up_state: str | None = None,
 ) -> InlineKeyboardMarkup:
     keyboard: List[List[InlineKeyboardButton]] = []
@@ -142,10 +146,33 @@ def _build_summary_result_keyboard(
             keyboard.append([InlineKeyboardButton("🔍 Deep Research", callback_data="followup:open")])
 
         keyboard.append([
-            InlineKeyboardButton("➕ Add Variant", callback_data=handler._build_summary_callback("back_to_main", video_id))
+            InlineKeyboardButton(
+                "➕ Add Variant",
+                callback_data=handler._build_summary_callback("back_to_main", add_variant_content_id or video_id),
+            )
         ])
 
     return InlineKeyboardMarkup(keyboard)
+
+
+def _find_existing_report_for_content_id(handler, content_id: Optional[str]) -> tuple[Optional[Path], Optional[Dict[str, Any]]]:
+    if not content_id:
+        return None, None
+
+    reports_dir = Path(getattr(handler.json_exporter, "reports_dir", "data/reports"))
+    normalized_id = handler._normalize_content_id(content_id)
+    for path in reports_dir.glob(f"*{normalized_id}*.json"):
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            continue
+
+        report_id = str(data.get("id") or "").strip()
+        if report_id == content_id or handler._normalize_content_id(report_id) == normalized_id:
+            return path, data
+
+    return None, None
 
 
 async def _safe_edit_status(query, text: str, reply_markup=None):
@@ -725,6 +752,7 @@ async def send_formatted_response(handler, query, result: Dict[str, Any], summar
                     report_id=report_id or "",
                     video_id=video_id,
                     base_type=base_type,
+                    add_variant_content_id=handler._summary_menu_content_id(),
                     follow_up_state=follow_up_state,
                 )
             else:
@@ -1050,7 +1078,7 @@ async def handle_audio_summary(handler, query, result: Dict[str, Any], summary_t
 
 
 async def send_existing_summary_notice(handler, query, video_id: str, summary_type: str) -> None:
-    variants = handler._discover_summary_types(video_id)
+    variants = handler._summary_existing_variants()
     message_lines = [
         f"✅ {handler._friendly_variant_label(summary_type)} is already on the dashboard."
     ]
@@ -1059,8 +1087,12 @@ async def send_existing_summary_notice(handler, query, video_id: str, summary_ty
         message_lines.extend(f"• {handler._friendly_variant_label(variant)}" for variant in sorted(variants))
     message_lines.append("\nOpen the summary or re-run a variant below.")
 
-    normalized_id = handler._normalize_content_id(video_id)
-    reply_markup = handler._build_summary_keyboard(variants, normalized_id)
+    menu_content_id = handler._summary_menu_content_id() or video_id
+    reply_markup = handler._build_summary_keyboard(
+        variants,
+        menu_content_id,
+        is_reddit_link_post=handler._is_reddit_link_post_context(),
+    )
     await query.edit_message_text(
         "\n".join(message_lines),
         reply_markup=reply_markup
@@ -1151,6 +1183,7 @@ async def process_content_summary(
         "comprehensive": f"📝 Analyzing {noun} and creating comprehensive summary...",
         "bullet-points": f"🎯 Extracting key points from the {noun}...",
         "key-insights": f"💡 Identifying key insights and takeaways from the {noun}...",
+        "reddit-discussion": "💬 Analyzing the Reddit discussion and extracting the strongest reactions...",
         "audio": "🎙️ Creating audio summary with text-to-speech...",
         "audio-fr": "🇫🇷 Translating to French and preparing audio narration...",
         "audio-es": "🇪🇸 Translating to Spanish and preparing audio narration..."
@@ -1391,6 +1424,49 @@ async def process_content_summary(
                     pass
             return
 
+        current_item = handler.current_item or {}
+        if (
+            isinstance(result, dict)
+            and source == "web"
+            and current_item.get("origin_source") == "reddit"
+            and current_item.get("origin_content_id")
+        ):
+            source_metadata = result.setdefault("source_metadata", {})
+            if isinstance(source_metadata, dict):
+                source_metadata.setdefault(
+                    "reddit_origin",
+                    {
+                        "content_id": current_item.get("origin_content_id"),
+                        "canonical_url": current_item.get("origin_url"),
+                        "external_url": current_item.get("primary_url") or current_item.get("url"),
+                    },
+                )
+            metadata_block = result.setdefault("metadata", {})
+            if isinstance(metadata_block, dict):
+                metadata_block.setdefault("origin_source", "reddit")
+                metadata_block.setdefault("origin_url", current_item.get("origin_url"))
+                metadata_block.setdefault("origin_content_id", current_item.get("origin_content_id"))
+            result.setdefault("origin_source", "reddit")
+            result.setdefault("origin_url", current_item.get("origin_url"))
+            result.setdefault("origin_content_id", current_item.get("origin_content_id"))
+        if (
+            isinstance(result, dict)
+            and summary_type == "reddit-discussion"
+            and current_item.get("origin_source") == "reddit"
+            and current_item.get("primary_content_id")
+        ):
+            grouped_content_id = current_item.get("primary_content_id")
+            result["group_content_id"] = grouped_content_id
+            metadata_block = result.setdefault("metadata", {})
+            if isinstance(metadata_block, dict):
+                metadata_block["group_content_id"] = grouped_content_id
+                metadata_block.setdefault("origin_source", "reddit")
+                metadata_block.setdefault("origin_url", current_item.get("origin_url"))
+                metadata_block.setdefault("origin_content_id", current_item.get("origin_content_id"))
+            result.setdefault("origin_source", "reddit")
+            result.setdefault("origin_url", current_item.get("origin_url"))
+            result.setdefault("origin_content_id", current_item.get("origin_content_id"))
+
         canonical_ledger_id, canonical_video_id, canonical_display_id = _resolve_content_identity(
             handler,
             source,
@@ -1444,12 +1520,69 @@ async def process_content_summary(
             except Exception:
                 pass
             report_dict = create_report_from_youtube_summarizer(result)
+            existing_report_path = None
+            existing_report = None
+            preserve_existing_identity = False
+            current_item = handler.current_item or {}
+            grouped_content_id = result.get("group_content_id") or (result.get("metadata") or {}).get("group_content_id")
+            if grouped_content_id:
+                report_dict["id"] = grouped_content_id
+                metadata_block = report_dict.setdefault("metadata", {})
+                if isinstance(metadata_block, dict):
+                    metadata_block["group_content_id"] = grouped_content_id
+                    metadata_block["content_id"] = grouped_content_id
+                existing_report_path, existing_report = _find_existing_report_for_content_id(handler, grouped_content_id)
+                preserve_existing_identity = bool(
+                    summary_type == "reddit-discussion"
+                    and current_item.get("origin_source") == "reddit"
+                    and existing_report
+                )
+                if preserve_existing_identity:
+                    primary_url = current_item.get("primary_url") or current_item.get("url")
+                    if primary_url:
+                        report_dict["canonical_url"] = primary_url
+                        report_dict["url"] = primary_url
+                        if isinstance(metadata_block, dict):
+                            metadata_block["url"] = primary_url
+                            metadata_block["canonical_url"] = primary_url
+            else:
+                existing_report_path, existing_report = _find_existing_report_for_content_id(
+                    handler,
+                    report_dict.get("id"),
+                )
+
+            report_dict = merge_summary_variants(
+                new_report=report_dict,
+                requested_variant=summary_type,
+                existing_report=existing_report,
+            )
+
+            if preserve_existing_identity and existing_report:
+                merged_report = deepcopy(existing_report)
+                merged_report["summary"] = report_dict.get("summary", {})
+                merged_report["processed_at"] = report_dict.get("processed_at", merged_report.get("processed_at"))
+                if report_dict.get("summary_language"):
+                    merged_report["summary_language"] = report_dict["summary_language"]
+                merged_source_metadata = dict(existing_report.get("source_metadata") or {})
+                merged_source_metadata.update(report_dict.get("source_metadata") or {})
+                merged_report["source_metadata"] = merged_source_metadata
+                merged_metadata = dict(existing_report.get("metadata") or {})
+                merged_metadata.update(
+                    {
+                        key: value
+                        for key, value in (report_dict.get("metadata") or {}).items()
+                        if value is not None and key in {"origin_source", "origin_url", "origin_content_id", "group_content_id"}
+                    }
+                )
+                merged_report["metadata"] = merged_metadata
+                report_dict = merged_report
             # Apply CJCLDS categorization when applicable (General Conference talks)
             try:
                 report_dict = classify_and_apply_cjclds(report_dict, url)
             except Exception:
                 pass
-            json_path = handler.json_exporter.save_report(report_dict)
+            save_filename = existing_report_path.name if existing_report_path else None
+            json_path = handler.json_exporter.save_report(report_dict, filename=save_filename, overwrite=bool(save_filename))
             export_info["json_path"] = Path(json_path).name
 
             json_path_obj = Path(json_path)

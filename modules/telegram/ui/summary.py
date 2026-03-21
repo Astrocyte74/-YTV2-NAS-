@@ -35,9 +35,13 @@ def build_summary_keyboard(
     video_id: Optional[str] = None,
     dashboard_url: Optional[str] = None,
     show_delete_button: bool = False,
+    is_reddit_link_post: bool = False,
 ) -> tuple[InlineKeyboardMarkup, Dict[str, str]]:
     """
     Build summary keyboard with variant buttons.
+
+    Args:
+        is_reddit_link_post: If True, add reddit-discussion button for Reddit link posts
 
     Returns:
         tuple: (keyboard markup, delete_id_map mapping short_id -> video_id)
@@ -70,6 +74,12 @@ def build_summary_keyboard(
             InlineKeyboardButton(label_for('audio-es'), callback_data=build_summary_callback("audio-es", video_id)),
         ],
     ]
+
+    # Add Reddit Discussion button for Reddit link posts
+    if is_reddit_link_post:
+        keyboard.insert(2, [  # Insert after bullet-points, before audio
+            InlineKeyboardButton(label_for('reddit-discussion'), callback_data=build_summary_callback("reddit-discussion", video_id)),
+        ])
 
     if existing_bases and video_id and dashboard_url:
         report_id_encoded = urllib.parse.quote(video_id, safe='')

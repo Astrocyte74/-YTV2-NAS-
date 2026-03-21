@@ -271,6 +271,7 @@ class YouTubeTelegramBot:
         'audio': "🎙️ Audio Summary",
         'audio-fr': "🎙️ Audio français 🇫🇷",
         'audio-es': "🎙️ Audio español 🇪🇸",
+        'reddit-discussion': "💬 Reddit Discussion",
     }
     DRAW_SIZE_PRESETS = {
         "small": {"width": 512, "height": 512, "label": "Small • 512²"},
@@ -520,6 +521,7 @@ class YouTubeTelegramBot:
         existing_variants: Optional[List[str]] = None,
         video_id: Optional[str] = None,
         show_delete_button: bool = False,
+        is_reddit_link_post: bool = False,
     ) -> InlineKeyboardMarkup:
         dashboard_url = None
         if video_id:
@@ -534,6 +536,7 @@ class YouTubeTelegramBot:
             video_id=video_id,
             dashboard_url=dashboard_url,
             show_delete_button=show_delete_button,
+            is_reddit_link_post=is_reddit_link_post,
         )
         # Store the delete ID mapping for the handler to resolve
         if delete_id_map:
@@ -542,6 +545,152 @@ class YouTubeTelegramBot:
 
     def _build_summary_callback(self, action: str, content_id: Optional[str] = None) -> str:
         return ui_build_summary_callback(action, content_id)
+
+    def _provisional_web_content_id(self, url: str) -> str:
+        digest = hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:24]
+        return f"web:{digest}"
+
+    def _is_reddit_link_post_context(self, item: Optional[Dict[str, Any]] = None) -> bool:
+        payload = item or self.current_item or {}
+        return bool(
+            payload.get("is_link_post")
+            and payload.get("origin_source") == "reddit"
+            and payload.get("origin_content_id")
+            and payload.get("primary_url")
+        )
+
+    def _summary_menu_content_id(self, item: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        payload = item or self.current_item or {}
+        if self._is_reddit_link_post_context(payload):
+            return payload.get("origin_content_id")
+        return payload.get("content_id")
+
+    def _summary_existing_variants(self, item: Optional[Dict[str, Any]] = None) -> List[str]:
+        payload = item or self.current_item or {}
+        if not payload:
+            return []
+
+        if not self._is_reddit_link_post_context(payload):
+            content_id = payload.get("content_id")
+            return self._discover_summary_types(content_id) if content_id else []
+
+        variants: set[str] = set()
+        primary_content_id = payload.get("primary_content_id") or payload.get("content_id")
+        if primary_content_id:
+            variants.update(self._discover_summary_types(primary_content_id))
+
+        origin_content_id = payload.get("origin_content_id")
+        if origin_content_id:
+            for variant in self._discover_summary_types(origin_content_id):
+                if normalize_variant_id(variant) == "reddit-discussion":
+                    variants.add("reddit-discussion")
+
+        return sorted(variants)
+
+    def _summary_message_for_current_item(self, item: Optional[Dict[str, Any]] = None) -> str:
+        payload = item or self.current_item or {}
+        variants = self._summary_existing_variants(payload)
+        menu_content_id = self._summary_menu_content_id(payload) or ""
+
+        if self._is_reddit_link_post_context(payload):
+            primary_url = payload.get("primary_url") or payload.get("external_url") or ""
+            parsed = urllib.parse.urlparse(primary_url)
+            domain = (parsed.netloc or "").replace("www.", "") or "external article"
+            article_variants = [v for v in variants if normalize_variant_id(v) != "reddit-discussion"]
+            discussion_ready = any(normalize_variant_id(v) == "reddit-discussion" for v in variants)
+            return (
+                f"🔗 *Reddit link post* → `{domain}`\n\n"
+                f"📰 Default variants summarize the linked article ({len(article_variants)} ready)\n"
+                f"💬 *Reddit Discussion* summarizes the thread"
+                f"{' ✅' if discussion_ready else ''}"
+            )
+
+        source = payload.get("source", "youtube")
+        return self._existing_variants_message(menu_content_id, variants, source=source)
+
+    def _apply_summary_variant_context(self, summary_type: str) -> Dict[str, Any]:
+        payload = dict(self.current_item or {})
+        if not self._is_reddit_link_post_context(payload):
+            return payload
+
+        normalized_variant = normalize_variant_id(summary_type)
+        if normalized_variant == "reddit-discussion":
+            active_source = "reddit"
+            active_url = payload.get("origin_url")
+            active_content_id = payload.get("origin_content_id")
+        else:
+            active_source = payload.get("primary_source") or "web"
+            active_url = payload.get("primary_url") or payload.get("external_url")
+            active_content_id = payload.get("primary_content_id")
+
+        if not active_url or not active_content_id:
+            return payload
+
+        payload.update(
+            {
+                "source": active_source,
+                "url": active_url,
+                "content_id": active_content_id,
+                "raw_id": self._normalize_content_id(active_content_id),
+                "normalized_id": self._normalize_content_id(active_content_id),
+            }
+        )
+        self.current_item = payload
+        return payload
+
+    def _build_reddit_current_item(self, reddit_url: str) -> Dict[str, Any]:
+        from modules.sources.reddit import RedditFetcher
+
+        fetcher = RedditFetcher()
+        reddit_result = fetcher.fetch(reddit_url)
+        origin_content_id = f"reddit:{reddit_result.id}"
+        origin_url = reddit_result.url
+
+        item: Dict[str, Any] = {
+            "source": "reddit",
+            "url": origin_url,
+            "content_id": origin_content_id,
+            "raw_id": reddit_result.id,
+            "normalized_id": reddit_result.id,
+            "is_link_post": False,
+            "external_url": None,
+        }
+
+        external_url = reddit_result.external_url
+        if not external_url:
+            return item
+
+        primary_url = external_url
+        primary_content_id = self._provisional_web_content_id(primary_url)
+        try:
+            from modules.sources.web import WebPageFetcher
+
+            allow_dyn = str(os.getenv('WEB_EXTRACT_ALLOW_DYNAMIC', '0')).strip().lower() in ('1', 'true', 'yes')
+            web_result = WebPageFetcher(allow_dynamic=allow_dyn).fetch(primary_url)
+            primary_url = web_result.content.canonical_url or primary_url
+            primary_content_id = web_result.content.id or primary_content_id
+        except Exception as exc:
+            logging.warning("[REDDIT] Could not resolve linked article metadata: %s", exc)
+
+        item.update(
+            {
+                "source": "web",
+                "url": primary_url,
+                "content_id": primary_content_id,
+                "raw_id": self._normalize_content_id(primary_content_id),
+                "normalized_id": self._normalize_content_id(primary_content_id),
+                "is_link_post": True,
+                "external_url": primary_url,
+                "origin_source": "reddit",
+                "origin_url": origin_url,
+                "origin_content_id": origin_content_id,
+                "primary_source": "web",
+                "primary_url": primary_url,
+                "primary_content_id": primary_content_id,
+            }
+        )
+        logging.info("[REDDIT] Link post detected: %s -> %s", reddit_result.id, primary_url)
+        return item
 
     def _restore_current_item_from_content_id(self, content_id: str) -> bool:
         normalized = self._normalize_content_id(content_id)
@@ -552,9 +701,14 @@ class YouTubeTelegramBot:
             source = "web"
         url = self._resolve_video_url(content_id)
 
-        # For Reddit content, construct URL directly if not found in reports
-        if not url and source == "reddit":
-            url = f"https://www.reddit.com/comments/{normalized}/"
+        if source == "reddit":
+            reddit_url = url or f"https://www.reddit.com/comments/{normalized}/"
+            try:
+                self.current_item = self._build_reddit_current_item(reddit_url)
+                return bool(self.current_item.get("content_id"))
+            except Exception as exc:
+                logging.warning("[REDDIT RESTORE] Could not rebuild Reddit context: %s", exc)
+                url = reddit_url
 
         self.current_item = {
             "source": source,
@@ -562,6 +716,8 @@ class YouTubeTelegramBot:
             "content_id": normalized if source == "youtube" else content_id,
             "raw_id": normalized,
             "normalized_id": normalized,
+            "is_link_post": False,
+            "external_url": None,
         }
         return bool(self.current_item.get("content_id"))
 
@@ -1756,23 +1912,32 @@ class YouTubeTelegramBot:
             reddit_url = reddit_url.strip()
             # Resolve share links (/s/<token>) to get the real post ID
             resolved_reddit_url = self._resolve_redirects(reddit_url)
-            reddit_id = self._extract_reddit_id(resolved_reddit_url)
-            if not reddit_id:
-                await update.message.reply_text("❌ Could not determine Reddit thread ID from that link.")
-                return
+            try:
+                self.current_item = self._build_reddit_current_item(resolved_reddit_url)
+            except Exception as exc:
+                logging.warning("[REDDIT] Could not build Reddit context: %s", exc)
+                reddit_id = self._extract_reddit_id(resolved_reddit_url)
+                if not reddit_id:
+                    await update.message.reply_text("❌ Could not determine Reddit thread ID from that link.")
+                    return
+                self.current_item = {
+                    "source": "reddit",
+                    "url": resolved_reddit_url,
+                    "content_id": f"reddit:{reddit_id}",
+                    "raw_id": reddit_id,
+                    "normalized_id": reddit_id,
+                    "is_link_post": False,
+                    "external_url": None,
+                }
 
-            content_id = f"reddit:{reddit_id}"
-            self.current_item = {
-                "source": "reddit",
-                "url": reddit_url,
-                "content_id": content_id,
-                "raw_id": reddit_id,
-                "normalized_id": reddit_id,
-            }
-
-            existing_variants = self._discover_summary_types(content_id)
-            reply_markup = self._build_summary_keyboard(existing_variants, content_id)
-            message_text = self._existing_variants_message(content_id, existing_variants, source="reddit")
+            existing_variants = self._summary_existing_variants()
+            menu_content_id = self._summary_menu_content_id()
+            reply_markup = self._build_summary_keyboard(
+                existing_variants,
+                menu_content_id,
+                is_reddit_link_post=self._is_reddit_link_post_context(),
+            )
+            message_text = self._summary_message_for_current_item()
 
             # === AUTO-MODE: Skip keyboard, process immediately (same as YouTube) ===
             auto_mode_enabled = str(os.getenv('TELEGRAM_AUTO_MODE', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
@@ -1788,7 +1953,8 @@ class YouTubeTelegramBot:
                         # Variant exists, show normal keyboard
                         reply_msg = await update.message.reply_text(
                             message_text,
-                            reply_markup=reply_markup
+                            reply_markup=reply_markup,
+                            parse_mode='Markdown'
                         )
                         return
 
@@ -1801,10 +1967,24 @@ class YouTubeTelegramBot:
                         logging.info(f"[AUTO-MODE] llm_config failed: {e}")
                         provider, model = "inception", "mercury-2"
 
+                    routed_item = self._apply_summary_variant_context(auto_variant)
+                    auto_source = routed_item.get("source", "reddit")
+                    auto_url = routed_item.get("url", resolved_reddit_url)
+                    auto_content_id = routed_item.get("content_id") or self._summary_menu_content_id()
+                    if normalize_variant_id(auto_variant) == "reddit-discussion":
+                        source_label = "💬 Reddit Discussion"
+                    elif self._is_reddit_link_post_context(routed_item):
+                        parsed = urllib.parse.urlparse(routed_item.get("primary_url") or routed_item.get("url") or "")
+                        domain = (parsed.netloc or "").replace("www.", "") or "article"
+                        source_label = f"📰 Article ({domain})"
+                    else:
+                        source_label = "💬 Reddit"
+
                     status_msg = await update.message.reply_text(
                         f"🚀 *Auto-Mode enabled*\n"
                         f"▪️ Model: `{provider}/{model}`\n"
                         f"▪️ Variant: `{auto_variant}`\n"
+                        f"▪️ {source_label}\n"
                         f"▪️ Processing summary...",
                         parse_mode='Markdown'
                     )
@@ -1817,20 +1997,27 @@ class YouTubeTelegramBot:
                 # Execute summary directly with fallback support
                 await self._execute_auto_summary_with_fallback(
                     status_msg,
-                    source="reddit",
-                    url=resolved_reddit_url,
-                    content_id=content_id,
+                    source=auto_source,
+                    url=auto_url,
+                    content_id=auto_content_id,
                     summary_type=auto_variant,
                     models=auto_models,
                     user_name=user_name,
                     original_message=update.message,
+                )
+                await self._maybe_auto_generate_reddit_discussion(
+                    update.message,
+                    models=auto_models,
+                    user_name=user_name,
+                    trigger_variant=auto_variant,
                 )
                 return
 
             # === NORMAL MODE: Show keyboard ===
             reply_msg = await update.message.reply_text(
                 message_text,
-                reply_markup=reply_markup
+                reply_markup=reply_markup,
+                parse_mode='Markdown'
             )
             await self._maybe_schedule_auto_process(
                 reply_msg,
@@ -7227,6 +7414,8 @@ class YouTubeTelegramBot:
                     await self._show_proficiency_selector(query, summary_type)
                     return
 
+            self._apply_summary_variant_context(summary_type)
+
             # === AUTO-MODE: Process immediately ===
             if auto_mode_enabled:
                 try:
@@ -7234,6 +7423,30 @@ class YouTubeTelegramBot:
                     source = self._current_source()
                     url = self._current_url()
                     content_id = self._current_content_id()
+
+                    # For Reddit link posts, route based on variant type
+                    is_link_post = (self.current_item or {}).get("is_link_post", False)
+                    external_url = (self.current_item or {}).get("external_url")
+
+                    if source == "reddit" and is_link_post and external_url:
+                        if summary_type == "reddit-discussion":
+                            # Use Reddit content for discussion variant
+                            source_label = "💬 Reddit Discussion"
+                        else:
+                            # Use external URL for other variants
+                            url = external_url
+                            source = "web"
+                            from urllib.parse import urlparse
+                            parsed = urlparse(external_url)
+                            domain = parsed.netloc.replace("www.", "")
+                            source_label = f"📰 Article ({domain})"
+                    else:
+                        if self._is_reddit_link_post_context() and source == "web":
+                            parsed = urllib.parse.urlparse(url or "")
+                            domain = (parsed.netloc or "").replace("www.", "") or "article"
+                            source_label = f"📰 Article ({domain})"
+                        else:
+                            source_label = None
 
                     if not url or not content_id:
                         await query.edit_message_text("❌ Unable to identify content. Please try again.")
@@ -7260,7 +7473,8 @@ class YouTubeTelegramBot:
                         f"🚀 *Auto-Mode enabled*\n"
                         f"▪️ Model: `{provider}/{model}`\n"
                         f"▪️ Variant: `{full_summary_type}`\n"
-                        f"▪️ Processing audio summary...",
+                        f"▪️ {source_label or source.title()}\n"
+                        f"▪️ Processing...",
                         parse_mode='Markdown'
                     )
 
@@ -7842,11 +8056,14 @@ class YouTubeTelegramBot:
     
     async def _show_main_summary_options(self, query):
         """Show the main summary type selection buttons"""
-        content_id = (self.current_item or {}).get("content_id")
-        source = (self.current_item or {}).get("source", "youtube")
-        variants = self._discover_summary_types(content_id) if content_id else []
-        reply_markup = self._build_summary_keyboard(variants, content_id)
-        message = self._existing_variants_message(content_id or '', variants, source=source)
+        content_id = self._summary_menu_content_id()
+        variants = self._summary_existing_variants()
+        reply_markup = self._build_summary_keyboard(
+            variants,
+            content_id,
+            is_reddit_link_post=self._is_reddit_link_post_context(),
+        )
+        message = self._summary_message_for_current_item()
         try:
             health = await self._get_service_health()
             status_block = self._format_service_status_block(health)
@@ -8620,13 +8837,18 @@ class YouTubeTelegramBot:
                 summarizer = self._get_summary_summarizer(provider_key, model_slug)
 
                 # Ensure current item context is set
-                self.current_item = {
-                    'source': source,
-                    'url': url,
-                    'content_id': content_id if source != 'youtube' else f"yt:{content_id}",
-                    'raw_id': content_id,
-                    'normalized_id': content_id,
-                }
+                merged_item = dict(self.current_item or {})
+                resolved_content_id = content_id if source != 'youtube' else f"yt:{content_id}"
+                merged_item.update(
+                    {
+                        'source': source,
+                        'url': url,
+                        'content_id': resolved_content_id,
+                        'raw_id': self._normalize_content_id(resolved_content_id),
+                        'normalized_id': self._normalize_content_id(resolved_content_id),
+                    }
+                )
+                self.current_item = merged_item
 
                 await summary_service.process_content_summary(
                     self,
@@ -8709,13 +8931,18 @@ class YouTubeTelegramBot:
                     )
 
                 # Set current_item context
-                self.current_item = {
-                    "source": source,
-                    "url": url,
-                    "content_id": content_id if source != "youtube" else f"yt:{content_id}",
-                    "raw_id": content_id,
-                    "normalized_id": content_id,
-                }
+                merged_item = dict(self.current_item or {})
+                resolved_content_id = content_id if source != "youtube" else f"yt:{content_id}"
+                merged_item.update(
+                    {
+                        "source": source,
+                        "url": url,
+                        "content_id": resolved_content_id,
+                        "raw_id": self._normalize_content_id(resolved_content_id),
+                        "normalized_id": self._normalize_content_id(resolved_content_id),
+                    }
+                )
+                self.current_item = merged_item
 
                 # Prepare model option
                 model_option = {
@@ -8759,6 +8986,63 @@ class YouTubeTelegramBot:
                 await status_message.reply_text(error_msg)
         except Exception:
             pass
+
+    async def _maybe_auto_generate_reddit_discussion(
+        self,
+        origin_message,
+        *,
+        models: list,
+        user_name: str,
+        trigger_variant: str,
+    ) -> None:
+        enabled = str(os.getenv('REDDIT_AUTO_DISCUSSION', 'false')).strip().lower() in ('1', 'true', 'yes', 'on')
+        if not enabled:
+            return
+
+        if normalize_variant_id(trigger_variant) == "reddit-discussion":
+            return
+
+        if not self._is_reddit_link_post_context():
+            return
+
+        origin_content_id = (self.current_item or {}).get("origin_content_id")
+        if not origin_content_id:
+            return
+
+        existing_discussion = any(
+            normalize_variant_id(variant) == "reddit-discussion"
+            for variant in self._discover_summary_types(origin_content_id)
+        )
+        if existing_discussion:
+            return
+
+        routed_item = self._apply_summary_variant_context("reddit-discussion")
+        source = routed_item.get("source", "reddit")
+        url = routed_item.get("url")
+        content_id = routed_item.get("content_id")
+        if not url or not content_id:
+            return
+
+        try:
+            status_msg = await origin_message.reply_text(
+                "💬 *Auto-generating Reddit discussion*\n"
+                "▪️ Variant: `reddit-discussion`\n"
+                "▪️ Processing thread...",
+                parse_mode='Markdown',
+            )
+        except Exception:
+            return
+
+        await self._execute_auto_summary_with_fallback(
+            status_msg,
+            source=source,
+            url=url,
+            content_id=content_id,
+            summary_type="reddit-discussion",
+            models=models,
+            user_name=user_name,
+            original_message=origin_message,
+        )
 
     async def _execute_auto_summary(
         self,
@@ -8819,13 +9103,18 @@ class YouTubeTelegramBot:
             }
 
             # Ensure current_item context is set
-            self.current_item = {
-                "source": source,
-                "url": url,
-                "content_id": content_id if source != "youtube" else f"yt:{content_id}",
-                "raw_id": content_id,
-                "normalized_id": content_id,
-            }
+            merged_item = dict(self.current_item or {})
+            resolved_content_id = content_id if source != "youtube" else f"yt:{content_id}"
+            merged_item.update(
+                {
+                    "source": source,
+                    "url": url,
+                    "content_id": resolved_content_id,
+                    "raw_id": self._normalize_content_id(resolved_content_id),
+                    "normalized_id": self._normalize_content_id(resolved_content_id),
+                }
+            )
+            self.current_item = merged_item
 
             # Execute the summary
             await self._execute_summary_with_model(

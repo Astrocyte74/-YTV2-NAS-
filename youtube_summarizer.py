@@ -2533,6 +2533,8 @@ Preview:
             "insights": "insights",
             "key-insights": "insights",
             "key_insights": "insights",
+            "reddit-discussion": "reddit_discussion",
+            "reddit_discussion": "reddit_discussion",
             "audio summary": "audio",
             "audio-summary": "audio", 
             "audio": "audio",
@@ -2574,13 +2576,13 @@ Preview:
         
         # Prepare context and prompts based on summary type
         base_context = f"""
-        Video Title: {metadata.get('title', 'Unknown')}
-        Channel: {metadata.get('uploader', 'Unknown')}
-        Upload Date (YYYYMMDD): {metadata.get('upload_date', 'Unknown')}
-        Duration (seconds): {metadata.get('duration', 0)}
+        Title: {metadata.get('title', 'Unknown')}
+        Source: {metadata.get('uploader', 'Unknown')}
+        Published/Upload Date: {metadata.get('upload_date', 'Unknown')}
+        Duration (seconds, if applicable): {metadata.get('duration', 0)}
         URL: {metadata.get('url', 'Unknown')}
 
-        Full Transcript:
+        Source Text:
         {transcript}
         """
         
@@ -2684,6 +2686,28 @@ Preview:
             - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
             - No speculation beyond the transcript; use “Unknown” only when details are missing.
             - Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension (e.g., Strategy / Technology / Outcome).
+            - No code fences or emojis.
+            - Do not add a final “Bottom line”.
+            """,
+
+            "reddit-discussion": f"""
+            {base_context}
+
+            Summarize this Reddit discussion as a discussion digest, not as an article summary.
+            This is a Reddit thread. Do not describe it as a video, clip, segment, or broadcast unless the thread text explicitly does so.
+
+            Output:
+            - Opening: 2–3 sentences describing the dominant reaction and the main point of debate.
+            - 2–4 short headings based on the discussion itself.
+            - Under each heading, include 3–5 “• ” bullets covering the strongest reactions, objections, corrections, and useful firsthand observations.
+
+            Rules:
+            - Prioritize consensus, disagreements, skepticism, corrections, and evidence offered by commenters.
+            - Treat unsupported claims carefully: use wording like “Some commenters argued…” when there is no consensus.
+            - Ignore jokes, insults, low-signal repetition, and moderator boilerplate.
+            - Keep each bullet ≤ 20 words and lead with the key point.
+            - Use only information explicitly present in the Reddit thread text and comments.
+            - Respond in the transcript’s language.
             - No code fences or emojis.
             - Do not add a final “Bottom line”.
             """,
@@ -3443,6 +3467,8 @@ Multiple Categories (when content genuinely spans areas):
             "insights": "insights",
             "key-insights": "insights",
             "key_insights": "insights",
+            "reddit-discussion": "reddit_discussion",
+            "reddit_discussion": "reddit_discussion",
             "audio summary": "audio",
             "audio-summary": "audio", 
             "audio": "audio",
@@ -3482,13 +3508,13 @@ Multiple Categories (when content genuinely spans areas):
             
             # Create context for this chunk
             chunk_context = f"""
-            Video Title: {metadata.get('title', 'Unknown')}
-            Channel: {metadata.get('uploader', 'Unknown')}
-            Upload Date (YYYYMMDD): {metadata.get('upload_date', 'Unknown')}
-            Duration (seconds): {metadata.get('duration', 0)}
+            Title: {metadata.get('title', 'Unknown')}
+            Source: {metadata.get('uploader', 'Unknown')}
+            Published/Upload Date: {metadata.get('upload_date', 'Unknown')}
+            Duration (seconds, if applicable): {metadata.get('duration', 0)}
             URL: {metadata.get('url', 'Unknown')}
             
-            Transcript Segment {i+1}/{len(chunks)}:
+            Source Text Segment {i+1}/{len(chunks)}:
             {chunk}
             """
             
@@ -3525,6 +3551,8 @@ Multiple Categories (when content genuinely spans areas):
             result["bullet_points"] = await self._extract_bullet_points(combined_summary)
         elif normalized_type == "insights": 
             result["key_insights"] = await self._extract_key_insights(combined_summary)
+        elif normalized_type == "reddit_discussion":
+            result["summary"] = await self._extract_reddit_discussion_summary(combined_summary)
         elif normalized_type == "audio":
             result["audio"] = await self._create_audio_summary(combined_summary)
         elif normalized_type == "audio_fr":
@@ -3537,6 +3565,7 @@ Multiple Categories (when content genuinely spans areas):
             "comprehensive": "comprehensive",
             "key_points": "key-points",
             "insights": "key-insights",
+            "reddit_discussion": "reddit-discussion",
             "audio": "audio",
             "audio_fr": "audio-fr",
             "audio_es": "audio-es",
@@ -3545,6 +3574,7 @@ Multiple Categories (when content genuinely spans areas):
         primary_variant_key_map = {
             "key_points": "bullet_points",
             "insights": "key_insights",
+            "reddit_discussion": "summary",
             "audio": "audio",
             "audio_fr": "audio",
             "audio_es": "audio",
@@ -3660,6 +3690,32 @@ Multiple Categories (when content genuinely spans areas):
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="key insights extraction")
         return result or "Unable to generate categorized insights"
+
+    async def _extract_reddit_discussion_summary(self, summary: str) -> str:
+        """Reframe a combined Reddit-thread summary around discussion dynamics."""
+        prompt = f"""
+        Rewrite this Reddit thread summary as a discussion digest.
+
+        {summary}
+
+        Output:
+        - Opening: 2–3 sentences on overall sentiment and the core dispute.
+        - 2–4 short headings drawn from the discussion.
+        - Under each heading, 3–5 “• ” bullets covering consensus, disagreement, corrections, and useful firsthand observations.
+
+        Rules:
+        - This is a Reddit thread, not a video. Do not call it a video, clip, or broadcast.
+        - Distinguish consensus from isolated opinions using phrasing like “Some commenters argued…” when needed.
+        - Ignore low-signal repetition, jokes, and insults.
+        - Keep each bullet ≤ 20 words.
+        - No code fences, no emojis, no final “Bottom line”.
+        """
+
+        result = await self._robust_llm_call(
+            [HumanMessage(content=prompt)],
+            operation_name="reddit discussion extraction",
+        )
+        return result or "Unable to generate Reddit discussion summary"
 
     async def _create_audio_summary_from_transcript(self, transcript: str, metadata: Dict) -> str:
         """Create audio-optimized summary directly from transcript (for direct path)"""

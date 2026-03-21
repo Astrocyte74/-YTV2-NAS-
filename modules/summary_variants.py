@@ -21,6 +21,7 @@ _VARIANT_ORDER = {
     "bullet-points": 1,
     "key-points": 1,  # legacy alias, normalize later
     "key-insights": 2,
+    "reddit-discussion": 3,
     "executive": 3,
     "adaptive": 4,
 }
