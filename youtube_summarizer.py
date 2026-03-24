@@ -2498,7 +2498,20 @@ Preview:
         except Exception:
             slices = []
 
-        # If chapters exist but no slices, try to fetch segments once to build slices.
+        # If chapters exist, prefer building slices from timestamped segments we already have.
+        # This keeps long videos grounded in the full transcript instead of falling through to
+        # the planner path, which only works on a limited excerpt.
+        if (not slices) and metadata.get("chapters") and transcript_segments:
+            try:
+                slices = _slice_transcript_by_chapters(
+                    transcript_segments,
+                    metadata.get("chapters") or [],
+                    transcript,
+                )
+            except Exception as exc:
+                print(f"⚠️ Unable to build chapter slices from existing transcript segments: {exc}")
+
+        # If chapters exist but we still have no slices, try to fetch segments once to build them.
         if (not slices) and (metadata.get("chapters")) and (not transcript_segments) and TRANSCRIPT_API_AVAILABLE:
             try:
                 vid = metadata.get("id") or metadata.get("video_id")
@@ -2527,6 +2540,16 @@ Preview:
                     return summary
             except Exception as exc:
                 print(f"⚠️ Chapter-based summary failed, falling back to planner: {exc}")
+
+        # Planner path should not summarize only the opening excerpt of a long transcript.
+        # If we cannot produce chapter slices for long content, return None so the caller
+        # falls back to the classic full-transcript chunking pipeline instead.
+        try:
+            if len(transcript or "") > STRUCTURED_PLANNER_EXCERPT_CHARS:
+                print("⚠️ Planner path skipped for long transcript without chapter slices; using classic chunked fallback")
+                return None
+        except Exception:
+            pass
 
         # Planner path (with optional excerpt for very long content)
         working_transcript = transcript
