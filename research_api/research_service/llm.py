@@ -197,7 +197,9 @@ def chat_json_schema(
             "type": "json_schema",
             "json_schema": {
                 "name": schema_name,
-                "strict": False,  # OpenAI gpt-5.4-* requires False unless schema has additionalProperties: false everywhere
+                # Current production schemas are not strict-compatible because some
+                # object nodes omit additionalProperties: false.
+                "strict": False,
                 "schema": schema,
             },
         },

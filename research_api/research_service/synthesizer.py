@@ -565,3 +565,97 @@ def synthesize_follow_up(
             sources=sources,
             compare=compare,
         )
+
+
+def answer_report_chat(
+    *,
+    source_context: dict,
+    report_answer: str,
+    report_sources: list[ResearchSource],
+    user_question: str,
+    history: list[dict[str, str]] | None = None,
+    thread_turns: list[dict] | None = None,
+) -> tuple[str, dict[str, str]]:
+    """Answer a lightweight follow-up question using only existing report context.
+
+    This path does not run fresh web research. It is intended for report-grounded
+    clarification and drill-down questions inside the WebUI chat surface.
+    """
+    report_text = str(report_answer or "").strip()
+    if not report_text:
+        return (
+            "I don't have an existing Deep Research report to answer from. Run Deep Research first.",
+            {"llm_provider": "fallback", "llm_model": "deterministic"},
+        )
+
+    history_lines: list[str] = []
+    for turn in (history or [])[-8:]:
+        role = str(turn.get("role") or "").strip().lower()
+        content = str(turn.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            history_lines.append(f"{role}: {content}")
+    history_block = "\n".join(history_lines) or "(none)"
+
+    thread_lines: list[str] = []
+    for index, turn in enumerate((thread_turns or [])[-6:], start=max(1, len(thread_turns or []) - 5)):
+        approved_questions = [str(item).strip() for item in (turn.get("approved_questions") or []) if str(item).strip()]
+        if approved_questions:
+            thread_lines.append(f"Turn {index} questions: {'; '.join(approved_questions)}")
+        excerpt = str(turn.get("answer") or "").strip()
+        if excerpt:
+            thread_lines.append(f"Turn {index} excerpt:\n{excerpt[:1500]}")
+    thread_block = "\n\n".join(thread_lines) or "(none)"
+
+    source_urls = "\n".join(f"- {src.url}" for src in report_sources[:20]) or "(none)"
+    truncated_report = report_text[:12000]
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a grounded assistant answering questions about an existing Deep Research report. "
+                "Use ONLY the provided report text, prior thread context, and source URLs. "
+                "Do not claim to have checked the live web. If the user asks for current/latest/fresh information "
+                "or for facts not supported by the report, say that a fresh Deep Research run is needed. "
+                "Answer directly, stay concise, and include a short 'Sources' section only when useful."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Source title: {source_context.get('title', 'Unknown')}\n"
+                f"Source URL: {source_context.get('url', 'N/A')}\n"
+                f"Source type: {source_context.get('type', 'unknown')}\n\n"
+                f"Persisted research thread context:\n{thread_block}\n\n"
+                f"Current Deep Research report:\n{truncated_report}\n\n"
+                f"Known source URLs:\n{source_urls}\n\n"
+                f"Recent chat:\n{history_block}\n\n"
+                f"User question: {user_question}"
+            ),
+        },
+    ]
+
+    try:
+        result = _call_synth_llm(
+            messages=messages,
+            max_tokens=min(SYNTH_MAX_TOKENS, 1400),
+            timeout=SYNTH_TIMEOUT_SECONDS,
+            provider=RESEARCH_SYNTH_PROVIDER,
+        )
+        out = str(result.get("content") or "").strip()
+        if not out:
+            raise RuntimeError("empty report-chat synthesis output")
+        out = _normalize_sources_section(out, report_sources)
+        return out, {
+            "llm_provider": str(result.get("llm_provider") or "unknown"),
+            "llm_model": str(result.get("llm_model") or "unknown"),
+        }
+    except Exception as e:
+        logger.warning("Report chat synthesis failed, using fallback: %s", e)
+        source_tail = f"\n\nSources:\n{source_urls}" if report_sources else ""
+        return (
+            "I couldn't answer that confidently from the current Deep Research report alone. "
+            "Run fresh Deep Research if you need newer evidence or broader coverage."
+            f"{source_tail}",
+            {"llm_provider": "fallback", "llm_model": "deterministic"},
+        )

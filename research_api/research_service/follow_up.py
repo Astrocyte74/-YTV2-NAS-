@@ -75,14 +75,36 @@ SUGGESTIONS_SCHEMA: dict = {
                     "default_selected": {"type": "boolean"},
                 },
                 "required": ["id", "label", "question", "reason", "kind", "priority", "default_selected"],
+                "additionalProperties": False,
             },
-            "minItems": 1,
+            "minItems": 0,
             "maxItems": 3,
         },
         "should_suggest": {"type": "boolean"},
         "explanation": {"type": "string"},
     },
     "required": ["suggestions", "should_suggest", "explanation"],
+    "additionalProperties": False,
+    "allOf": [
+        {
+            "if": {
+                "properties": {
+                    "should_suggest": {"const": True},
+                },
+                "required": ["should_suggest"],
+            },
+            "then": {
+                "properties": {
+                    "suggestions": {"minItems": 1},
+                }
+            },
+            "else": {
+                "properties": {
+                    "suggestions": {"maxItems": 0},
+                }
+            },
+        }
+    ],
 }
 
 
@@ -107,6 +129,10 @@ Your job is to analyze a summary and determine what follow-up research questions
 2. should_suggest: whether this content warrants follow-up research at all
 3. explanation: brief reasoning for your suggestion decision
 
+**Consistency rules:**
+- If should_suggest is true, return 1-3 suggestions
+- If should_suggest is false, return an empty suggestions array
+
 **Suggestion quality guidelines:**
 - Questions should be specific and actionable
 - Questions should reflect what users would actually want to know
@@ -128,6 +154,13 @@ Your job is to analyze a summary and determine what follow-up research questions
   ],
   "should_suggest": true,
   "explanation": "Content discusses X which changes frequently; users would want to know Y"
+}}
+
+If follow-up is not appropriate, return:
+{{
+  "suggestions": [],
+  "should_suggest": false,
+  "explanation": "Why follow-up would not add much value here"
 }}
 
 **Kind definitions:**
@@ -561,15 +594,13 @@ def _generate_suggestions_with_planner(
         },
     ]
 
-    # Fallback chain based on rigorous quality testing (Mar 2026):
-    # 1. gemini-3.1-flash-lite: 80/100 quality, best budget option
-    # 2. gpt-5.4-nano: 78/100 quality, excels at edge cases/unclear summaries
-    # 3. mercury-2: 77/100 quality, free and fastest (0.8s)
+    # Current fallback order is provisional. Re-evaluate with
+    # tools/test_json_models_rigorous.py before treating model rankings as stable.
     fallback_attempts: list[tuple[str, str, str | None]] = []
-    # Fallback 1: gpt-5.4-nano (best for edge cases)
+    # Fallback 1: configured OpenRouter fallback model.
     if RESEARCH_PLANNER_PROVIDER != "openrouter" and RESEARCH_FALLBACK_ENABLED and OPENROUTER_API_KEY:
-        fallback_attempts.append(("fallback_gpt_nano", "openrouter", "openai/gpt-5.4-nano"))
-    # Fallback 2: inception/mercury-2 (free, fast, reliable)
+        fallback_attempts.append(("fallback_openrouter", "openrouter", None))
+    # Fallback 2: Inception model if available.
     if RESEARCH_PLANNER_PROVIDER != "inception" and INCEPTION_API_KEY:
         fallback_attempts.append(("fallback_mercury", "inception", INCEPTION_MODEL))
 

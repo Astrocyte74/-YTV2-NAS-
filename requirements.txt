@@ -18,6 +18,7 @@ readability-lxml>=0.8.4  # Web article extraction fallback
 trafilatura>=2.0.0  # High-quality HTML-to-text extraction
 praw>=7.7.1  # Reddit API client for non-YouTube sources
 psycopg[binary]>=3.1  # Direct Postgres writes
+jsonschema>=4.0.0  # JSON Schema validation for benchmark tools
 
 # Optional: For local model support with Ollama
 # Install ollama separately if needed

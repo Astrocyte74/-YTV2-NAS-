@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from copy import deepcopy
+from types import SimpleNamespace
 from typing import Callable
 
 from .config import (
@@ -29,7 +30,7 @@ from .follow_up import (
 )
 from .models import ResearchRunResult
 from .providers.tavily import tavily_research_supported
-from .synthesizer import synthesize_answer, synthesize_follow_up
+from .synthesizer import answer_report_chat, synthesize_answer, synthesize_follow_up
 
 logger = logging.getLogger(__name__)
 
@@ -400,3 +401,51 @@ def run_follow_up_research(
     )
     store_follow_up_research_result(cache_key, result)
     return result
+
+
+def answer_follow_up_chat(
+    *,
+    source_context: dict,
+    report_answer: str,
+    report_sources: list[dict] | None,
+    user_question: str,
+    history: list[dict[str, str]] | None = None,
+    thread_turns: list[dict] | None = None,
+) -> tuple[str, dict[str, str], list[dict]]:
+    """Answer a lightweight follow-up question using an existing report only."""
+    normalized_sources = []
+    for source in report_sources or []:
+        if hasattr(source, "url"):
+            normalized_sources.append(source)
+            continue
+        if not isinstance(source, dict):
+            continue
+        normalized_sources.append(SimpleNamespace(
+            name=str(source.get("name") or ""),
+            url=str(source.get("url") or ""),
+            domain=str(source.get("domain") or ""),
+            tier=str(source.get("tier") or ""),
+            providers=list(source.get("providers") or []),
+            tools=list(source.get("tools") or []),
+        ))
+
+    answer, llm_info = answer_report_chat(
+        source_context=source_context,
+        report_answer=report_answer,
+        report_sources=normalized_sources,
+        user_question=user_question,
+        history=history,
+        thread_turns=thread_turns,
+    )
+    serialized_sources = [
+        {
+            "name": getattr(source, "name", ""),
+            "url": getattr(source, "url", ""),
+            "domain": getattr(source, "domain", ""),
+            "tier": getattr(source, "tier", ""),
+            "providers": list(getattr(source, "providers", []) or []),
+            "tools": list(getattr(source, "tools", []) or []),
+        }
+        for source in normalized_sources
+    ]
+    return answer, llm_info, serialized_sources

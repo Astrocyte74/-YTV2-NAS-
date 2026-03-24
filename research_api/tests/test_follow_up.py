@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import jsonschema
 import sys
 import os
 
@@ -15,6 +16,7 @@ from research_service.follow_up import (
     FollowUpResearchPlan,
     MAX_APPROVED_QUESTIONS,
     MAX_PLANNED_QUERIES,
+    SUGGESTIONS_SCHEMA,
     _build_cache_key,
     _clip_queries,
     _looks_time_sensitive,
@@ -364,6 +366,48 @@ class TestDataclasses(unittest.TestCase):
 class TestSuggestionGeneration(unittest.TestCase):
     """Tests for follow-up suggestion generation behavior."""
 
+    def test_suggestions_schema_accepts_decline_with_empty_array(self):
+        payload = {
+            "suggestions": [],
+            "should_suggest": False,
+            "explanation": "Evergreen educational content does not need follow-up.",
+        }
+
+        jsonschema.Draft202012Validator(SUGGESTIONS_SCHEMA).validate(payload)
+
+    def test_suggestions_schema_rejects_decline_with_non_empty_suggestions(self):
+        payload = {
+            "suggestions": [
+                {
+                    "id": "s1",
+                    "label": "Extra context",
+                    "question": "What else should I know?",
+                    "reason": "Extra context might help.",
+                    "kind": "background",
+                    "priority": 0.4,
+                    "default_selected": False,
+                }
+            ],
+            "should_suggest": False,
+            "explanation": "This should be rejected because suggestions must be empty.",
+        }
+
+        validator = jsonschema.Draft202012Validator(SUGGESTIONS_SCHEMA)
+        errors = [err.message for err in validator.iter_errors(payload)]
+        self.assertTrue(any("expected to be empty" in msg or "is expected to be empty" in msg for msg in errors), errors)
+
+    def test_suggestions_schema_rejects_extra_object_properties(self):
+        payload = {
+            "suggestions": [],
+            "should_suggest": False,
+            "explanation": "No follow-up needed.",
+            "extra": "not allowed",
+        }
+
+        validator = jsonschema.Draft202012Validator(SUGGESTIONS_SCHEMA)
+        errors = [err.message for err in validator.iter_errors(payload)]
+        self.assertTrue(any("Additional properties are not allowed" in msg for msg in errors), errors)
+
     @patch("research_service.follow_up.chat_json_schema")
     def test_suggestions_retry_once_after_parse_failure(self, mock_chat_json_schema):
         mock_chat_json_schema.side_effect = [
@@ -398,6 +442,28 @@ class TestSuggestionGeneration(unittest.TestCase):
         self.assertEqual(mock_chat_json_schema.call_count, 2)
         self.assertEqual(len(suggestions), 1)
         self.assertEqual(suggestions[0].kind, "fact_check")
+
+    @patch("research_service.follow_up.chat_json_schema")
+    def test_suggestions_return_none_when_model_declines(self, mock_chat_json_schema):
+        mock_chat_json_schema.return_value = (
+            {
+                "should_suggest": False,
+                "suggestions": [],
+                "explanation": "The content is evergreen and already current enough.",
+            },
+            "openrouter",
+            "google/gemini-3.1-flash-lite-preview",
+        )
+
+        suggestions = suggest_follow_up_questions(
+            source_context={"title": "Photosynthesis explained", "type": "youtube"},
+            summary="An evergreen overview of photosynthesis.",
+            entities=["Photosynthesis"],
+            max_suggestions=3,
+        )
+
+        self.assertEqual(mock_chat_json_schema.call_count, 1)
+        self.assertEqual(suggestions, [])
 
     @patch("research_service.follow_up.chat_json_schema")
     def test_suggestions_return_none_when_llm_keeps_failing(self, mock_chat_json_schema):
@@ -451,6 +517,48 @@ class TestSuggestionGeneration(unittest.TestCase):
         self.assertEqual(mock_chat_json_schema.call_count, 3)
         self.assertEqual(mock_chat_json_schema.call_args_list[2].kwargs["provider"], "inception")
         self.assertEqual(mock_chat_json_schema.call_args_list[2].kwargs["model_override"], "mercury-2")
+        self.assertEqual(len(suggestions), 1)
+
+    @patch("research_service.follow_up.RESEARCH_PLANNER_PROVIDER", "inception")
+    @patch("research_service.follow_up.RESEARCH_FALLBACK_ENABLED", True)
+    @patch("research_service.follow_up.OPENROUTER_API_KEY", "test-openrouter-key")
+    @patch("research_service.follow_up.INCEPTION_API_KEY", "test-inception-key")
+    @patch("research_service.follow_up.chat_json_schema")
+    def test_suggestions_fall_back_to_configured_openrouter_model(self, mock_chat_json_schema):
+        mock_chat_json_schema.side_effect = [
+            RuntimeError("Inception timeout"),
+            RuntimeError("Inception timeout"),
+            (
+                {
+                    "should_suggest": True,
+                    "suggestions": [
+                        {
+                            "id": "s1",
+                            "label": "Current pricing",
+                            "question": "What is the current pricing now?",
+                            "reason": "Pricing may have changed since publication.",
+                            "kind": "pricing",
+                            "priority": 0.9,
+                            "default_selected": True,
+                        }
+                    ],
+                    "explanation": "Pricing content benefits from follow-up.",
+                },
+                "openrouter",
+                "google/gemini-3.1-flash-lite-preview",
+            ),
+        ]
+
+        suggestions = suggest_follow_up_questions(
+            source_context={"title": "Cursor review", "type": "youtube"},
+            summary="A review of Cursor pricing and free-tier limits.",
+            entities=["Cursor"],
+            max_suggestions=3,
+        )
+
+        self.assertEqual(mock_chat_json_schema.call_count, 3)
+        self.assertEqual(mock_chat_json_schema.call_args_list[2].kwargs["provider"], "openrouter")
+        self.assertIsNone(mock_chat_json_schema.call_args_list[2].kwargs["model_override"])
         self.assertEqual(len(suggestions), 1)
 
 

@@ -34,6 +34,10 @@ from .models import (
     FollowUpRunResponse,
     FollowUpCachedResponse,
     ResearchSource,
+    FollowUpThreadResponse,
+    FollowUpThreadTurn,
+    FollowUpChatRequest,
+    FollowUpChatResponse,
 )
 
 # Lazy-initialized service instances
@@ -532,6 +536,7 @@ def get_research_service():
                 get_follow_up_suggestions,
                 run_follow_up_research,
                 get_research_capabilities,
+                answer_follow_up_chat,
             )
             from research_service.follow_up import build_cache_key
             _research_service = {
@@ -539,6 +544,7 @@ def get_research_service():
                 'run_follow_up_research': run_follow_up_research,
                 'get_research_capabilities': get_research_capabilities,
                 'build_cache_key': build_cache_key,
+                'answer_follow_up_chat': answer_follow_up_chat,
             }
             print("[YTV2 API] Research service loaded successfully")
         except Exception as e:
@@ -600,6 +606,63 @@ def _build_follow_up_run_response(
     )
 
 
+def _build_research_sources(sources: list) -> list[ResearchSource]:
+    return [
+        ResearchSource(
+            name=src.name if hasattr(src, "name") else src.get("name", ""),
+            url=src.url if hasattr(src, "url") else src.get("url", ""),
+            domain=src.domain if hasattr(src, "domain") else src.get("domain", ""),
+            tier=src.tier if hasattr(src, "tier") else src.get("tier", ""),
+            providers=list(src.providers) if hasattr(src, "providers") else list(src.get("providers", [])),
+            tools=list(src.tools) if hasattr(src, "tools") else list(src.get("tools", [])),
+        )
+        for src in (sources or [])
+    ]
+
+
+def _build_follow_up_thread_turn(turn: Dict[str, Any]) -> FollowUpThreadTurn:
+    return FollowUpThreadTurn(
+        follow_up_run_id=int(turn.get("run_id") or 0),
+        parent_follow_up_run_id=_coerce_optional_int(turn.get("parent_follow_up_run_id")),
+        video_id=str(turn.get("video_id") or ""),
+        summary_id=_coerce_optional_int(turn.get("summary_id")),
+        approved_questions=list(turn.get("approved_questions") or []),
+        question_provenance=list(turn.get("question_provenance") or []),
+        answer=str(turn.get("answer") or ""),
+        sources=_build_research_sources(turn.get("sources") or []),
+        status=str(turn.get("status") or "ok"),
+        created_at=str(turn.get("created_at") or "") or None,
+        meta=dict(turn.get("meta") or {}),
+    )
+
+
+def _resolve_active_follow_up_run(
+    *,
+    store,
+    video_id: str,
+    follow_up_run_id: Optional[int] = None,
+    summary_id: Optional[int] = None,
+    preferred_variant: Optional[str] = None,
+    summary: str = "",
+    source_context: Optional[Dict[str, Any]] = None,
+) -> tuple[Optional[dict[str, Any]], Any]:
+    if follow_up_run_id is not None:
+        run = store.get_research_run(follow_up_run_id, video_id=video_id)
+        return run, None
+
+    resolved = store.resolve_context(
+        video_id=video_id,
+        summary_id=summary_id,
+        summary=summary,
+        source_context=dict(source_context or {}),
+        preferred_variant=preferred_variant or "deep-research",
+    )
+    candidate_run_id = _coerce_optional_int((resolved.source_context or {}).get("parent_follow_up_run_id"))
+    if candidate_run_id is not None:
+        return store.get_research_run(candidate_run_id, video_id=resolved.video_id), resolved
+    return None, resolved
+
+
 @app.get("/api/research/capabilities")
 async def research_capabilities(
     _auth: None = Depends(require_auth),
@@ -619,7 +682,22 @@ async def research_capabilities(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get capabilities: {str(e)}"
-        )
+    )
+
+
+def _coerce_optional_int(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    return None
 
 
 @app.post("/api/follow-up-suggestions", response_model=FollowUpSuggestionsResponse)
@@ -795,6 +873,22 @@ async def run_follow_up_research_endpoint(
             depth=request.depth,
             manual_tools=request.manual_tools,
         )
+        parent_follow_up_run_id = _coerce_optional_int(request.parent_follow_up_run_id)
+        if parent_follow_up_run_id is None:
+            parent_follow_up_run_id = _coerce_optional_int(
+                (resolved.source_context or {}).get("parent_follow_up_run_id")
+            )
+        source_variant = str(
+            resolved.variant
+            or request.preferred_variant
+            or ""
+        ).strip().lower()
+        if source_variant:
+            result.meta["source_summary_variant"] = source_variant
+        if resolved.summary_revision is not None:
+            result.meta["source_summary_revision"] = resolved.summary_revision
+        if parent_follow_up_run_id is not None:
+            result.meta["parent_follow_up_run_id"] = parent_follow_up_run_id
         logging.info(
             "FOLLOW_UP_RUN result video_id=%s status=%s cache_hit=%s answer_len=%d",
             request.video_id,
@@ -848,6 +942,126 @@ async def run_follow_up_research_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to run follow-up research: {str(e)}"
+        )
+
+
+@app.get("/api/research/follow-up/thread", response_model=FollowUpThreadResponse)
+async def get_follow_up_thread_endpoint(
+    video_id: str,
+    follow_up_run_id: Optional[int] = None,
+    summary_id: Optional[int] = None,
+    preferred_variant: Optional[str] = None,
+    _auth: None = Depends(require_auth),
+):
+    """Return the persisted deep-research thread for the active run."""
+    store = get_follow_up_store()
+
+    try:
+        active_run, resolved = _resolve_active_follow_up_run(
+            store=store,
+            video_id=video_id,
+            follow_up_run_id=follow_up_run_id,
+            summary_id=summary_id,
+            preferred_variant=preferred_variant or "deep-research",
+        )
+        if active_run is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No persisted Deep Research thread was found for this item."
+            )
+
+        resolved_video_id = str((active_run.get("video_id") or (resolved.video_id if resolved else video_id)) or video_id)
+        thread = store.get_research_thread(int(active_run["run_id"]), video_id=resolved_video_id)
+        turns = [_build_follow_up_thread_turn(turn) for turn in thread]
+        root_run_id = turns[0].follow_up_run_id if turns else None
+        current_run_id = turns[-1].follow_up_run_id if turns else None
+        return FollowUpThreadResponse(
+            video_id=resolved_video_id,
+            root_follow_up_run_id=root_run_id,
+            current_follow_up_run_id=current_run_id,
+            turns=turns,
+        )
+    except LookupError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to load Deep Research thread: {str(e)}"
+        )
+
+
+@app.post("/api/research/follow-up/chat", response_model=FollowUpChatResponse)
+async def answer_follow_up_chat_endpoint(
+    request: FollowUpChatRequest,
+    _auth: None = Depends(require_auth),
+    _service: None = Depends(require_research_service),
+):
+    """Answer a lightweight question using the current deep-research report only."""
+    service = get_research_service()
+    store = get_follow_up_store()
+
+    try:
+        active_run, resolved = _resolve_active_follow_up_run(
+            store=store,
+            video_id=request.video_id,
+            follow_up_run_id=request.follow_up_run_id,
+            summary_id=request.summary_id,
+            preferred_variant=request.preferred_variant or "deep-research",
+            summary=request.summary,
+            source_context=dict(request.source_context),
+        )
+        if active_run is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No persisted Deep Research run was found for this item."
+            )
+
+        resolved_source_context = dict(request.source_context or {})
+        if resolved is not None:
+            resolved_source_context = dict(resolved.source_context or {})
+        resolved_source_context.setdefault("video_id", active_run.get("video_id") or request.video_id)
+        resolved_source_context.setdefault("id", active_run.get("video_id") or request.video_id)
+
+        thread_turns = store.get_research_thread(int(active_run["run_id"]), video_id=str(active_run.get("video_id") or request.video_id))
+        answer, llm_info, serialized_sources = service["answer_follow_up_chat"](
+            source_context=resolved_source_context,
+            report_answer=str(active_run.get("answer") or request.summary or ""),
+            report_sources=list(active_run.get("sources") or []),
+            user_question=request.question,
+            history=[{"role": turn.role, "content": turn.content} for turn in request.history],
+            thread_turns=thread_turns,
+        )
+        response_meta = {
+            "mode": "report-chat",
+            "follow_up_run_id": int(active_run["run_id"]),
+            "source_count": len(serialized_sources),
+            "thread_turn_count": len(thread_turns),
+            "llm_provider": llm_info.get("llm_provider", "unknown"),
+            "llm_model": llm_info.get("llm_model", "unknown"),
+        }
+        return FollowUpChatResponse(
+            video_id=str(active_run.get("video_id") or request.video_id),
+            follow_up_run_id=int(active_run["run_id"]),
+            answer=answer,
+            sources=_build_research_sources(serialized_sources),
+            meta=response_meta,
+        )
+    except LookupError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to answer report chat question: {str(e)}"
         )
 
 

@@ -84,12 +84,27 @@ def _coerce_json(value: Any, default: Any) -> Any:
     return default
 
 
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    return None
+
+
 @dataclass
 class ResolvedFollowUpContext:
     video_id: str
     summary_id: int | None
     summary: str
     source_context: dict[str, Any]
+    variant: str | None = None
+    summary_revision: int | None = None
 
 
 class FollowUpStore:
@@ -139,11 +154,31 @@ class FollowUpStore:
             merged_context.setdefault("type", _infer_source_type(str(row.get("canonical_url") or "")))
             merged_context.setdefault("video_id", resolved_video_id)
             merged_context.setdefault("id", resolved_video_id)
+            resolved_summary = (row.get("text") or "").strip()
+            resolved_variant = str(row.get("variant") or "").strip().lower() or None
+            resolved_revision = int(row["revision"]) if row.get("revision") is not None else None
+            if resolved_variant == "deep-research":
+                deep_research_run = self._fetch_deep_research_run(
+                    video_id=resolved_video_id,
+                    summary_variant_revision=resolved_revision,
+                )
+                if deep_research_run is not None:
+                    canonical_response = str(deep_research_run.get("research_response") or "").strip()
+                    if canonical_response:
+                        resolved_summary = canonical_response
+                    merged_context.setdefault("parent_follow_up_run_id", deep_research_run.get("id"))
+                    canonical_meta = _coerce_json(deep_research_run.get("research_meta"), {})
+                    if isinstance(canonical_meta, dict):
+                        approved_questions = canonical_meta.get("approved_questions")
+                        if isinstance(approved_questions, list) and approved_questions:
+                            merged_context.setdefault("approved_questions", approved_questions)
             return ResolvedFollowUpContext(
                 video_id=resolved_video_id,
                 summary_id=int(row["id"]),
-                summary=(row.get("text") or "").strip(),
+                summary=resolved_summary,
                 source_context=merged_context,
+                variant=resolved_variant,
+                summary_revision=resolved_revision,
             )
 
         merged_context.setdefault("video_id", video_id)
@@ -169,7 +204,7 @@ class FollowUpStore:
             if summary_id is not None:
                 cur.execute(
                     """
-                    SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
+                    SELECT s.id, s.video_id, s.text, s.variant, COALESCE(s.revision, 1), c.title, c.canonical_url, c.published_at
                     FROM summaries s
                     LEFT JOIN content c ON c.video_id = s.video_id
                     WHERE s.id = %s
@@ -183,7 +218,7 @@ class FollowUpStore:
                 placeholders = ", ".join(["%s"] * len(candidate_ids))
                 cur.execute(
                     f"""
-                    SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
+                    SELECT s.id, s.video_id, s.text, s.variant, COALESCE(s.revision, 1), c.title, c.canonical_url, c.published_at
                     FROM summaries s
                     LEFT JOIN content c ON c.video_id = s.video_id
                     WHERE s.video_id IN ({placeholders})
@@ -201,7 +236,7 @@ class FollowUpStore:
                 if row is None:
                     cur.execute(
                         f"""
-                        SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
+                        SELECT s.id, s.video_id, s.text, s.variant, COALESCE(s.revision, 1), c.title, c.canonical_url, c.published_at
                         FROM summaries s
                         LEFT JOIN content c ON c.video_id = s.video_id
                         WHERE s.video_id IN ({placeholders})
@@ -228,7 +263,7 @@ class FollowUpStore:
                 placeholders = ", ".join(["%s"] * len(candidate_ids))
                 cur.execute(
                     f"""
-                    SELECT s.id, s.video_id, s.text, s.variant, c.title, c.canonical_url, c.published_at
+                    SELECT s.id, s.video_id, s.text, s.variant, COALESCE(s.revision, 1), c.title, c.canonical_url, c.published_at
                     FROM summaries s
                     LEFT JOIN content c ON c.video_id = s.video_id
                     WHERE s.video_id IN ({placeholders})
@@ -257,9 +292,54 @@ class FollowUpStore:
             "video_id": row[1],
             "text": row[2],
             "variant": row[3],
-            "title": row[4],
-            "canonical_url": row[5],
-            "published_at": row[6].isoformat() if isinstance(row[6], datetime) else row[6],
+            "revision": row[4],
+            "title": row[5],
+            "canonical_url": row[6],
+            "published_at": row[7].isoformat() if isinstance(row[7], datetime) else row[7],
+        }
+
+    def _fetch_deep_research_run(
+        self,
+        *,
+        video_id: str,
+        summary_variant_revision: int | None,
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn, conn.cursor() as cur:
+            if summary_variant_revision is not None:
+                cur.execute(
+                    """
+                    SELECT id, research_response, research_meta
+                    FROM follow_up_research_runs
+                    WHERE video_id = %s
+                    ORDER BY
+                      CASE
+                        WHEN research_meta->>'summary_variant_revision' = %s THEN 0
+                        ELSE 1
+                      END,
+                      created_at DESC,
+                      id DESC
+                    LIMIT 1
+                    """,
+                    (video_id, str(summary_variant_revision)),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT id, research_response, research_meta
+                    FROM follow_up_research_runs
+                    WHERE video_id = %s
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT 1
+                    """,
+                    (video_id,),
+                )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id": int(row[0]),
+            "research_response": row[1] or "",
+            "research_meta": _coerce_json(row[2], {}),
         }
 
     def store_suggestions(
@@ -335,6 +415,70 @@ class FollowUpStore:
             "cache_key": row[6],
             "sources": list(meta.get("stored_sources") or []),
         }
+
+    def get_research_run(self, run_id: int, *, video_id: str | None = None) -> dict[str, Any] | None:
+        params: list[Any] = [run_id]
+        where_video_id = ""
+        if video_id:
+            params.append(video_id)
+            where_video_id = " AND video_id = %s"
+
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                  id,
+                  video_id,
+                  summary_id,
+                  approved_questions,
+                  question_provenance,
+                  research_response,
+                  research_meta,
+                  created_at,
+                  status
+                FROM follow_up_research_runs
+                WHERE id = %s{where_video_id}
+                LIMIT 1
+                """,
+                tuple(params),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+
+        meta = _coerce_json(row[6], {})
+        return {
+            "run_id": int(row[0]),
+            "video_id": str(row[1] or ""),
+            "summary_id": _coerce_optional_int(row[2]),
+            "approved_questions": list(row[3] or []),
+            "question_provenance": list(row[4] or []),
+            "answer": str(row[5] or ""),
+            "meta": meta if isinstance(meta, dict) else {},
+            "created_at": row[7].isoformat() if isinstance(row[7], datetime) else row[7],
+            "status": str(row[8] or "ok"),
+            "sources": list((meta if isinstance(meta, dict) else {}).get("stored_sources") or []),
+            "parent_follow_up_run_id": _coerce_optional_int(
+                (meta if isinstance(meta, dict) else {}).get("parent_follow_up_run_id")
+            ),
+        }
+
+    def get_research_thread(self, run_id: int, *, video_id: str | None = None) -> list[dict[str, Any]]:
+        turns: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        current_run_id: int | None = run_id
+
+        while current_run_id is not None and current_run_id not in seen and len(turns) < 24:
+            seen.add(current_run_id)
+            turn = self.get_research_run(current_run_id, video_id=video_id)
+            if turn is None:
+                break
+            turns.append(turn)
+            current_run_id = _coerce_optional_int(turn.get("parent_follow_up_run_id"))
+
+        turns.reverse()
+        return turns
 
     def store_research_run(
         self,

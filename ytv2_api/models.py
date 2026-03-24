@@ -129,6 +129,7 @@ class FollowUpRunRequest(BaseModel):
     video_id: str = Field(..., description="Content identifier (video ID, URL hash, etc.)")
     summary_id: Optional[int] = Field(None, description="Specific summary revision ID")
     preferred_variant: Optional[str] = Field(None, description="Preferred persisted summary variant to resolve")
+    parent_follow_up_run_id: Optional[int] = Field(None, description="Parent deep research run when chaining from an existing deep research report")
     summary: str = Field(..., description="The existing summary text")
     source_context: Dict[str, Any] = Field(default_factory=dict, description="Information about original content")
     approved_questions: List[str] = Field(..., min_length=1, max_length=3, description="User-approved research questions")
@@ -191,3 +192,58 @@ class FollowUpCachedResponse(BaseModel):
     cached: bool = Field(..., description="Whether a cached result was found")
     result: Optional[FollowUpRunResponse] = Field(None, description="Cached result if found")
     cache_key: str = Field(..., description="Cache key used for lookup")
+
+
+class FollowUpThreadTurn(BaseModel):
+    """A persisted deep-research turn in a thread."""
+
+    follow_up_run_id: int = Field(..., description="Research run identifier")
+    parent_follow_up_run_id: Optional[int] = Field(None, description="Parent research run identifier")
+    video_id: str = Field(..., description="Content identifier")
+    summary_id: Optional[int] = Field(None, description="Base summary revision identifier")
+    approved_questions: List[str] = Field(default_factory=list, description="Questions that produced this research turn")
+    question_provenance: List[str] = Field(default_factory=list, description="Where each approved question came from")
+    answer: str = Field(..., description="Persisted research report")
+    sources: List[ResearchSource] = Field(default_factory=list, description="Sources used for this research turn")
+    status: str = Field(..., description="Research status")
+    created_at: Optional[str] = Field(None, description="When the run completed")
+    meta: Dict[str, Any] = Field(default_factory=dict, description="Persisted run metadata")
+
+
+class FollowUpThreadResponse(BaseModel):
+    """Response model for a deep-research thread."""
+
+    video_id: str = Field(..., description="Content identifier")
+    root_follow_up_run_id: Optional[int] = Field(None, description="First persisted run in the thread")
+    current_follow_up_run_id: Optional[int] = Field(None, description="Currently selected persisted run")
+    turns: List[FollowUpThreadTurn] = Field(default_factory=list, description="Ordered persisted thread turns")
+
+
+class FollowUpChatMessage(BaseModel):
+    """A lightweight user or assistant chat turn."""
+
+    role: Literal["user", "assistant"] = Field(..., description="Chat role")
+    content: str = Field(..., description="Chat turn content")
+
+
+class FollowUpChatRequest(BaseModel):
+    """Request model for grounded chat over an existing deep-research report."""
+
+    video_id: str = Field(..., description="Content identifier")
+    follow_up_run_id: Optional[int] = Field(None, description="Current deep-research run identifier")
+    summary_id: Optional[int] = Field(None, description="Optional summary revision id")
+    preferred_variant: Optional[str] = Field(None, description="Preferred persisted summary variant to resolve")
+    summary: str = Field(default="", description="Fallback summary/report text when no persisted run is available")
+    source_context: Dict[str, Any] = Field(default_factory=dict, description="Source metadata for the report")
+    question: str = Field(..., min_length=1, description="User follow-up question about the existing report")
+    history: List[FollowUpChatMessage] = Field(default_factory=list, description="Recent lightweight chat turns")
+
+
+class FollowUpChatResponse(BaseModel):
+    """Response model for grounded chat over an existing deep-research report."""
+
+    video_id: str = Field(..., description="Content identifier")
+    follow_up_run_id: Optional[int] = Field(None, description="Current deep-research run identifier")
+    answer: str = Field(..., description="Grounded response using the existing report context")
+    sources: List[ResearchSource] = Field(default_factory=list, description="Sources inherited from the current report")
+    meta: Dict[str, Any] = Field(default_factory=dict, description="Chat metadata")
