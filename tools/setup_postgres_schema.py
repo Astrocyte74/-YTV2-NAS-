@@ -39,6 +39,8 @@ DDL_STATEMENTS = [
           updated_at TIMESTAMPTZ DEFAULT now(),
           has_audio BOOLEAN DEFAULT false,
           language TEXT,
+          transcript_text TEXT,
+          transcript_segments JSONB,
           analysis_json JSONB,
           subcategories_json JSONB,
           topics_json JSONB
@@ -54,6 +56,8 @@ DDL_STATEMENTS = [
     "ALTER TABLE content ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();",
     "ALTER TABLE content ADD COLUMN IF NOT EXISTS has_audio BOOLEAN DEFAULT false;",
     "ALTER TABLE content ADD COLUMN IF NOT EXISTS language TEXT;",
+    "ALTER TABLE content ADD COLUMN IF NOT EXISTS transcript_text TEXT;",
+    "ALTER TABLE content ADD COLUMN IF NOT EXISTS transcript_segments JSONB;",
     "ALTER TABLE content ADD COLUMN IF NOT EXISTS analysis_json JSONB;",
     "ALTER TABLE content ADD COLUMN IF NOT EXISTS subcategories_json JSONB;",
     "ALTER TABLE content ADD COLUMN IF NOT EXISTS topics_json JSONB;",

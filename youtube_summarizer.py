@@ -131,6 +131,60 @@ _TRANSCRIPT_CACHE: dict[str, Tuple[str, str, float]] = {}
 _TRANSCRIPT_SEGMENT_CACHE: dict[str, Tuple[List[dict], float]] = {}
 
 
+def _serialize_transcript_segments(transcript_data: Any) -> List[Dict[str, Any]]:
+    """Normalize youtube-transcript-api responses into plain dict segments."""
+    segments: List[Dict[str, Any]] = []
+    try:
+        iterable = list(transcript_data or [])
+    except Exception:
+        iterable = []
+
+    for snippet in iterable:
+        text = getattr(snippet, "text", None)
+        start = getattr(snippet, "start", None)
+        duration = getattr(snippet, "duration", None)
+
+        if text is None and isinstance(snippet, dict):
+            text = snippet.get("text")
+            start = snippet.get("start")
+            duration = snippet.get("duration")
+
+        if not text:
+            continue
+
+        try:
+            start_val = float(start) if start is not None else 0.0
+        except Exception:
+            start_val = 0.0
+        try:
+            duration_val = float(duration) if duration is not None else 0.0
+        except Exception:
+            duration_val = 0.0
+
+        segments.append(
+            {
+                "text": str(text),
+                "start": start_val,
+                "duration": duration_val,
+            }
+        )
+
+    return segments
+
+
+def _fetch_transcript_segments(video_id: str, languages: Optional[List[str]] = None) -> Optional[List[Dict[str, Any]]]:
+    """Fetch timestamped transcript segments using the current youtube-transcript-api."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
+
+        api = YouTubeTranscriptApi()
+        transcript_data = api.fetch(video_id, languages=languages) if languages else api.fetch(video_id)
+        segments = _serialize_transcript_segments(transcript_data)
+        return segments or None
+    except Exception:
+        return None
+
+
 def _slice_transcript_by_chapters(
     transcript_segments: Optional[List[Dict[str, Any]]],
     chapters: Optional[List[Dict[str, Any]]],
@@ -1474,7 +1528,10 @@ Preview:
                     if transcript_data:
                         text_parts = [snippet.text for snippet in transcript_data]
                         transcript_text = ' '.join(text_parts)
+                        transcript_segments = _serialize_transcript_segments(transcript_data)
                         _transcript_cache_put(video_id, transcript_text, transcript_language or '')
+                        if transcript_segments:
+                            _transcript_segment_cache_put(video_id, transcript_segments)
                         print(f"✅ YouTube Transcript API: Extracted {len(transcript_text)} characters in {transcript_language}")
                     else:
                         if paused:
@@ -1733,8 +1790,10 @@ Preview:
         # Ensure segments captured if transcript is available
         if transcript_text and transcript_segments is None:
             try:
-                from youtube_transcript_api import YouTubeTranscriptApi
-                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id)
+                transcript_segments = _fetch_transcript_segments(
+                    video_id,
+                    [transcript_language] if transcript_language else None,
+                )
                 if transcript_segments:
                     _transcript_segment_cache_put(video_id, transcript_segments)
             except Exception:
@@ -1862,8 +1921,10 @@ Preview:
         transcript_segments = _transcript_segment_cache_get(video_id)
         if transcript_text and transcript_segments is None:
             try:
-                from youtube_transcript_api import YouTubeTranscriptApi
-                transcript_segments = YouTubeTranscriptApi.get_transcript(video_id)
+                transcript_segments = _fetch_transcript_segments(
+                    video_id,
+                    [transcript_language] if transcript_language else None,
+                )
                 if transcript_segments:
                     _transcript_segment_cache_put(video_id, transcript_segments)
             except Exception:
@@ -2442,10 +2503,10 @@ Preview:
             try:
                 vid = metadata.get("id") or metadata.get("video_id")
                 if vid:
-                    from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
-                    segs = YouTubeTranscriptApi.get_transcript(vid)
+                    segs = _fetch_transcript_segments(vid)
                     if segs:
                         transcript_segments = segs
+                        _transcript_segment_cache_put(vid, transcript_segments)
                         slices = _slice_transcript_by_chapters(
                             transcript_segments,
                             metadata.get("chapters") or [],

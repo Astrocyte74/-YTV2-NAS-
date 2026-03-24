@@ -62,6 +62,8 @@ def _env_dsn() -> str:
 class DBColumns:
     has_id: bool
     has_language: bool
+    has_transcript_text: bool
+    has_transcript_segments: bool
     has_topics_json: bool
     has_subcategories_json: bool
     has_analysis_json: bool
@@ -122,6 +124,8 @@ class PostgresWriter:
         self._columns_cache = DBColumns(
             has_id=("id" in cols) if cols else True,
             has_language=("language" in cols) if cols else True,
+            has_transcript_text=("transcript_text" in cols) if cols else False,
+            has_transcript_segments=("transcript_segments" in cols) if cols else False,
             has_topics_json=("topics_json" in cols) if cols else True,
             has_subcategories_json=("subcategories_json" in cols) if cols else True,
             has_analysis_json=("analysis_json" in cols) if cols else True,
@@ -138,8 +142,8 @@ class PostgresWriter:
 
         Returns keys: video_id, id (optional), title, channel_name, canonical_url,
         thumbnail_url, summary_image_url, duration_seconds, indexed_at (datetime),
-        has_audio, language, analysis_json, subcategories_json, topics_json,
-        summary_variants (list).
+        has_audio, language, transcript_text, transcript_segments, analysis_json,
+        subcategories_json, topics_json, summary_variants (list).
         """
         source_metadata = content_data.get("source_metadata", {}) or {}
         youtube_meta = source_metadata.get("youtube", {}) or {}
@@ -228,6 +232,10 @@ class PostgresWriter:
             or content_data.get("summary", {}).get("language")
             or content_data.get("analysis", {}).get("language")
         )
+        transcript_text = content_data.get("transcript")
+        if transcript_text is not None and not isinstance(transcript_text, str):
+            transcript_text = str(transcript_text)
+        transcript_segments = content_data.get("transcript_segments")
 
         # JSONBs
         analysis_json = content_data.get("analysis_json") or content_data.get("analysis") or content_data.get("content_analysis")
@@ -309,6 +317,8 @@ class PostgresWriter:
             "indexed_at": indexed_at,
             "has_audio": has_audio,
             "language": language,
+            "transcript_text": transcript_text,
+            "transcript_segments": transcript_segments,
             "analysis_json": analysis_json,
             "subcategories_json": subcats,
             "topics_json": topics_json,
@@ -344,6 +354,10 @@ class PostgresWriter:
             insert_cols.insert(0, "id")
         if cols.has_language:
             insert_cols.append("language")
+        if cols.has_transcript_text:
+            insert_cols.append("transcript_text")
+        if cols.has_transcript_segments:
+            insert_cols.append("transcript_segments")
         if cols.has_analysis_json:
             insert_cols.append("analysis_json")
         if cols.has_subcategories_json:
@@ -369,6 +383,8 @@ class PostgresWriter:
             params["media"] = json.dumps(params["media"]) 
         if params.get("media_metadata") is not None and not isinstance(params["media_metadata"], (str, bytes)):
             params["media_metadata"] = json.dumps(params["media_metadata"]) 
+        if params.get("transcript_segments") is not None and not isinstance(params["transcript_segments"], (str, bytes)):
+            params["transcript_segments"] = json.dumps(params["transcript_segments"])
 
         # Build SQL strings
         cols_sql = ", ".join(insert_cols)
@@ -386,6 +402,10 @@ class PostgresWriter:
             set_updates.insert(3, "summary_image_url = EXCLUDED.summary_image_url")
         if cols.has_language:
             set_updates.append("language = EXCLUDED.language")
+        if cols.has_transcript_text:
+            set_updates.append("transcript_text = EXCLUDED.transcript_text")
+        if cols.has_transcript_segments:
+            set_updates.append("transcript_segments = EXCLUDED.transcript_segments")
         if cols.has_analysis_json:
             set_updates.append("analysis_json = EXCLUDED.analysis_json")
         if cols.has_subcategories_json:
