@@ -46,6 +46,155 @@ class StructuredSummaryLongTranscriptTests(unittest.IsolatedAsyncioTestCase):
         summarizer.status_callback = None
         return summarizer
 
+    async def test_long_chapter_is_split_merged_and_lightly_combined(self):
+        summarizer = self._make_summarizer()
+        operations = []
+
+        async def fake_llm_call(messages, operation_name="LLM call", max_retries=3):
+            prompt = messages[0].content
+            operations.append((operation_name, prompt))
+            if operation_name.startswith("chapter summary part"):
+                return f"Overview: {operation_name}\n• detail from {operation_name}"
+            if operation_name == "chapter summary merge":
+                return (
+                    "Overview: merged chapter\n"
+                    "• merged fact one\n"
+                    "• merged fact two\n"
+                    "• merged fact three\n"
+                    "• merged fact four\n"
+                    "• merged fact five\n"
+                    "• merged fact six"
+                )
+            if operation_name == "chapter summary combine":
+                self.assertIn("editing a long-form chapter digest", prompt)
+                self.assertIn("Keep every chapter heading exactly as written", prompt)
+                self.assertIn("Under each chapter heading, keep 4-8 bullets", prompt)
+                return "**Big Chapter (00:00-01:40)**\n- merged fact one\n\nBottom line: done."
+            raise AssertionError(f"unexpected operation {operation_name}")
+
+        async def fake_headline(summary, metadata):
+            return "headline"
+
+        summarizer._robust_llm_call = fake_llm_call
+        summarizer._generate_headline_from_summary = fake_headline
+
+        long_text = ("Alpha sentence. " * 1000) + ("Beta sentence. " * 1000)
+        result = await summarizer._summarize_by_chapters(
+            [
+                {
+                    "title": "Big Chapter",
+                    "start": 0,
+                    "end": 100,
+                    "text": long_text,
+                }
+            ],
+            {"title": "Rosenvall Test", "uploader": "Test Channel"},
+            "comprehensive",
+            "en",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["headline"], "headline")
+        self.assertEqual(result["summary_plan"]["combine_style"], "light-edit")
+        self.assertEqual(result["summary_plan"]["split_chapter_count"], 1)
+        self.assertEqual(result["chapter_summaries"][0]["title"], "Big Chapter")
+        self.assertIn("merged chapter", result["chapter_summaries"][0]["summary"])
+
+        op_names = [name for name, _prompt in operations]
+        self.assertIn("chapter summary merge", op_names)
+        self.assertIn("chapter summary combine", op_names)
+        self.assertGreaterEqual(sum(1 for name in op_names if name.startswith("chapter summary part")), 2)
+
+    async def test_key_insights_skips_final_combine_and_stitches_chapters(self):
+        summarizer = self._make_summarizer()
+        operations = []
+
+        async def fake_llm_call(messages, operation_name="LLM call", max_retries=3):
+            operations.append(operation_name)
+            if operation_name.startswith("chapter summary"):
+                return "Overview: chapter summary\n• retained detail"
+            raise AssertionError(f"unexpected operation {operation_name}")
+
+        async def fake_headline(summary, metadata):
+            return "headline"
+
+        summarizer._robust_llm_call = fake_llm_call
+        summarizer._generate_headline_from_summary = fake_headline
+
+        result = await summarizer._summarize_by_chapters(
+            [
+                {
+                    "title": "Intro",
+                    "start": 0,
+                    "end": 50,
+                    "text": "Alpha sentence. " * 40,
+                },
+                {
+                    "title": "Second",
+                    "start": 50,
+                    "end": 100,
+                    "text": "Beta sentence. " * 40,
+                },
+            ],
+            {"title": "Rosenvall Test", "uploader": "Test Channel"},
+            "key-insights",
+            "en",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["headline"], "headline")
+        self.assertEqual(result["summary_plan"]["combine_style"], "chapter-stitch")
+        self.assertFalse(result["summary_plan"]["combine_fallback_used"])
+        self.assertIn("Overview: Rosenvall Test is organized into 2 chapters.", result["summary"])
+        self.assertIn("**Intro", result["summary"])
+        self.assertNotIn("chapter summary combine", operations)
+
+    async def test_failed_chapter_parts_fall_back_instead_of_disappearing(self):
+        summarizer = self._make_summarizer()
+
+        async def fake_llm_call(messages, operation_name="LLM call", max_retries=3):
+            if operation_name.startswith("chapter summary part"):
+                return None
+            if operation_name.endswith("basic fallback"):
+                return None
+            if operation_name == "chapter summary merge":
+                return None
+            if operation_name == "chapter summary combine":
+                return None
+            raise AssertionError(f"unexpected operation {operation_name}")
+
+        async def fake_headline(summary, metadata):
+            return "headline"
+
+        summarizer._robust_llm_call = fake_llm_call
+        summarizer._generate_headline_from_summary = fake_headline
+
+        long_text = ("Alpha sentence. " * 1000) + ("Beta sentence. " * 1000)
+        result = await summarizer._summarize_by_chapters(
+            [
+                {
+                    "title": "Big Chapter",
+                    "start": 0,
+                    "end": 100,
+                    "text": long_text,
+                }
+            ],
+            {"title": "Rosenvall Test", "uploader": "Test Channel"},
+            "key-insights",
+            "en",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["headline"], "headline")
+        self.assertEqual(result["summary_plan"]["split_chapter_count"], 1)
+        self.assertEqual(result["summary_plan"]["chapter_fallback_count"], 1)
+        self.assertEqual(result["summary_plan"]["chapter_fallback_titles"], ["Big Chapter"])
+        self.assertEqual(result["summary_plan"]["combine_style"], "chapter-stitch")
+        self.assertEqual(len(result["chapter_summaries"]), 1)
+        self.assertIn("Big Chapter", result["summary"])
+        self.assertIn("Bottom line:", result["summary"])
+        self.assertIn("preserves the main claims, examples, and evidence", result["chapter_summaries"][0]["summary"])
+
     async def test_builds_chapter_slices_from_existing_transcript_segments(self):
         summarizer = self._make_summarizer()
         captured = {}

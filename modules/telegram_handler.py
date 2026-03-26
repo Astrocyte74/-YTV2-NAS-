@@ -1865,12 +1865,13 @@ class YouTubeTelegramBot:
                         logging.info(f"[AUTO-MODE] llm_config failed: {e}")
                         provider, model = "inception", "mercury-2"
 
-                    status_msg = await update.message.reply_text(
+                    status_msg = await self._send_auto_mode_status(
+                        update.message,
                         f"🚀 *Auto-Mode enabled*\n"
                         f"▪️ Model: `{provider}/{model}`\n"
                         f"▪️ Variant: `{auto_variant}`\n"
                         f"▪️ Processing summary...",
-                        parse_mode='Markdown'
+                        parse_mode='Markdown',
                     )
                 except Exception as e:
                     logging.error(f"[AUTO-MODE] Exception: {e}")
@@ -1980,13 +1981,14 @@ class YouTubeTelegramBot:
                     else:
                         source_label = "💬 Reddit"
 
-                    status_msg = await update.message.reply_text(
+                    status_msg = await self._send_auto_mode_status(
+                        update.message,
                         f"🚀 *Auto-Mode enabled*\n"
                         f"▪️ Model: `{provider}/{model}`\n"
                         f"▪️ Variant: `{auto_variant}`\n"
                         f"▪️ {source_label}\n"
                         f"▪️ Processing summary...",
-                        parse_mode='Markdown'
+                        parse_mode='Markdown',
                     )
                 except Exception as e:
                     logging.error(f"[AUTO-MODE] Exception: {e}")
@@ -2084,12 +2086,13 @@ class YouTubeTelegramBot:
                         logging.info(f"[AUTO-MODE] llm_config failed: {e}")
                         provider, model = "inception", "mercury-2"
 
-                    status_msg = await update.message.reply_text(
+                    status_msg = await self._send_auto_mode_status(
+                        update.message,
                         f"🚀 *Auto-Mode enabled*\n"
                         f"▪️ Model: `{provider}/{model}`\n"
                         f"▪️ Variant: `{auto_variant}`\n"
                         f"▪️ Processing article...",
-                        parse_mode='Markdown'
+                        parse_mode='Markdown',
                     )
                 except Exception as e:
                     logging.error(f"[AUTO-MODE] Exception: {e}")
@@ -8904,9 +8907,21 @@ class YouTubeTelegramBot:
                     return await self._status_message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
                 except Exception as e:
                     logging.warning(f"edit_message_text failed: {e}")
-                    if self.original_message:
-                        return await self.original_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-                    return await self._status_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                    try:
+                        if self.original_message:
+                            return await self.original_message.reply_text(
+                                text,
+                                parse_mode=parse_mode,
+                                reply_markup=reply_markup,
+                            )
+                        return await self._status_message.reply_text(
+                            text,
+                            parse_mode=parse_mode,
+                            reply_markup=reply_markup,
+                        )
+                    except Exception as fallback_exc:
+                        logging.warning(f"reply_text fallback failed: {fallback_exc}")
+                        return self.original_message or self._status_message
 
             async def answer(self, text, show_alert=False):
                 pass
@@ -8986,6 +9001,16 @@ class YouTubeTelegramBot:
                 await status_message.reply_text(error_msg)
         except Exception:
             pass
+
+    async def _send_auto_mode_status(self, message, text: str, *, parse_mode: Optional[str] = None):
+        """Best-effort auto-mode status sender that falls back to the original message object."""
+        try:
+            return await message.reply_text(text, parse_mode=parse_mode)
+        except Exception as exc:
+            logging.warning(
+                f"[AUTO-MODE] Initial status send failed; continuing without separate status message: {exc}"
+            )
+            return message
 
     async def _maybe_auto_generate_reddit_discussion(
         self,
@@ -9076,9 +9101,21 @@ class YouTubeTelegramBot:
                     except Exception as e:
                         # If edit fails, send a new message
                         logging.warning(f"edit_message_text failed: {e}")
-                        if self.original_message:
-                            return await self.original_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-                        return await self._status_message.reply_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                        try:
+                            if self.original_message:
+                                return await self.original_message.reply_text(
+                                    text,
+                                    parse_mode=parse_mode,
+                                    reply_markup=reply_markup,
+                                )
+                            return await self._status_message.reply_text(
+                                text,
+                                parse_mode=parse_mode,
+                                reply_markup=reply_markup,
+                            )
+                        except Exception as fallback_exc:
+                            logging.warning(f"reply_text fallback failed: {fallback_exc}")
+                            return self.original_message or self._status_message
 
                 async def answer(self, text, show_alert=False):
                     pass

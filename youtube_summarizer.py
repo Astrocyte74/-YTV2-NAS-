@@ -2383,38 +2383,31 @@ Preview:
         summary_type: str,
         transcript_language: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        """Summarize each chapter then combine for a cohesive result."""
+        """Summarize each chapter in detail, then lightly edit into a final digest."""
         usable = [c for c in chapter_slices if (c.get("text") or "").strip()]
         if not usable:
             return None
 
         chapter_summaries: List[Dict[str, Any]] = []
+        split_chapter_count = 0
+        chapter_fallback_count = 0
+        split_chapter_titles: List[str] = []
+        chapter_fallback_titles: List[str] = []
         for ch in usable:
-            section_text = self._sanitize_content(ch.get("text", ""), max_length=6500)
-            if not section_text:
-                continue
-            time_range = self._format_chapter_range(ch.get("start"), ch.get("end"))
-            section_prompt = f"""
-            Summarize this YouTube chapter in the transcript language ({transcript_language or 'unknown'}).
-
-            Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
-            Chapter: {ch.get('title', 'Chapter')} ({time_range or 'time unknown'})
-
-            Chapter transcript:
-            {section_text}
-
-            Output:
-            - 1 sentence “Overview:” capturing the key idea.
-            - 2–4 “• ” bullets with concrete facts, names, or results from this chapter.
-            Rules: no speculation, keep chronological, no emojis/code fences.
-            """
-            chunk_summary = await self._robust_llm_call(
-                [HumanMessage(content=section_prompt)],
-                operation_name="chapter summary",
-                max_retries=2,
+            chunk_summary, was_split, used_fallback = await self._summarize_single_chapter_detail(
+                ch,
+                metadata,
+                transcript_language,
             )
             if not chunk_summary:
-                continue
+                chunk_summary = self._build_chapter_text_fallback(ch)
+                used_fallback = True
+            if was_split:
+                split_chapter_count += 1
+                split_chapter_titles.append(ch.get("title", "").strip() or f"Chapter {ch.get('index', 0)+1}")
+            if used_fallback:
+                chapter_fallback_count += 1
+                chapter_fallback_titles.append(ch.get("title", "").strip() or f"Chapter {ch.get('index', 0)+1}")
             chapter_summaries.append(
                 {
                     "title": ch.get("title", "").strip() or f"Chapter {ch.get('index', 0)+1}",
@@ -2427,34 +2420,54 @@ Preview:
         if not chapter_summaries:
             return None
 
-        combined_lines = []
-        for idx, item in enumerate(chapter_summaries, start=1):
-            range_str = self._format_chapter_range(item.get("start"), item.get("end"))
-            combined_lines.append(
-                f"{idx}. {item.get('title', 'Chapter')} ({range_str}) — {item.get('summary', '').strip()}"
+        normalized_summary_type = (summary_type or "").strip().lower()
+        combine_style = "light-edit"
+        combine_fallback_used = False
+        if normalized_summary_type in {"key-insights", "insights"}:
+            combine_style = "chapter-stitch"
+            combined_summary = self._build_chapter_digest_fallback(
+                chapter_summaries,
+                metadata,
+                preserve_mode=True,
             )
-        combined_blob = "\n".join(combined_lines)
+        else:
+            combined_lines = []
+            for idx, item in enumerate(chapter_summaries, start=1):
+                range_str = self._format_chapter_range(item.get("start"), item.get("end"))
+                combined_lines.append(
+                    f"{idx}. {item.get('title', 'Chapter')} ({range_str}) — {item.get('summary', '').strip()}"
+                )
+            combined_blob = "\n".join(combined_lines)
 
-        combine_prompt = f"""
-        Combine these per-chapter summaries into one cohesive {summary_type or 'comprehensive'} summary.
-        Keep chapters in order, keep details factual, and avoid repetition.
+            combine_prompt = f"""
+            You are editing a long-form chapter digest, not re-summarizing it from scratch.
+            Preserve the chapter order and preserve the material points already present.
 
-        Chapters:
-        {combined_blob}
+            Chapters:
+            {combined_blob}
 
-        Output:
-        - 2-3 sentence overview.
-        - Section headings that mirror the chapter titles (do NOT rename or shorten them) with 2-4 bullets each.
-        - A final sentence starting “Bottom line: …”.
-        Use the transcript language ({transcript_language or 'unknown'}); no emojis/code fences.
-        """
-        combined_summary = await self._robust_llm_call(
-            [HumanMessage(content=combine_prompt)],
-            operation_name="chapter summary combine",
-            max_retries=2,
-        )
-        if not combined_summary:
-            combined_summary = "\n\n".join(combined_lines)
+            Output:
+            - 2-3 sentence introduction.
+            - Keep every chapter heading exactly as written.
+            - Under each chapter heading, keep 4-8 bullets unless the source chapter summary clearly has fewer distinct points.
+            - End with a short “Bottom line: …” conclusion.
+
+            Editing rules:
+            - Preserve named people, locations, evidence, examples, and contrasts.
+            - Remove repetition only when two bullets say the same thing.
+            - Do not collapse later chapters into one generic statement.
+            - Do not rename headings.
+            - Use the transcript language ({transcript_language or 'unknown'}).
+            - No emojis or code fences.
+            """
+            combined_summary = await self._robust_llm_call(
+                [HumanMessage(content=combine_prompt)],
+                operation_name="chapter summary combine",
+                max_retries=2,
+            )
+            if not combined_summary:
+                combine_fallback_used = True
+                combined_summary = self._build_chapter_digest_fallback(chapter_summaries, metadata)
 
         headline = await self._generate_headline_from_summary(combined_summary, metadata)
         return {
@@ -2464,8 +2477,390 @@ Preview:
             "generated_at": datetime.now().isoformat(),
             "language": transcript_language or metadata.get("language", "en"),
             "chapter_summaries": chapter_summaries,
-            "summary_plan": {"source": "chapters", "count": len(chapter_summaries)},
+            "summary_plan": {
+                "source": "chapters",
+                "count": len(chapter_summaries),
+                "combine_style": combine_style,
+                "split_chapter_count": split_chapter_count,
+                "split_chapter_titles": split_chapter_titles,
+                "chapter_fallback_count": chapter_fallback_count,
+                "chapter_fallback_titles": chapter_fallback_titles,
+                "combine_fallback_used": combine_fallback_used,
+            },
         }
+
+    def _split_long_summary_text(
+        self,
+        content: str,
+        *,
+        max_chunk_chars: int = 14000,
+        overlap_chars: int = 500,
+    ) -> List[str]:
+        """Split long transcript text into sentence-aware chunks for chapter-level summarization."""
+        if not content or not isinstance(content, str):
+            return []
+
+        cleaned = content.replace("```", "").replace("</prompt>", "").replace("<prompt>", "").strip()
+        if not cleaned:
+            return []
+        if len(cleaned) <= max_chunk_chars:
+            return [cleaned]
+
+        chunks: List[str] = []
+        start = 0
+        text_length = len(cleaned)
+        min_break = int(max_chunk_chars * 0.6)
+
+        while start < text_length:
+            end = min(start + max_chunk_chars, text_length)
+            if end < text_length:
+                break_point = -1
+                search_start = min(text_length, start + min_break)
+                for marker in ("\n\n", ". ", "? ", "! ", ".\n", "?\n", "!\n"):
+                    candidate = cleaned.rfind(marker, search_start, end)
+                    if candidate > break_point:
+                        break_point = candidate + len(marker.rstrip())
+                if break_point > start:
+                    end = break_point
+
+            chunk = cleaned[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            if end >= text_length:
+                break
+
+            next_start = max(start + 1, end - overlap_chars)
+            if next_start <= start:
+                next_start = end
+            start = next_start
+
+        return chunks
+
+    def _build_detailed_chapter_prompt(
+        self,
+        chapter: Dict[str, Any],
+        metadata: Dict[str, Any],
+        transcript_language: Optional[str],
+        section_text: str,
+        *,
+        part_index: int = 1,
+        part_total: int = 1,
+    ) -> str:
+        time_range = self._format_chapter_range(chapter.get("start"), chapter.get("end"))
+        part_label = ""
+        if part_total > 1:
+            part_label = f"Chapter part: {part_index}/{part_total}\n"
+        return f"""
+        Summarize this YouTube chapter in a detail-preserving way in the transcript language ({transcript_language or 'unknown'}).
+
+        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
+        Chapter: {chapter.get('title', 'Chapter')} ({time_range or 'time unknown'})
+        {part_label}Chapter transcript:
+        {section_text}
+
+        Output:
+        - Start with 1-2 sentences labeled “Overview:” capturing the main point of this chapter material.
+        - Then provide 5-9 “• ” bullets preserving concrete claims, examples, evidence, names, numbers, locations, and contrasts from this chapter material.
+        - If the chapter makes an argument, preserve the main supporting reasons instead of collapsing them into one vague bullet.
+        - If the speakers introduce later evidence or a new mapping step, include it even if it appears late in the chapter material.
+
+        Rules:
+        - Use only what is explicitly stated in the transcript.
+        - Keep events and claims in chapter order.
+        - Do not compress distinct arguments into a single generic sentence.
+        - No emojis or code fences.
+        """.strip()
+
+    def _build_basic_chapter_prompt(
+        self,
+        chapter: Dict[str, Any],
+        metadata: Dict[str, Any],
+        transcript_language: Optional[str],
+        section_text: str,
+        *,
+        part_index: int = 1,
+        part_total: int = 1,
+    ) -> str:
+        time_range = self._format_chapter_range(chapter.get("start"), chapter.get("end"))
+        part_label = ""
+        if part_total > 1:
+            part_label = f"Chapter part: {part_index}/{part_total}\n"
+        return f"""
+        Summarize this YouTube chapter material in the transcript language ({transcript_language or 'unknown'}).
+
+        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
+        Chapter: {chapter.get('title', 'Chapter')} ({time_range or 'time unknown'})
+        {part_label}Chapter transcript:
+        {section_text}
+
+        Output:
+        - 1 sentence labeled “Overview:” capturing the main point.
+        - Then provide 4-6 “• ” bullets with concrete names, evidence, examples, locations, and results.
+
+        Rules:
+        - Keep items factual and in chapter order.
+        - Preserve later evidence if it appears near the end.
+        - No emojis or code fences.
+        """.strip()
+
+    def _fallback_candidate_snippets(self, section_text: str) -> List[str]:
+        clean = " ".join((section_text or "").split())
+        if not clean:
+            return []
+
+        raw_candidates: List[str] = []
+        current: List[str] = []
+        for ch in clean:
+            current.append(ch)
+            if ch in ".!?;":
+                candidate = "".join(current).strip()
+                if candidate:
+                    raw_candidates.append(candidate)
+                current = []
+        if current:
+            candidate = "".join(current).strip()
+            if candidate:
+                raw_candidates.append(candidate)
+
+        candidates: List[str] = []
+        seen = set()
+        for candidate in raw_candidates:
+            normalized = " ".join(candidate.split())
+            words = normalized.split()
+            alpha_count = sum(1 for c in normalized if c.isalpha())
+            if len(words) < 5:
+                continue
+            if alpha_count < 18:
+                continue
+            if normalized.lower().endswith((".com.", ".com", "@gmail.", "@gmail")):
+                continue
+            if len(normalized) > 240:
+                normalized = normalized[:237].rstrip() + "..."
+            key = normalized.lower()
+            if key not in seen:
+                seen.add(key)
+                candidates.append(normalized)
+
+        if len(candidates) >= 4:
+            return candidates
+
+        words = clean.split()
+        windowed: List[str] = []
+        step = 18
+        width = 26
+        for start in range(0, len(words), step):
+            snippet_words = words[start:start + width]
+            if len(snippet_words) < 8:
+                continue
+            snippet = " ".join(snippet_words).strip(" ,;:-")
+            if len(snippet) > 220:
+                snippet = snippet[:217].rstrip() + "..."
+            if sum(1 for c in snippet if c.isalpha()) < 18:
+                continue
+            if snippet and snippet.lower() not in seen:
+                seen.add(snippet.lower())
+                windowed.append(snippet)
+            if len(windowed) >= 8:
+                break
+
+        return candidates + windowed
+
+    def _select_spread_snippets(self, snippets: List[str], limit: int = 5) -> List[str]:
+        if len(snippets) <= limit:
+            return snippets
+        if limit <= 1:
+            return [snippets[0]]
+
+        chosen: List[str] = []
+        used_indexes = set()
+        last_index = len(snippets) - 1
+        for pos in range(limit):
+            idx = round((last_index * pos) / (limit - 1))
+            while idx in used_indexes and idx < len(snippets) - 1:
+                idx += 1
+            if idx in used_indexes:
+                idx = max(i for i in range(len(snippets)) if i not in used_indexes)
+            used_indexes.add(idx)
+            chosen.append(snippets[idx])
+        return chosen
+
+    def _build_part_text_fallback(
+        self,
+        chapter: Dict[str, Any],
+        section_text: str,
+        *,
+        part_index: int = 1,
+        part_total: int = 1,
+    ) -> str:
+        clean = " ".join((section_text or "").split())
+        if not clean:
+            return ""
+
+        title = chapter.get("title", "Chapter")
+        if part_total > 1:
+            overview = (
+                f"Overview: This section covers {title} (part {part_index} of {part_total}) and preserves the main claims, "
+                f"examples, and evidence from this portion of the transcript."
+            )
+        else:
+            overview = (
+                f"Overview: This section covers {title} and preserves the main claims, examples, and evidence from the transcript."
+            )
+
+        snippets = self._select_spread_snippets(self._fallback_candidate_snippets(clean), limit=5)
+        bullets = [f"• {snippet}" for snippet in snippets if snippet]
+        if not bullets:
+            excerpt = clean[:217].rstrip()
+            if len(clean) > 217:
+                excerpt += "..."
+            bullets = [f"• {excerpt}"]
+
+        return "\n".join([overview] + bullets)
+
+    def _build_chapter_text_fallback(self, chapter: Dict[str, Any]) -> str:
+        return self._build_part_text_fallback(chapter, chapter.get("text", ""))
+
+    async def _summarize_single_chapter_detail(
+        self,
+        chapter: Dict[str, Any],
+        metadata: Dict[str, Any],
+        transcript_language: Optional[str],
+    ) -> tuple[Optional[str], bool, bool]:
+        raw_text = (chapter.get("text") or "").strip()
+        if not raw_text:
+            return None, False, False
+
+        parts = self._split_long_summary_text(raw_text, max_chunk_chars=20000, overlap_chars=500)
+        if not parts:
+            return None, False, False
+
+        title = chapter.get("title", "Chapter")
+        if len(parts) > 1:
+            print(f"🧩 Chapter '{title}' split into {len(parts)} parts")
+
+        partial_summaries: List[str] = []
+        used_fallback = False
+        for idx, section_text in enumerate(parts, start=1):
+            prompt = self._build_detailed_chapter_prompt(
+                chapter,
+                metadata,
+                transcript_language,
+                section_text,
+                part_index=idx,
+                part_total=len(parts),
+            )
+            operation = "chapter summary"
+            if len(parts) > 1:
+                operation = f"chapter summary part {idx}/{len(parts)}"
+            part_summary = await self._robust_llm_call(
+                [HumanMessage(content=prompt)],
+                operation_name=operation,
+                max_retries=2,
+            )
+            if not part_summary:
+                print(f"⚠️ {title} part {idx}/{len(parts)} detailed summary failed; trying basic fallback")
+                basic_prompt = self._build_basic_chapter_prompt(
+                    chapter,
+                    metadata,
+                    transcript_language,
+                    section_text,
+                    part_index=idx,
+                    part_total=len(parts),
+                )
+                part_summary = await self._robust_llm_call(
+                    [HumanMessage(content=basic_prompt)],
+                    operation_name=f"{operation} basic fallback",
+                    max_retries=1,
+                )
+                if part_summary:
+                    used_fallback = True
+            if not part_summary:
+                print(f"⚠️ {title} part {idx}/{len(parts)} basic fallback failed; using transcript-derived fallback")
+                part_summary = self._build_part_text_fallback(
+                    chapter,
+                    section_text,
+                    part_index=idx,
+                    part_total=len(parts),
+                )
+                used_fallback = True
+            if part_summary:
+                partial_summaries.append(part_summary.strip())
+
+        if not partial_summaries:
+            return None, len(parts) > 1, True
+        if len(partial_summaries) == 1:
+            return partial_summaries[0], len(parts) > 1, used_fallback
+
+        time_range = self._format_chapter_range(chapter.get("start"), chapter.get("end"))
+        partial_blob = "\n\n".join(
+            f"Part {idx}:\n{item}" for idx, item in enumerate(partial_summaries, start=1)
+        )
+        merge_prompt = f"""
+        You are merging partial summaries of a single YouTube chapter into one chapter digest.
+        Preserve chronology and preserve the material points already captured in the partial summaries.
+
+        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
+        Chapter: {chapter.get('title', 'Chapter')} ({time_range or 'time unknown'})
+
+        Partial chapter summaries:
+        {partial_blob}
+
+        Output:
+        - Start with 1-2 sentences labeled “Overview:” capturing the main point of the full chapter.
+        - Then provide 6-10 “• ” bullets preserving concrete claims, names, evidence, locations, numbers, and contrasts from across the full chapter.
+
+        Rules:
+        - Keep items in chapter order.
+        - Preserve later evidence and later mapping steps; do not overweight the opening material.
+        - Remove repetition only when two bullets say the same thing.
+        - Do not introduce new claims.
+        - No emojis or code fences.
+        - Use the transcript language ({transcript_language or 'unknown'}).
+        """.strip()
+
+        merged_summary = await self._robust_llm_call(
+            [HumanMessage(content=merge_prompt)],
+            operation_name="chapter summary merge",
+            max_retries=2,
+        )
+        merged_summary = (merged_summary or "").strip()
+        if merged_summary:
+            return merged_summary, True, used_fallback
+
+        print(f"⚠️ Chapter merge failed for '{title}'; stitching partial summaries directly")
+        return "\n\n".join(partial_summaries), True, True
+
+    def _build_chapter_digest_fallback(
+        self,
+        chapter_summaries: List[Dict[str, Any]],
+        metadata: Dict[str, Any],
+        *,
+        preserve_mode: bool = False,
+    ) -> str:
+        title = metadata.get("title") or "This video"
+        if preserve_mode:
+            intro = (
+                f"Overview: {title} is organized into {len(chapter_summaries)} chapters. "
+                f"The digest below preserves each chapter separately so later evidence and arguments are not compressed away."
+            )
+            closing = "Bottom line: This chapter-first digest preserves the full argument by keeping each chapter separate."
+        else:
+            intro = (
+                f"{title} is organized into {len(chapter_summaries)} chapters. "
+                f"The digest below preserves each chapter separately to retain later evidence and arguments."
+            )
+            closing = "Bottom line: This chapter-first fallback favors preserving the full argument over compressing later sections."
+
+        lines = [intro, ""]
+        for item in chapter_summaries:
+            range_str = self._format_chapter_range(item.get("start"), item.get("end"))
+            heading = f"**{item.get('title', 'Chapter')} ({range_str})**" if range_str else f"**{item.get('title', 'Chapter')}**"
+            lines.append(heading)
+            lines.append((item.get("summary") or "").strip())
+            lines.append("")
+        lines.append(closing)
+        return "\n".join(lines).strip()
 
     async def _generate_structured_summary(
         self,
