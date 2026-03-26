@@ -66,6 +66,8 @@ SUMMARY_IMAGE_AI2_ENABLED = _env_flag("SUMMARY_IMAGE_ENABLE_AI2", "true")
 STRUCTURED_SUMMARY_ENABLED = _env_flag("YT_STRUCTURED_SUMMARY", "true")
 SUMMARY_PLAN_MAX_SECTIONS = max(1, _env_int("YT_SUMMARY_PLAN_MAX_SECTIONS", 6))
 STRUCTURED_PLANNER_EXCERPT_CHARS = max(3000, _env_int("YT_STRUCTURED_PLANNER_EXCERPT_CHARS", 12000))
+CHAPTER_FRAME_DELAY_SECS = max(0.0, float(os.getenv("YT_CHAPTER_FRAME_DELAY_SECS", "1.5") or "1.5"))
+MERCURY_MIN_CALL_INTERVAL_SECS = max(0.0, float(os.getenv("YT_MERCURY_MIN_CALL_INTERVAL_SECS", "2.5") or "2.5"))
 
 # --- Transcript rate limiter / circuit breaker ---
 import time
@@ -397,6 +399,8 @@ class YouTubeSummarizer:
 
         # Optional status callback for UI progress (set by caller)
         self.status_callback = None  # type: ignore[attr-defined]
+        self._summary_llm_metrics = self._new_summary_llm_metrics()
+        self._last_summary_llm_call_started_at = 0.0
 
     def _notify_status(self, message: str) -> None:
         """Notify external status callback if configured (non-blocking)."""
@@ -406,6 +410,95 @@ class YouTubeSummarizer:
                 cb(message.strip())
         except Exception:
             pass
+
+    def _new_summary_llm_metrics(self) -> Dict[str, Any]:
+        return {
+            "calls": 0,
+            "retries": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "operations": [],
+        }
+
+    def _reset_summary_llm_metrics(self) -> None:
+        self._summary_llm_metrics = self._new_summary_llm_metrics()
+        self._last_summary_llm_call_started_at = 0.0
+
+    def _record_summary_llm_call(
+        self,
+        *,
+        operation_name: str,
+        success: bool,
+        attempt: int,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        total_tokens: int = 0,
+        error: Optional[str] = None,
+    ) -> None:
+        metrics = getattr(self, "_summary_llm_metrics", None)
+        if not isinstance(metrics, dict):
+            self._summary_llm_metrics = self._new_summary_llm_metrics()
+            metrics = self._summary_llm_metrics
+        metrics["calls"] = int(metrics.get("calls", 0)) + 1
+        metrics["retries"] = int(metrics.get("retries", 0)) + max(0, attempt - 1)
+        metrics["prompt_tokens"] = int(metrics.get("prompt_tokens", 0)) + max(0, int(prompt_tokens or 0))
+        metrics["completion_tokens"] = int(metrics.get("completion_tokens", 0)) + max(0, int(completion_tokens or 0))
+        explicit_total = max(0, int(total_tokens or 0))
+        if explicit_total:
+            metrics["total_tokens"] = int(metrics.get("total_tokens", 0)) + explicit_total
+        else:
+            metrics["total_tokens"] = int(metrics.get("total_tokens", 0)) + max(0, int(prompt_tokens or 0)) + max(0, int(completion_tokens or 0))
+        op_entry = {
+            "operation": operation_name,
+            "attempt": attempt,
+            "success": bool(success),
+        }
+        if error:
+            op_entry["error"] = str(error)[:240]
+        if prompt_tokens:
+            op_entry["prompt_tokens"] = int(prompt_tokens)
+        if completion_tokens:
+            op_entry["completion_tokens"] = int(completion_tokens)
+        if explicit_total:
+            op_entry["total_tokens"] = explicit_total
+        operations = metrics.setdefault("operations", [])
+        if isinstance(operations, list):
+            operations.append(op_entry)
+
+    def _extract_llm_usage(self, response: Any) -> Dict[str, int]:
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        try:
+            candidates = []
+            usage_metadata = getattr(response, "usage_metadata", None)
+            if isinstance(usage_metadata, dict):
+                candidates.append(usage_metadata)
+            response_metadata = getattr(response, "response_metadata", None)
+            if isinstance(response_metadata, dict):
+                token_usage = response_metadata.get("token_usage")
+                if isinstance(token_usage, dict):
+                    candidates.append(token_usage)
+                usage_block = response_metadata.get("usage")
+                if isinstance(usage_block, dict):
+                    candidates.append(usage_block)
+            for candidate in candidates:
+                usage["prompt_tokens"] = max(
+                    usage["prompt_tokens"],
+                    int(candidate.get("input_tokens", candidate.get("prompt_tokens", 0)) or 0),
+                )
+                usage["completion_tokens"] = max(
+                    usage["completion_tokens"],
+                    int(candidate.get("output_tokens", candidate.get("completion_tokens", 0)) or 0),
+                )
+                usage["total_tokens"] = max(
+                    usage["total_tokens"],
+                    int(candidate.get("total_tokens", 0) or 0),
+                )
+            if not usage["total_tokens"]:
+                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+        except Exception:
+            pass
+        return usage
 
     def _normalize_plan(self, plan: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Remove garbage tokens and keep only meaningful section titles."""
@@ -653,6 +746,8 @@ class YouTubeSummarizer:
     ) -> Dict[str, Any]:
         """Universal text processing pipeline used by all content sources including YouTube."""
 
+        self._reset_summary_llm_metrics()
+
         transcript = (text or "").strip()
         if len(transcript) < 50:
             return {
@@ -706,6 +801,7 @@ class YouTubeSummarizer:
                 summary_data["summary"] = summary_data["audio"]
             if plan_hint and not summary_data.get("summary_plan"):
                 summary_data["summary_plan"] = {"source": "planner", "sections": plan_hint}
+            summary_data["llm_usage"] = deepcopy(getattr(self, "_summary_llm_metrics", {}))
 
         if isinstance(summary_data, str) and not summary_language:
             summary_language = transcript_language
@@ -773,6 +869,7 @@ class YouTubeSummarizer:
             "processor_info": {
                 "llm_provider": self.llm_provider,
                 "model": getattr(self.llm, "model_name", getattr(self.llm, "model", self.model)),
+                "summary_llm_usage": deepcopy(getattr(self, "_summary_llm_metrics", {})),
             },
         }
 
@@ -2423,12 +2520,19 @@ Preview:
         normalized_summary_type = (summary_type or "").strip().lower()
         combine_style = "light-edit"
         combine_fallback_used = False
+        frame_generated = False
         if normalized_summary_type in {"key-insights", "insights"}:
             combine_style = "chapter-stitch"
-            combined_summary = self._build_chapter_digest_fallback(
+            frame = await self._generate_chapter_intro_conclusion(
                 chapter_summaries,
                 metadata,
-                preserve_mode=True,
+                transcript_language,
+            )
+            frame_generated = bool(frame and (frame.get("intro") or frame.get("conclusion")))
+            combined_summary = self._build_stitched_chapter_digest(
+                chapter_summaries,
+                intro=(frame or {}).get("intro"),
+                conclusion=(frame or {}).get("conclusion"),
             )
         else:
             combined_lines = []
@@ -2486,6 +2590,7 @@ Preview:
                 "chapter_fallback_count": chapter_fallback_count,
                 "chapter_fallback_titles": chapter_fallback_titles,
                 "combine_fallback_used": combine_fallback_used,
+                "frame_generated": frame_generated,
             },
         }
 
@@ -2831,6 +2936,119 @@ Preview:
         print(f"⚠️ Chapter merge failed for '{title}'; stitching partial summaries directly")
         return "\n\n".join(partial_summaries), True, True
 
+    def _extract_chapter_summary_overview(self, summary_text: str) -> str:
+        lines = [line.strip() for line in (summary_text or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        for idx, line in enumerate(lines):
+            lowered = line.lower()
+            if lowered.startswith("overview:"):
+                remainder = line.split(":", 1)[1].strip()
+                if remainder:
+                    return remainder
+                for next_line in lines[idx + 1:]:
+                    if next_line.startswith(("•", "-", "*")):
+                        break
+                    return next_line.strip()
+        for line in lines:
+            if not line.startswith(("•", "-", "*", "**")):
+                return line
+        return ""
+
+    async def _generate_chapter_intro_conclusion(
+        self,
+        chapter_summaries: List[Dict[str, Any]],
+        metadata: Dict[str, Any],
+        transcript_language: Optional[str],
+    ) -> Optional[Dict[str, str]]:
+        if not chapter_summaries:
+            return None
+
+        chapter_lines = []
+        for idx, item in enumerate(chapter_summaries, start=1):
+            overview = self._extract_chapter_summary_overview(item.get("summary", ""))
+            range_str = self._format_chapter_range(item.get("start"), item.get("end"))
+            heading = item.get("title", f"Chapter {idx}")
+            if range_str:
+                heading = f"{heading} ({range_str})"
+            if overview:
+                chapter_lines.append(f"{idx}. {heading}: {overview}")
+            else:
+                chapter_lines.append(f"{idx}. {heading}")
+
+        if CHAPTER_FRAME_DELAY_SECS > 0:
+            await asyncio.sleep(CHAPTER_FRAME_DELAY_SECS)
+
+        prompt = f"""
+        Write only a short introduction and conclusion for a chapter-based YouTube summary.
+        Do not rewrite or summarize the chapter sections themselves.
+
+        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
+        Chapter overview notes:
+        {chr(10).join(chapter_lines)}
+
+        Return strict JSON only:
+        {{
+          "intro": "2-3 sentence high-level introduction to the full video",
+          "conclusion": "1-2 sentence conclusion capturing the overall takeaway"
+        }}
+
+        Rules:
+        - Base everything only on the provided chapter overview notes.
+        - Do not mention chapters, stitching, formatting, or summarization process.
+        - Do not use markdown fences.
+        - Use the transcript language ({transcript_language or 'unknown'}).
+        """.strip()
+
+        raw = await self._robust_llm_call(
+            [HumanMessage(content=prompt)],
+            operation_name="chapter digest framing",
+            max_retries=1,
+        )
+        if not raw:
+            return None
+
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+        try:
+            parsed = json.loads(cleaned)
+        except Exception:
+            match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+            if not match:
+                return None
+            try:
+                parsed = json.loads(match.group(0))
+            except Exception:
+                return None
+
+        intro = str(parsed.get("intro") or "").strip()
+        conclusion = str(parsed.get("conclusion") or "").strip()
+        if not intro and not conclusion:
+            return None
+        return {"intro": intro, "conclusion": conclusion}
+
+    def _build_stitched_chapter_digest(
+        self,
+        chapter_summaries: List[Dict[str, Any]],
+        *,
+        intro: Optional[str] = None,
+        conclusion: Optional[str] = None,
+    ) -> str:
+        lines: List[str] = []
+        if intro:
+            lines.extend([f"Overview: {intro.strip()}", ""])
+        for item in chapter_summaries:
+            range_str = self._format_chapter_range(item.get("start"), item.get("end"))
+            heading = f"**{item.get('title', 'Chapter')} ({range_str})**" if range_str else f"**{item.get('title', 'Chapter')}**"
+            lines.append(heading)
+            lines.append((item.get("summary") or "").strip())
+            lines.append("")
+        if conclusion:
+            lines.append(f"Bottom line: {conclusion.strip()}")
+        return "\n".join(lines).strip()
+
     def _build_chapter_digest_fallback(
         self,
         chapter_summaries: List[Dict[str, Any]],
@@ -2852,15 +3070,11 @@ Preview:
             )
             closing = "Bottom line: This chapter-first fallback favors preserving the full argument over compressing later sections."
 
-        lines = [intro, ""]
-        for item in chapter_summaries:
-            range_str = self._format_chapter_range(item.get("start"), item.get("end"))
-            heading = f"**{item.get('title', 'Chapter')} ({range_str})**" if range_str else f"**{item.get('title', 'Chapter')}**"
-            lines.append(heading)
-            lines.append((item.get("summary") or "").strip())
-            lines.append("")
-        lines.append(closing)
-        return "\n".join(lines).strip()
+        return self._build_stitched_chapter_digest(
+            chapter_summaries,
+            intro=intro,
+            conclusion=closing.replace("Bottom line: ", ""),
+        )
 
     async def _generate_structured_summary(
         self,
@@ -4729,12 +4943,25 @@ Multiple Categories (when content genuinely spans areas):
         for attempt in range(max_retries):
             try:
                 print(f"🔄 {operation_name} attempt {attempt + 1}/{max_retries}")
+                if (self.llm_provider or "").lower() == "inception" and MERCURY_MIN_CALL_INTERVAL_SECS > 0:
+                    now = time.monotonic()
+                    last_started = float(getattr(self, "_last_summary_llm_call_started_at", 0.0) or 0.0)
+                    wait_for = (last_started + MERCURY_MIN_CALL_INTERVAL_SECS) - now
+                    if wait_for > 0:
+                        print(f"⏳ Mercury throttle before {operation_name}: waiting {wait_for:.2f}s")
+                        await asyncio.sleep(wait_for)
+                    self._last_summary_llm_call_started_at = time.monotonic()
                 if use_local_client:
                     # Fast-fail if local hub/direct is not reachable
                     if not self._ollama_precheck(timeout=0.8):
                         raise OllamaClientError("ollama precheck failed (unreachable)")
                     # Route through our unified local client (hub or direct)
                     txt = await asyncio.wait_for(self._ollama_hub_call(messages, max_retries=1), timeout=30.0)
+                    self._record_summary_llm_call(
+                        operation_name=operation_name,
+                        success=bool(txt),
+                        attempt=attempt + 1,
+                    )
                     return txt
                 else:
                     # Use asyncio.wait_for to implement timeout
@@ -4742,10 +4969,25 @@ Multiple Categories (when content genuinely spans areas):
                         self.llm.ainvoke(messages),
                         timeout=120.0  # 2 minute timeout for LLM calls
                     )
+                    usage = self._extract_llm_usage(response)
+                    self._record_summary_llm_call(
+                        operation_name=operation_name,
+                        success=True,
+                        attempt=attempt + 1,
+                        prompt_tokens=usage.get("prompt_tokens", 0),
+                        completion_tokens=usage.get("completion_tokens", 0),
+                        total_tokens=usage.get("total_tokens", 0),
+                    )
                     return response.content
                 
             except asyncio.TimeoutError:
                 print(f"⚠️ {operation_name} timed out on attempt {attempt + 1}")
+                self._record_summary_llm_call(
+                    operation_name=operation_name,
+                    success=False,
+                    attempt=attempt + 1,
+                    error="timeout",
+                )
                 if attempt < max_retries - 1:
                     wait_time = 2 ** attempt
                     print(f"⚠️ Waiting {wait_time}s before retry...")
@@ -4754,7 +4996,13 @@ Multiple Categories (when content genuinely spans areas):
                 
             except Exception as e:
                 error_str = str(e).lower()
-                if "rate limit" in error_str:
+                self._record_summary_llm_call(
+                    operation_name=operation_name,
+                    success=False,
+                    attempt=attempt + 1,
+                    error=str(e),
+                )
+                if "rate limit" in error_str or "429" in error_str or "too many requests" in error_str:
                     wait_time = (2 ** attempt) + 5  # Longer wait for rate limits
                     print(f"⚠️ Rate limited. Waiting {wait_time}s before retry...")
                     if attempt < max_retries - 1:

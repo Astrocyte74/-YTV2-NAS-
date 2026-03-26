@@ -113,6 +113,8 @@ class StructuredSummaryLongTranscriptTests(unittest.IsolatedAsyncioTestCase):
             operations.append(operation_name)
             if operation_name.startswith("chapter summary"):
                 return "Overview: chapter summary\n• retained detail"
+            if operation_name == "chapter digest framing":
+                return '{"intro":"This video develops a geography theory across scripture, travel, climate, and mapping evidence.","conclusion":"Taken together, the chapter evidence is presented as support for the proposed Baja setting."}'
             raise AssertionError(f"unexpected operation {operation_name}")
 
         async def fake_headline(summary, metadata):
@@ -145,9 +147,12 @@ class StructuredSummaryLongTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["headline"], "headline")
         self.assertEqual(result["summary_plan"]["combine_style"], "chapter-stitch")
         self.assertFalse(result["summary_plan"]["combine_fallback_used"])
-        self.assertIn("Overview: Rosenvall Test is organized into 2 chapters.", result["summary"])
+        self.assertTrue(result["summary_plan"]["frame_generated"])
+        self.assertIn("Overview: This video develops a geography theory", result["summary"])
         self.assertIn("**Intro", result["summary"])
+        self.assertIn("Bottom line: Taken together, the chapter evidence is presented as support for the proposed Baja setting.", result["summary"])
         self.assertNotIn("chapter summary combine", operations)
+        self.assertIn("chapter digest framing", operations)
 
     async def test_failed_chapter_parts_fall_back_instead_of_disappearing(self):
         summarizer = self._make_summarizer()
@@ -158,6 +163,8 @@ class StructuredSummaryLongTranscriptTests(unittest.IsolatedAsyncioTestCase):
             if operation_name.endswith("basic fallback"):
                 return None
             if operation_name == "chapter summary merge":
+                return None
+            if operation_name == "chapter digest framing":
                 return None
             if operation_name == "chapter summary combine":
                 return None
@@ -190,9 +197,10 @@ class StructuredSummaryLongTranscriptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["summary_plan"]["chapter_fallback_count"], 1)
         self.assertEqual(result["summary_plan"]["chapter_fallback_titles"], ["Big Chapter"])
         self.assertEqual(result["summary_plan"]["combine_style"], "chapter-stitch")
+        self.assertFalse(result["summary_plan"]["frame_generated"])
         self.assertEqual(len(result["chapter_summaries"]), 1)
         self.assertIn("Big Chapter", result["summary"])
-        self.assertIn("Bottom line:", result["summary"])
+        self.assertNotIn("Bottom line:", result["summary"])
         self.assertIn("preserves the main claims, examples, and evidence", result["chapter_summaries"][0]["summary"])
 
     async def test_builds_chapter_slices_from_existing_transcript_segments(self):
