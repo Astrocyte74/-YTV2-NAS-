@@ -808,14 +808,14 @@ async def maybe_generate_summary_image(
         prompt = override_prompt.strip()
         prompt_source = "override"
         template_key = None
-        template = PROMPT_TEMPLATES.get("default")
+        template = PROMPT_TEMPLATES.get("default") or PROMPT_TEMPLATES.get("photorealistic")
         enhanced_sentence = ""
     else:
         if freestyle_mode:
             template_key = "ai2_freestyle"
         else:
             template_key = _select_template_key(summary_text, analysis, source_url=source_url)
-        base_template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES["default"]
+        base_template = PROMPT_TEMPLATES.get(template_key) or PROMPT_TEMPLATES.get("photorealistic")
         template, variant_suffix, variant_key = _resolve_template_variant(base_template, cid)
 
         headline = _first_sentence(summary_text)

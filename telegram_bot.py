@@ -288,6 +288,8 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.handle_delete_reports()
         elif self.path == '/api/reprocess':
             self.handle_reprocess_request()
+        elif self.path == '/api/regenerate-image':
+            self.handle_regenerate_image()
         else:
             self.send_error(404, "Endpoint not found")
     
@@ -1155,6 +1157,148 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({'error': 'schedule-failed', 'details': str(exc)}).encode('utf-8'))
     
+    def handle_regenerate_image(self):
+        """POST /api/regenerate-image — trigger on-demand image generation.
+
+        Body: { "video_id": "<id>", "mode": "ai1"|"ai2" }
+        Auth: X-Reprocess-Token == REPROCESS_AUTH_TOKEN.
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length') or 0)
+            if content_length <= 0:
+                self._send_json(400, {'error': 'empty-request'})
+                return
+
+            body = self.rfile.read(content_length)
+            payload = json.loads(body.decode('utf-8'))
+        except Exception as exc:
+            self._send_json(400, {'error': 'invalid-json', 'details': str(exc)})
+            return
+
+        required_token = os.getenv('REPROCESS_AUTH_TOKEN')
+        provided_token = self.headers.get('X-Reprocess-Token')
+        if required_token and provided_token != required_token:
+            self._send_json(403, {'error': 'forbidden'})
+            return
+
+        video_id = (payload.get('video_id') or '').strip()
+        mode = (payload.get('mode') or 'ai1').strip().lower()
+        if not video_id:
+            self._send_json(400, {'error': 'missing-video-id'})
+            return
+
+        async def _generate():
+            from modules.services import summary_image_service
+            import psycopg
+
+            dsn = os.getenv('DATABASE_URL_POSTGRES_NEW') or os.getenv('DATABASE_URL')
+            if not dsn:
+                return {'error': 'no-database', 'details': 'DATABASE_URL not configured'}
+
+            # Load content from DB (include summary for template-based prompt building)
+            with psycopg.connect(dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT video_id, title, summary, analysis_json FROM content WHERE video_id=%s",
+                        (video_id,),
+                    )
+                    row = cur.fetchone()
+            if not row:
+                return {'error': 'not-found', 'details': f'No content for {video_id}'}
+
+            db_vid, title, summary_text, raw_analysis = row
+            analysis = raw_analysis if isinstance(raw_analysis, dict) else (json.loads(raw_analysis) if raw_analysis else {})
+
+            # Build content dict expected by maybe_generate_summary_image
+            content = {
+                'id': f'yt:{video_id}',
+                'video_id': video_id,
+                'title': title or video_id,
+                'metadata': {'title': title or ''},
+                'summary': {'summary': summary_text or ''},
+                'analysis': analysis,
+            }
+
+            image_mode = 'ai2' if mode in ('ai2', 'freestyle') else 'ai1'
+            meta = await summary_image_service.maybe_generate_summary_image(content, mode=image_mode)
+
+            if not meta:
+                return {'status': 'skipped', 'reason': 'provider-offline-or-error', 'video_id': video_id}
+
+            # Upload to dashboard
+            image_path = Path(meta.get('path') or meta.get('relative_path') or '')
+            summary_image_url = meta.get('public_url') or meta.get('relative_path') or ''
+
+            if image_path and image_path.exists():
+                try:
+                    from modules.render_api_client import create_client_from_env
+                    client = create_client_from_env()
+                    upload_info = client.upload_image_file(image_path, f'yt:{video_id}')
+                    summary_image_url = (
+                        (upload_info or {}).get('public_url')
+                        or (upload_info or {}).get('relative_url')
+                        or summary_image_url
+                    )
+                except Exception as exc:
+                    logger.warning('Image upload failed for %s: %s', video_id, exc)
+
+            # Update DB
+            if summary_image_url:
+                try:
+                    variant_entry = meta.get('analysis_variant') or summary_image_service.build_analysis_variant(meta, summary_image_url)
+                    if not variant_entry.get('url'):
+                        variant_entry = dict(variant_entry)
+                        variant_entry['url'] = summary_image_url
+                    if image_mode == 'ai2' and not variant_entry.get('image_mode'):
+                        variant_entry = dict(variant_entry)
+                        variant_entry['image_mode'] = 'ai2'
+
+                    selected_url = summary_image_url if image_mode != 'ai2' else None
+                    updated_analysis = summary_image_service.apply_analysis_variant(
+                        analysis,
+                        variant_entry,
+                        selected_url=selected_url,
+                        prompt=meta.get('prompt'),
+                        model=meta.get('model'),
+                    )
+                    target_url = summary_image_url if image_mode != 'ai2' else None
+
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE content SET summary_image_url=%s, analysis_json=%s, updated_at=now() WHERE video_id=%s",
+                                (target_url, json.dumps(updated_analysis), video_id),
+                            )
+                            conn.commit()
+                except Exception as exc:
+                    logger.warning('DB update failed for %s: %s', video_id, exc)
+
+            return {
+                'status': 'generated',
+                'video_id': video_id,
+                'mode': image_mode,
+                'url': summary_image_url,
+                'prompt': meta.get('prompt'),
+            }
+
+        try:
+            loop = BOT_INSTANCE.loop if BOT_INSTANCE and BOT_INSTANCE.loop else asyncio.get_event_loop()
+            future = asyncio.run_coroutine_threadsafe(_generate(), loop)
+            result = future.result(timeout=120)  # Image gen can take a while
+
+            code = 200 if result.get('status') == 'generated' else 202
+            self._send_json(code, result)
+        except Exception as exc:
+            logger.exception('regenerate-image failed')
+            self._send_json(500, {'error': 'generation-failed', 'details': str(exc)})
+
+    def _send_json(self, code, obj):
+        self.send_response(code)
+        self.send_cors_headers()
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(obj, ensure_ascii=False).encode('utf-8'))
+
     def serve_api_report_detail(self, report_id):
         """Serve individual report API endpoint"""
         try:
