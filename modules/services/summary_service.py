@@ -175,6 +175,12 @@ def _find_existing_report_for_content_id(handler, content_id: Optional[str]) -> 
     return None, None
 
 
+def _load_existing_report(handler, content_id: str) -> Optional[Dict[str, Any]]:
+    """Load existing report JSON for a content ID, or None."""
+    _, data = _find_existing_report_for_content_id(handler, content_id)
+    return data
+
+
 async def _safe_edit_status(query, text: str, reply_markup=None):
     while True:
         try:
@@ -1973,34 +1979,64 @@ async def reprocess_single_summary(
             logging.info(f"Reprocess using LLM: {new_provider}/{new_model}")
 
     try:
-        # Route to the correct processing method based on URL source,
-        # same logic as process_content_summary() uses for initial processing.
+        # Try to reuse stored transcript from existing report — avoids re-fetching
+        # source URLs that may now be behind Cloudflare/403.
         summarizer = handler.summarizer
-        source = "youtube"
-        if video_url:
-            if handler.reddit_url_pattern.search(video_url):
-                source = "reddit"
-            elif not handler.youtube_url_pattern.search(video_url):
-                source = "web"
+        result = None
+        existing_report_data = _load_existing_report(handler, video_id)
+        stored_transcript = ""
+        stored_metadata = {}
+        if existing_report_data:
+            stored_transcript = (existing_report_data.get("transcript") or "").strip()
+            stored_metadata = existing_report_data.get("video") or existing_report_data.get("metadata") or {}
 
-        if source == "reddit":
-            result = await summarizer.process_reddit_thread(
-                video_url,
+        if stored_transcript and len(stored_transcript) >= 50:
+            # Determine source from URL for metadata purposes
+            source = "youtube"
+            if video_url:
+                if handler.reddit_url_pattern.search(video_url):
+                    source = "reddit"
+                elif not handler.youtube_url_pattern.search(video_url):
+                    source = "web"
+            content_id = existing_report_data.get("content_id") or existing_report_data.get("id") or video_id
+            logging.info("♻️ Reprocess reusing stored transcript (%d chars) for %s", len(stored_transcript), video_id)
+            result = await summarizer.process_text_content(
+                content_id=content_id,
+                text=stored_transcript,
+                metadata=stored_metadata,
                 summary_type=summary_type,
                 proficiency_level=proficiency,
+                source=source,
+                source_metadata=existing_report_data.get("source_metadata"),
             )
-        elif source == "web":
-            result = await summarizer.process_web_page(
-                video_url,
-                summary_type=summary_type,
-                proficiency_level=proficiency,
-            )
-        else:
-            result = await summarizer.process_video(
-                video_url,
-                summary_type=summary_type,
-                proficiency_level=proficiency,
-            )
+
+        if not result:
+            # No stored transcript — fall back to full source extraction
+            source = "youtube"
+            if video_url:
+                if handler.reddit_url_pattern.search(video_url):
+                    source = "reddit"
+                elif not handler.youtube_url_pattern.search(video_url):
+                    source = "web"
+
+            if source == "reddit":
+                result = await summarizer.process_reddit_thread(
+                    video_url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency,
+                )
+            elif source == "web":
+                result = await summarizer.process_web_page(
+                    video_url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency,
+                )
+            else:
+                result = await summarizer.process_video(
+                    video_url,
+                    summary_type=summary_type,
+                    proficiency_level=proficiency,
+                )
 
         if not result or result.get('error'):
             error_msg = result.get('error') if isinstance(result, dict) else 'unknown'
