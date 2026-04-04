@@ -1973,11 +1973,34 @@ async def reprocess_single_summary(
             logging.info(f"Reprocess using LLM: {new_provider}/{new_model}")
 
     try:
-        result = await handler.summarizer.process_video(
-            video_url,
-            summary_type=summary_type,
-            proficiency_level=proficiency,
-        )
+        # Route to the correct processing method based on URL source,
+        # same logic as process_content_summary() uses for initial processing.
+        summarizer = handler.summarizer
+        source = "youtube"
+        if video_url:
+            if handler.reddit_url_pattern.search(video_url):
+                source = "reddit"
+            elif not handler.youtube_url_pattern.search(video_url):
+                source = "web"
+
+        if source == "reddit":
+            result = await summarizer.process_reddit_thread(
+                video_url,
+                summary_type=summary_type,
+                proficiency_level=proficiency,
+            )
+        elif source == "web":
+            result = await summarizer.process_web_page(
+                video_url,
+                summary_type=summary_type,
+                proficiency_level=proficiency,
+            )
+        else:
+            result = await summarizer.process_video(
+                video_url,
+                summary_type=summary_type,
+                proficiency_level=proficiency,
+            )
 
         if not result or result.get('error'):
             error_msg = result.get('error') if isinstance(result, dict) else 'unknown'
