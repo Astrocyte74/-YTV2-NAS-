@@ -1980,8 +1980,17 @@ async def reprocess_single_summary(
         )
 
         if not result or result.get('error'):
-            job_result.update({'status': 'error', 'error': result.get('error') if isinstance(result, dict) else 'unknown'})
+            error_msg = result.get('error') if isinstance(result, dict) else 'unknown'
+            job_result.update({'status': 'error', 'error': error_msg})
             metrics.record_reprocess_result(False)
+            emit_report_event(
+                'reprocess-error',
+                {
+                    'video_id': video_id,
+                    'summary_type': summary_type,
+                    'error': error_msg,
+                },
+            )
             return job_result
 
         report_dict = create_report_from_youtube_summarizer(result)
