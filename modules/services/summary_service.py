@@ -1649,17 +1649,6 @@ async def process_content_summary(
                 tts_base = os.getenv('TTSHUB_API_BASE') or ''
                 img_enabled = os.getenv('SUMMARY_IMAGE_ENABLED','false').lower() in ('1','true','yes','on')
                 if tts_base and img_enabled:
-                    from modules.services import draw_service as _ds
-                    # Use meta mode for health check (/api/meta returns JSON, /drawthings/health returns HTML)
-                    health = None
-                    health_error = None
-                    try:
-                        health = await _ds.fetch_drawthings_health(tts_base, ttl=0, force_refresh=True)
-                    except Exception as exc:
-                        health_error = exc
-                        logging.debug("summary image health probe failed: %s", exc)
-
-                    reachable = bool((health or {}).get('reachable', False)) if health is not None else False
                     # Detect if report already has an image URL
                     has_image = False
                     try:
@@ -1671,9 +1660,8 @@ async def process_content_summary(
                     except Exception:
                         pass
 
-                    # Always enqueue if no image exists (queue processor will generate immediately if hub is online)
+                    # Always enqueue if no image exists — queue processor handles hub availability
                     if not has_image:
-                        # Build minimal content payload and enqueue if missing
                         try:
                             from modules import image_queue as _iq
                             content_id_for_job = result.get('id') or ledger_id
@@ -1686,30 +1674,12 @@ async def process_content_summary(
                                     'summary': report_dict.get('summary') or {},
                                     'analysis': report_dict.get('analysis') or {},
                                 }
-                                _iq.enqueue({'mode':'summary_image','content':payload,'reason':'summary_offline_enqueue'})
-                                notice = f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))}"
-                                if not reachable:
-                                    notice += " (hub offline, will retry when online)"
-                                try:
-                                    await query.message.reply_text(notice, parse_mode=ParseMode.MARKDOWN)
-                                except Exception:
-                                    await _safe_edit_status(query, notice)
-                        except Exception:
-                            pass
-
-                    # Additionally, if a pending file exists now (idempotent queue), surface a visible notice
-                    try:
-                        content_id_for_job = result.get('id') or ledger_id
-                        if _image_queue_has_job(content_id_for_job):
-                            notice = f"🖼️ Queued image: {handler._escape_markdown(str(content_id_for_job))}"
-                            try:
-                                await query.message.reply_text(notice, parse_mode=ParseMode.MARKDOWN)
-                            except Exception:
-                                await _safe_edit_status(query, notice)
-                    except Exception:
-                        pass
+                                _iq.enqueue({'mode':'summary_image','content':payload,'reason':'summary_enqueue'})
+                                logging.info("🖼️ Enqueued image job for %s", content_id_for_job)
+                        except Exception as enqueue_exc:
+                            logging.warning("Image enqueue failed for %s: %s", content_id_for_job, enqueue_exc)
             except Exception as _exc:
-                logging.debug("image enqueue/notify skipped: %s", _exc)
+                logging.warning("image enqueue/notify skipped: %s", _exc)
 
             is_audio_summary = summary_type == "audio" or summary_type.startswith("audio-fr") or summary_type.startswith("audio-es")
 

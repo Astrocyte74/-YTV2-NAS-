@@ -418,67 +418,8 @@ def _seed_prompt_override_jobs_for_mode(
 
 
 def drain_once(limit: Optional[int] = None) -> int:
-    # Preflight: perform one lightweight health probe; if unreachable, skip all jobs
-    try:
-        import os as _os
-        from modules.services import draw_service as _ds
-        from modules.services import auto1111_service as _a1111
-        providers = (_os.getenv("SUMMARY_IMAGE_PROVIDERS") or "drawthings").strip()
-        provider_list = [p.strip().lower() for p in providers.split(",") if p.strip()]
-        ok = False
-        any_configured = False
-        for provider in provider_list:
-            try:
-                if provider in {"draw", "drawthings", "hub"}:
-                    base = _os.getenv("TTSHUB_API_BASE") or ""
-                    if not base:
-                        continue
-                    any_configured = True
-                    health = asyncio.run(_ds.fetch_drawthings_health(base, ttl=0, force_refresh=True))
-                    if bool((health or {}).get("reachable", False)):
-                        ok = True
-                        break
-                elif provider in {"auto1111", "automatic1111", "a1111", "auto"}:
-                    base = (_os.getenv("AUTOMATIC1111_BASE_URL") or "").strip().rstrip("/")
-                    if not base:
-                        continue
-                    any_configured = True
-                    health = asyncio.run(_a1111.fetch_auto1111_health(base, ttl=0, force_refresh=True))
-                    if bool((health or {}).get("reachable", False)):
-                        ok = True
-                        break
-                elif provider in {"flux2", "flux.2", "flux"}:
-                    # Flux.2 via OpenRouter (gated by FLUX2_ENABLED)
-                    from modules.services import flux2_service as _flux2
-                    if not _flux2.is_enabled():
-                        continue
-                    any_configured = True
-                    health = asyncio.run(_flux2.fetch_flux2_health())
-                    if bool((health or {}).get("reachable", False)):
-                        ok = True
-                        break
-                elif provider in {"zimage", "z-image"}:
-                    base = (_os.getenv("ZIMAGE_BASE_URL") or "").strip().rstrip("/")
-                    if not base:
-                        continue
-                    any_configured = True
-                    try:
-                        import requests as _requests
-                        resp = _requests.get(f"{base}/health", timeout=4)
-                        if resp.status_code == 200:
-                            ok = True
-                            break
-                    except Exception:
-                        pass
-            except Exception as provider_exc:
-                logging.debug("Provider %s health check failed: %s", provider, provider_exc)
-                continue
-        if any_configured and not ok:
-            logging.info("Image drain: no providers reachable; skipping this pass")
-            return 0
-    except Exception as _exc:
-        logging.info("Image drain: health probe failed; skipping this pass")
-        return 0
+    # No preflight health probe — just try jobs directly.
+    # If a provider is down, the job stays in the queue for the next pass.
 
     try:
         seed_limit = int(os.getenv("SUMMARY_IMAGE_PROMPT_SEED_LIMIT", "5"))
