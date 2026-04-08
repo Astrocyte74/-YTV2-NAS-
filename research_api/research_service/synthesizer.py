@@ -18,7 +18,7 @@ from .config import (
     SYNTH_MAX_TOKENS,
     SYNTH_TIMEOUT_SECONDS,
 )
-from .llm import chat_text_with_metadata
+from .llm import chat_text_with_metadata, stream_inception_chat
 from .models import ResearchBatchResult, ResearchSource
 
 logger = logging.getLogger(__name__)
@@ -659,3 +659,79 @@ def answer_report_chat(
             f"{source_tail}",
             {"llm_provider": "fallback", "llm_model": "deterministic"},
         )
+
+
+def stream_report_chat(
+    *,
+    source_context: dict,
+    report_answer: str,
+    report_sources: list[ResearchSource],
+    user_question: str,
+    history: list[dict[str, str]] | None = None,
+    thread_turns: list[dict] | None = None,
+):
+    """Streaming version of answer_report_chat. Yields (event_type, data) tuples."""
+    report_text = str(report_answer or "").strip()
+    if not report_text:
+        yield ("error", "No report or summary content available.")
+        return
+
+    history_lines: list[str] = []
+    for turn in (history or [])[-8:]:
+        role = str(turn.get("role") or "").strip().lower()
+        content = str(turn.get("content") or "").strip()
+        if role in {"user", "assistant"} and content:
+            history_lines.append(f"{role}: {content}")
+    history_block = "\n".join(history_lines) or "(none)"
+
+    thread_lines: list[str] = []
+    for index, turn in enumerate((thread_turns or [])[-6:], start=max(1, len(thread_turns or []) - 5)):
+        approved_questions = [str(item).strip() for item in (turn.get("approved_questions") or []) if str(item).strip()]
+        if approved_questions:
+            thread_lines.append(f"Turn {index} questions: {'; '.join(approved_questions)}")
+        excerpt = str(turn.get("answer") or "").strip()
+        if excerpt:
+            thread_lines.append(f"Turn {index} excerpt:\n{excerpt[:1500]}")
+    thread_block = "\n\n".join(thread_lines) or "(none)"
+
+    source_urls = "\n".join(f"- {src.url}" for src in report_sources[:20]) or "(none)"
+    truncated_report = report_text[:12000]
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a grounded assistant answering questions about an existing report. "
+                "Use ONLY the provided report text, prior thread context, and source URLs. "
+                "Do not claim to have checked the live web. If the user asks for current/latest/fresh information "
+                "or for facts not supported by the report, say that a fresh Deep Research run is needed. "
+                "Answer directly, stay concise, and include a short 'Sources' section only when useful."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Source title: {source_context.get('title', 'Unknown')}\n"
+                f"Source URL: {source_context.get('url', 'N/A')}\n"
+                f"Source type: {source_context.get('type', 'unknown')}\n\n"
+                f"Research thread context:\n{thread_block}\n\n"
+                f"Current report:\n{truncated_report}\n\n"
+                f"Known source URLs:\n{source_urls}\n\n"
+                f"Recent chat:\n{history_block}\n\n"
+                f"User question: {user_question}"
+            ),
+        },
+    ]
+
+    try:
+        yield from stream_inception_chat(
+            messages=messages,
+            max_tokens=1400,
+            reasoning_effort="low",
+            temperature=0.1,
+            timeout=SYNTH_TIMEOUT_SECONDS,
+            diffusing=True,
+            reasoning_summary=True,
+        )
+    except Exception as e:
+        yield ("error", str(e))

@@ -595,5 +595,112 @@ class FollowUpStore:
             )
             conn.commit()
 
+    # ── Chat turn persistence ──────────────────────────────────────────
+
+    def store_follow_up_chat_turn(
+        self,
+        *,
+        follow_up_run_id: int,
+        video_id: str,
+        question: str,
+        answer: str,
+        sources: list[dict[str, Any]] | None = None,
+        chat_meta: dict[str, Any] | None = None,
+        summary_id: int | None = None,
+    ) -> int:
+        """Persist one user-question / assistant-answer pair. Returns the new row id."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO follow_up_chat_turns
+                  (follow_up_run_id, video_id, summary_id, question, answer, sources, chat_meta)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
+                RETURNING id
+                """,
+                (
+                    follow_up_run_id,
+                    video_id,
+                    summary_id,
+                    question,
+                    answer,
+                    json.dumps(sources or []),
+                    json.dumps(chat_meta or {}),
+                ),
+            )
+            row = cur.fetchone()
+            conn.commit()
+        return int(row[0])
+
+    def get_follow_up_chat_turns(
+        self,
+        follow_up_run_id: int,
+        *,
+        video_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return persisted chat turns for a research run, oldest first."""
+        params: list[Any] = [follow_up_run_id]
+        where_video_id = ""
+        if video_id:
+            params.append(video_id)
+            where_video_id = " AND video_id = %s"
+
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, follow_up_run_id, video_id, summary_id, question, answer, sources, chat_meta, created_at
+                FROM follow_up_chat_turns
+                WHERE follow_up_run_id = %s{where_video_id}
+                ORDER BY created_at ASC, id ASC
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+
+        return [
+            {
+                "id": int(row[0]),
+                "follow_up_run_id": int(row[1]),
+                "video_id": str(row[2]),
+                "summary_id": _coerce_optional_int(row[3]),
+                "question": str(row[4]),
+                "answer": str(row[5]),
+                "sources": _coerce_json(row[6], []),
+                "chat_meta": _coerce_json(row[7], {}),
+                "created_at": row[8].isoformat() if isinstance(row[8], datetime) else row[8],
+            }
+            for row in rows
+        ]
+
+    def delete_follow_up_chat_turn(self, turn_id: int, *, video_id: str | None = None) -> bool:
+        """Delete a single chat turn. Returns True if a row was deleted."""
+        params: list[Any] = [turn_id]
+        where_video_id = ""
+        if video_id:
+            params.append(video_id)
+            where_video_id = " AND video_id = %s"
+
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                DELETE FROM follow_up_chat_turns
+                WHERE id = %s{where_video_id}
+                """,
+                tuple(params),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+        return deleted > 0
+
+    def delete_follow_up_chat_turns_by_run(self, follow_up_run_id: int) -> int:
+        """Delete all chat turns for a research run. Returns count of deleted rows."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM follow_up_chat_turns WHERE follow_up_run_id = %s",
+                (follow_up_run_id,),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+        return deleted
+
 
 __all__ = ["FollowUpStore", "ResolvedFollowUpContext"]

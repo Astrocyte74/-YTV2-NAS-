@@ -30,7 +30,7 @@ from .follow_up import (
 )
 from .models import ResearchRunResult
 from .providers.tavily import tavily_research_supported
-from .synthesizer import answer_report_chat, synthesize_answer, synthesize_follow_up
+from .synthesizer import answer_report_chat, stream_report_chat, synthesize_answer, synthesize_follow_up
 
 logger = logging.getLogger(__name__)
 

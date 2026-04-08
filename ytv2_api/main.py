@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import json
 import os
+
+logger = logging.getLogger(__name__)
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Optional, Dict, Any
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, status, Header, Body, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .models import (
@@ -38,6 +41,7 @@ from .models import (
     FollowUpThreadTurn,
     FollowUpChatRequest,
     FollowUpChatResponse,
+    FollowUpChatTurnResponse,
 )
 
 # Lazy-initialized service instances
@@ -537,6 +541,7 @@ def get_research_service():
                 run_follow_up_research,
                 get_research_capabilities,
                 answer_follow_up_chat,
+                stream_report_chat,
             )
             from research_service.follow_up import build_cache_key
             _research_service = {
@@ -545,6 +550,7 @@ def get_research_service():
                 'get_research_capabilities': get_research_capabilities,
                 'build_cache_key': build_cache_key,
                 'answer_follow_up_chat': answer_follow_up_chat,
+                'stream_report_chat': stream_report_chat,
             }
             print("[YTV2 API] Research service loaded successfully")
         except Exception as e:
@@ -965,9 +971,14 @@ async def get_follow_up_thread_endpoint(
             preferred_variant=preferred_variant or "deep-research",
         )
         if active_run is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No persisted Deep Research thread was found for this item."
+            # No research run yet — return empty response instead of 404
+            resolved_video_id = str((resolved.video_id if resolved else video_id) or video_id)
+            return FollowUpThreadResponse(
+                video_id=resolved_video_id,
+                root_follow_up_run_id=None,
+                current_follow_up_run_id=None,
+                turns=[],
+                chat_turns=[],
             )
 
         resolved_video_id = str((active_run.get("video_id") or (resolved.video_id if resolved else video_id)) or video_id)
@@ -975,11 +986,19 @@ async def get_follow_up_thread_endpoint(
         turns = [_build_follow_up_thread_turn(turn) for turn in thread]
         root_run_id = turns[0].follow_up_run_id if turns else None
         current_run_id = turns[-1].follow_up_run_id if turns else None
+
+        # Load persisted chat turns for the current run
+        chat_turns_raw = store.get_follow_up_chat_turns(int(active_run["run_id"]), video_id=resolved_video_id)
+        chat_turns = [
+            FollowUpChatTurnResponse(**turn) for turn in chat_turns_raw
+        ]
+
         return FollowUpThreadResponse(
             video_id=resolved_video_id,
             root_follow_up_run_id=root_run_id,
             current_follow_up_run_id=current_run_id,
             turns=turns,
+            chat_turns=chat_turns,
         )
     except LookupError as e:
         raise HTTPException(
@@ -1001,7 +1020,7 @@ async def answer_follow_up_chat_endpoint(
     _auth: None = Depends(require_auth),
     _service: None = Depends(require_research_service),
 ):
-    """Answer a lightweight question using the current deep-research report only."""
+    """Answer a lightweight question using the current deep-research report or summary."""
     service = get_research_service()
     store = get_follow_up_store()
 
@@ -1015,41 +1034,75 @@ async def answer_follow_up_chat_endpoint(
             summary=request.summary,
             source_context=dict(request.source_context),
         )
-        if active_run is None:
+
+        # Determine the report context: research run if available, else resolved summary
+        if active_run is not None:
+            report_answer = str(active_run.get("answer") or request.summary or "")
+            report_sources = list(active_run.get("sources") or [])
+            report_video_id = str(active_run.get("video_id") or request.video_id)
+            report_run_id = int(active_run["run_id"])
+        elif resolved is not None:
+            report_answer = str(resolved.summary or request.summary or "")
+            report_sources = []
+            report_video_id = str(resolved.video_id or request.video_id)
+            report_run_id = None
+        else:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="No persisted Deep Research run was found for this item."
+                detail="No summary or research context found for this item."
             )
 
         resolved_source_context = dict(request.source_context or {})
         if resolved is not None:
             resolved_source_context = dict(resolved.source_context or {})
-        resolved_source_context.setdefault("video_id", active_run.get("video_id") or request.video_id)
-        resolved_source_context.setdefault("id", active_run.get("video_id") or request.video_id)
+        resolved_source_context.setdefault("video_id", report_video_id)
+        resolved_source_context.setdefault("id", report_video_id)
 
-        thread_turns = store.get_research_thread(int(active_run["run_id"]), video_id=str(active_run.get("video_id") or request.video_id))
+        thread_turns = []
+        if report_run_id is not None:
+            thread_turns = store.get_research_thread(report_run_id, video_id=report_video_id)
+
         answer, llm_info, serialized_sources = service["answer_follow_up_chat"](
             source_context=resolved_source_context,
-            report_answer=str(active_run.get("answer") or request.summary or ""),
-            report_sources=list(active_run.get("sources") or []),
+            report_answer=report_answer,
+            report_sources=report_sources,
             user_question=request.question,
             history=[{"role": turn.role, "content": turn.content} for turn in request.history],
             thread_turns=thread_turns,
         )
         response_meta = {
             "mode": "report-chat",
-            "follow_up_run_id": int(active_run["run_id"]),
+            "follow_up_run_id": report_run_id,
             "source_count": len(serialized_sources),
             "thread_turn_count": len(thread_turns),
             "llm_provider": llm_info.get("llm_provider", "unknown"),
             "llm_model": llm_info.get("llm_model", "unknown"),
         }
+
+        persisted = False
+        if request.persist and report_run_id is not None:
+            try:
+                resolved_summary_id = resolved.summary_id if resolved else None
+                store.store_follow_up_chat_turn(
+                    follow_up_run_id=report_run_id,
+                    video_id=report_video_id,
+                    question=request.question,
+                    answer=answer,
+                    sources=[s if isinstance(s, dict) else s.__dict__ for s in serialized_sources],
+                    chat_meta=response_meta,
+                    summary_id=resolved_summary_id,
+                )
+                persisted = True
+            except Exception as persist_err:
+                logger.warning("Failed to persist chat turn for run %s: %s", report_run_id, persist_err)
+
         return FollowUpChatResponse(
-            video_id=str(active_run.get("video_id") or request.video_id),
-            follow_up_run_id=int(active_run["run_id"]),
+            video_id=report_video_id,
+            follow_up_run_id=report_run_id,
             answer=answer,
             sources=_build_research_sources(serialized_sources),
             meta=response_meta,
+            persisted=persisted,
         )
     except LookupError as e:
         raise HTTPException(
@@ -1097,6 +1150,116 @@ async def check_cached_research(
         ),
         cache_key=cache_key,
     )
+
+
+@app.post("/api/research/follow-up/chat/stream")
+async def stream_follow_up_chat_endpoint(
+    request: FollowUpChatRequest,
+    _auth: None = Depends(require_auth),
+    _service: None = Depends(require_research_service),
+):
+    """Stream a grounded chat answer using Mercury 2 diffusing."""
+    service = get_research_service()
+    store = get_follow_up_store()
+
+    active_run, resolved = _resolve_active_follow_up_run(
+        store=store,
+        video_id=request.video_id,
+        follow_up_run_id=request.follow_up_run_id,
+        summary_id=request.summary_id,
+        preferred_variant=request.preferred_variant or "deep-research",
+        summary=request.summary,
+        source_context=dict(request.source_context),
+    )
+
+    if active_run is not None:
+        report_answer = str(active_run.get("answer") or request.summary or "")
+        report_sources = list(active_run.get("sources") or [])
+        report_video_id = str(active_run.get("video_id") or request.video_id)
+        report_run_id = int(active_run["run_id"])
+    elif resolved is not None:
+        report_answer = str(resolved.summary or request.summary or "")
+        report_sources = []
+        report_video_id = str(resolved.video_id or request.video_id)
+        report_run_id = None
+    else:
+        raise HTTPException(status_code=404, detail="No summary or research context found for this item.")
+
+    resolved_source_context = dict(request.source_context or {})
+    if resolved is not None:
+        resolved_source_context = dict(resolved.source_context or {})
+    resolved_source_context.setdefault("video_id", report_video_id)
+    resolved_source_context.setdefault("id", report_video_id)
+
+    thread_turns = []
+    if report_run_id is not None:
+        thread_turns = store.get_research_thread(report_run_id, video_id=report_video_id)
+
+    full_answer = []
+
+    def event_stream():
+        for event_type, data in service["stream_report_chat"](
+            source_context=resolved_source_context,
+            report_answer=report_answer,
+            report_sources=report_sources,
+            user_question=request.question,
+            history=[{"role": turn.role, "content": turn.content} for turn in request.history],
+            thread_turns=thread_turns,
+        ):
+            if event_type == "token":
+                full_answer.append(data)
+                yield f"data: {json.dumps({'type': 'token', 'content': data})}\n\n"
+            elif event_type == "reasoning":
+                yield f"data: {json.dumps({'type': 'reasoning', 'content': data})}\n\n"
+            elif event_type == "done":
+                # Persist after streaming completes
+                answer_text = "".join(full_answer)
+                if request.persist and report_run_id is not None and answer_text:
+                    try:
+                        store.store_follow_up_chat_turn(
+                            follow_up_run_id=report_run_id,
+                            video_id=report_video_id,
+                            question=request.question,
+                            answer=answer_text,
+                            sources=[],
+                            chat_meta={"mode": "report-chat-stream", "follow_up_run_id": report_run_id},
+                            summary_id=resolved.summary_id if resolved else None,
+                        )
+                    except Exception as persist_err:
+                        logger.warning("Failed to persist streamed chat turn: %s", persist_err)
+                yield f"data: {json.dumps({'type': 'done', 'persisted': request.persist and report_run_id is not None})}\n\n"
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'content': data})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.delete("/api/research/follow-up/chat-turns/{turn_id}")
+async def delete_follow_up_chat_turn_endpoint(
+    turn_id: int,
+    video_id: Optional[str] = None,
+    _auth: None = Depends(require_auth),
+):
+    """Delete a single persisted chat turn."""
+    store = get_follow_up_store()
+    deleted = store.delete_follow_up_chat_turn(turn_id, video_id=video_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Chat turn {turn_id} not found."
+        )
+    return {"deleted": True, "turn_id": turn_id}
+
+
+@app.delete("/api/research/follow-up/chat-turns")
+async def delete_follow_up_chat_turns_by_run_endpoint(
+    follow_up_run_id: int,
+    _auth: None = Depends(require_auth),
+):
+    """Delete all chat turns for a research run."""
+    store = get_follow_up_store()
+    deleted_count = store.delete_follow_up_chat_turns_by_run(follow_up_run_id)
+    return {"deleted": True, "follow_up_run_id": follow_up_run_id, "count": deleted_count}
 
 
 @app.get("/")

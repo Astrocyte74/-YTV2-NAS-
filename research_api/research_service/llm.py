@@ -90,6 +90,74 @@ def _post_inception(payload: dict[str, Any], timeout: float, model_override: str
     return LLMResponse(data=data, provider="inception", model=str(model))
 
 
+def stream_inception_chat(
+    *,
+    messages: list[dict[str, str]],
+    max_tokens: int = 2048,
+    reasoning_effort: str = "low",
+    temperature: float = 0.1,
+    timeout: float = 90.0,
+    diffusing: bool = True,
+    reasoning_summary: bool = True,
+):
+    """Stream Mercury 2 chat with diffusing support. Yields (event_type, data) tuples.
+
+    Event types: "token", "reasoning", "done", "error"
+    """
+    if not INCEPTION_API_KEY:
+        raise RuntimeError("INCEPTION_API_KEY is not configured")
+
+    payload = {
+        "model": INCEPTION_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "reasoning_effort": reasoning_effort,
+        "reasoning_summary": reasoning_summary,
+        "stream": True,
+        "diffusing": diffusing,
+    }
+    headers = {
+        "Authorization": f"Bearer {INCEPTION_API_KEY}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        resp = requests.post(INCEPTION_URL, headers=headers, json=payload, timeout=timeout, stream=True)
+        resp.raise_for_status()
+    except Exception as e:
+        yield ("error", str(e))
+        return
+
+    for line in resp.iter_lines(decode_unicode=True):
+        if not line:
+            continue
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:].strip()
+        if data_str == "[DONE]":
+            yield ("done", "")
+            return
+        try:
+            data = json.loads(data_str)
+        except Exception:
+            continue
+
+        choices = data.get("choices") or []
+        if not choices:
+            continue
+        delta = (choices[0] or {}).get("delta", {})
+        content = delta.get("content")
+        if content:
+            yield ("token", content)
+
+        reasoning = delta.get("reasoning_summary") or delta.get("reasoning")
+        if reasoning:
+            yield ("reasoning", reasoning)
+
+    yield ("done", "")
+
+
 def _post_openrouter(payload: dict[str, Any], timeout: float, model_override: str | None = None) -> LLMResponse:
     """Call OpenRouter API as fallback."""
     if not OPENROUTER_API_KEY:

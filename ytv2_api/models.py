@@ -217,6 +217,7 @@ class FollowUpThreadResponse(BaseModel):
     root_follow_up_run_id: Optional[int] = Field(None, description="First persisted run in the thread")
     current_follow_up_run_id: Optional[int] = Field(None, description="Currently selected persisted run")
     turns: List[FollowUpThreadTurn] = Field(default_factory=list, description="Ordered persisted thread turns")
+    chat_turns: List["FollowUpChatTurnResponse"] = Field(default_factory=list, description="Persisted follow-up chat exchanges")
 
 
 class FollowUpChatMessage(BaseModel):
@@ -237,6 +238,7 @@ class FollowUpChatRequest(BaseModel):
     source_context: Dict[str, Any] = Field(default_factory=dict, description="Source metadata for the report")
     question: str = Field(..., min_length=1, description="User follow-up question about the existing report")
     history: List[FollowUpChatMessage] = Field(default_factory=list, description="Recent lightweight chat turns")
+    persist: bool = Field(True, description="Whether to persist the chat turn to the database")
 
 
 class FollowUpChatResponse(BaseModel):
@@ -247,3 +249,18 @@ class FollowUpChatResponse(BaseModel):
     answer: str = Field(..., description="Grounded response using the existing report context")
     sources: List[ResearchSource] = Field(default_factory=list, description="Sources inherited from the current report")
     meta: Dict[str, Any] = Field(default_factory=dict, description="Chat metadata")
+    persisted: bool = Field(False, description="Whether the chat turn was persisted to the database")
+
+
+class FollowUpChatTurnResponse(BaseModel):
+    """A persisted follow-up chat turn (user question + assistant answer)."""
+
+    id: int = Field(..., description="Chat turn row id")
+    follow_up_run_id: int = Field(..., description="Parent research run identifier")
+    video_id: str = Field(..., description="Content identifier")
+    summary_id: Optional[int] = Field(None, description="Summary revision identifier")
+    question: str = Field(..., description="User question")
+    answer: str = Field(..., description="Assistant answer")
+    sources: List[Dict[str, Any]] = Field(default_factory=list, description="Sources used")
+    chat_meta: Dict[str, Any] = Field(default_factory=dict, description="Lightweight metadata")
+    created_at: Optional[str] = Field(None, description="When the turn was persisted")
