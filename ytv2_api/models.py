@@ -256,7 +256,7 @@ class FollowUpChatTurnResponse(BaseModel):
     """A persisted follow-up chat turn (user question + assistant answer)."""
 
     id: int = Field(..., description="Chat turn row id")
-    follow_up_run_id: int = Field(..., description="Parent research run identifier")
+    follow_up_run_id: Optional[int] = Field(None, description="Parent research run identifier (null for pre-research chat)")
     video_id: str = Field(..., description="Content identifier")
     summary_id: Optional[int] = Field(None, description="Summary revision identifier")
     question: str = Field(..., description="User question")

@@ -609,14 +609,18 @@ def answer_report_chat(
     source_urls = "\n".join(f"- {src.url}" for src in report_sources[:20]) or "(none)"
     truncated_report = report_text[:12000]
 
+    # Detect whether we have a full research report or just a summary
+    has_research = bool(report_sources) or "research" in (source_context.get("type") or "").lower()
+    context_label = "Deep Research report" if has_research else "content summary"
+
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a grounded assistant answering questions about an existing Deep Research report. "
-                "Use ONLY the provided report text, prior thread context, and source URLs. "
+                f"You are a grounded assistant answering questions about an existing {context_label}. "
+                "Use ONLY the provided context text, prior thread context, and source URLs. "
                 "Do not claim to have checked the live web. If the user asks for current/latest/fresh information "
-                "or for facts not supported by the report, say that a fresh Deep Research run is needed. "
+                "or for facts not supported by the context, say that a fresh Deep Research run is needed. "
                 "Answer directly, stay concise, and include a short 'Sources' section only when useful."
             ),
         },
@@ -627,7 +631,7 @@ def answer_report_chat(
                 f"Source URL: {source_context.get('url', 'N/A')}\n"
                 f"Source type: {source_context.get('type', 'unknown')}\n\n"
                 f"Persisted research thread context:\n{thread_block}\n\n"
-                f"Current Deep Research report:\n{truncated_report}\n\n"
+                f"Current {context_label}:\n{truncated_report}\n\n"
                 f"Known source URLs:\n{source_urls}\n\n"
                 f"Recent chat:\n{history_block}\n\n"
                 f"User question: {user_question}"

@@ -971,14 +971,18 @@ async def get_follow_up_thread_endpoint(
             preferred_variant=preferred_variant or "deep-research",
         )
         if active_run is None:
-            # No research run yet — return empty response instead of 404
+            # No research run yet — load pre-research chat turns if any
             resolved_video_id = str((resolved.video_id if resolved else video_id) or video_id)
+            pre_research_turns = store.get_follow_up_chat_turns(video_id=resolved_video_id)
+            chat_turns = [
+                FollowUpChatTurnResponse(**turn) for turn in pre_research_turns
+            ]
             return FollowUpThreadResponse(
                 video_id=resolved_video_id,
                 root_follow_up_run_id=None,
                 current_follow_up_run_id=None,
                 turns=[],
-                chat_turns=[],
+                chat_turns=chat_turns,
             )
 
         resolved_video_id = str((active_run.get("video_id") or (resolved.video_id if resolved else video_id)) or video_id)
@@ -1080,7 +1084,7 @@ async def answer_follow_up_chat_endpoint(
         }
 
         persisted = False
-        if request.persist and report_run_id is not None:
+        if request.persist:
             try:
                 resolved_summary_id = resolved.summary_id if resolved else None
                 store.store_follow_up_chat_turn(
@@ -1214,7 +1218,7 @@ async def stream_follow_up_chat_endpoint(
             elif event_type == "done":
                 # Persist after streaming completes
                 answer_text = "".join(full_answer)
-                if request.persist and report_run_id is not None and answer_text:
+                if request.persist and answer_text:
                     try:
                         store.store_follow_up_chat_turn(
                             follow_up_run_id=report_run_id,
@@ -1227,7 +1231,7 @@ async def stream_follow_up_chat_endpoint(
                         )
                     except Exception as persist_err:
                         logger.warning("Failed to persist streamed chat turn: %s", persist_err)
-                yield f"data: {json.dumps({'type': 'done', 'persisted': request.persist and report_run_id is not None})}\n\n"
+                yield f"data: {json.dumps({'type': 'done', 'persisted': request.persist})}\n\n"
             elif event_type == "error":
                 yield f"data: {json.dumps({'type': 'error', 'content': data})}\n\n"
 
@@ -1253,13 +1257,23 @@ async def delete_follow_up_chat_turn_endpoint(
 
 @app.delete("/api/research/follow-up/chat-turns")
 async def delete_follow_up_chat_turns_by_run_endpoint(
-    follow_up_run_id: int,
+    follow_up_run_id: Optional[int] = None,
+    video_id: Optional[str] = None,
     _auth: None = Depends(require_auth),
 ):
-    """Delete all chat turns for a research run."""
+    """Delete all chat turns for a research run or pre-research video."""
     store = get_follow_up_store()
-    deleted_count = store.delete_follow_up_chat_turns_by_run(follow_up_run_id)
-    return {"deleted": True, "follow_up_run_id": follow_up_run_id, "count": deleted_count}
+    if follow_up_run_id is not None:
+        deleted_count = store.delete_follow_up_chat_turns_by_run(follow_up_run_id)
+        return {"deleted": True, "follow_up_run_id": follow_up_run_id, "count": deleted_count}
+    elif video_id:
+        deleted_count = store.delete_follow_up_chat_turns_by_video(video_id)
+        return {"deleted": True, "video_id": video_id, "count": deleted_count}
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide either follow_up_run_id or video_id."
+        )
 
 
 @app.get("/")

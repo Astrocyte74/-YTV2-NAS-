@@ -600,7 +600,7 @@ class FollowUpStore:
     def store_follow_up_chat_turn(
         self,
         *,
-        follow_up_run_id: int,
+        follow_up_run_id: int | None,
         video_id: str,
         question: str,
         answer: str,
@@ -633,23 +633,34 @@ class FollowUpStore:
 
     def get_follow_up_chat_turns(
         self,
-        follow_up_run_id: int,
+        follow_up_run_id: int | None = None,
         *,
         video_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Return persisted chat turns for a research run, oldest first."""
-        params: list[Any] = [follow_up_run_id]
-        where_video_id = ""
-        if video_id:
-            params.append(video_id)
-            where_video_id = " AND video_id = %s"
+        """Return persisted chat turns for a research run or video, oldest first.
+
+        If follow_up_run_id is provided, returns turns for that run.
+        If follow_up_run_id is None and video_id is provided, returns pre-research turns.
+        """
+        if follow_up_run_id is not None:
+            params: list[Any] = [follow_up_run_id]
+            where_video_id = ""
+            if video_id:
+                params.append(video_id)
+                where_video_id = " AND video_id = %s"
+            where_clause = f"WHERE follow_up_run_id = %s{where_video_id}"
+        elif video_id:
+            params = [video_id]
+            where_clause = "WHERE follow_up_run_id IS NULL AND video_id = %s"
+        else:
+            return []
 
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
                 f"""
                 SELECT id, follow_up_run_id, video_id, summary_id, question, answer, sources, chat_meta, created_at
                 FROM follow_up_chat_turns
-                WHERE follow_up_run_id = %s{where_video_id}
+                {where_clause}
                 ORDER BY created_at ASC, id ASC
                 """,
                 tuple(params),
@@ -659,7 +670,7 @@ class FollowUpStore:
         return [
             {
                 "id": int(row[0]),
-                "follow_up_run_id": int(row[1]),
+                "follow_up_run_id": int(row[1]) if row[1] is not None else None,
                 "video_id": str(row[2]),
                 "summary_id": _coerce_optional_int(row[3]),
                 "question": str(row[4]),
@@ -697,6 +708,20 @@ class FollowUpStore:
             cur.execute(
                 "DELETE FROM follow_up_chat_turns WHERE follow_up_run_id = %s",
                 (follow_up_run_id,),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+        return deleted
+
+    def delete_follow_up_chat_turns_by_video(self, video_id: str) -> int:
+        """Delete all pre-research chat turns for a video. Returns count of deleted rows."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM follow_up_chat_turns
+                WHERE video_id = %s AND follow_up_run_id IS NULL
+                """,
+                (video_id,),
             )
             deleted = cur.rowcount
             conn.commit()
