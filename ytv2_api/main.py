@@ -1329,6 +1329,144 @@ async def general_exception_handler(request, exc):
     )
 
 
+# ---- Audio On-Demand Generation ----
+
+@app.post("/api/audio/generate")
+async def generate_audio_artifact(
+    video_id: str = Body(..., embed=True),
+    mode: str = Body(..., embed=True),
+    scope: str = Body("summary_active"),
+    variant_slug: Optional[str] = Body(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Generate an audio artifact for a video+mode+scope.
+
+    Pipeline: resolve source text → LLM narrative transform → TTS → MP3 file → artifact row.
+    """
+    await require_auth(authorization)
+
+    from .audio_store import AudioStore, compute_source_hash
+    from research_api.research_service.tts_provider import get_tts_provider
+    from research_api.research_service.llm import chat_text
+
+    store = AudioStore()
+
+    # 1. Resolve source text
+    source_text = store.resolve_source_text(video_id, scope, variant_slug)
+    if not source_text:
+        raise HTTPException(status_code=400, detail="No source text found for the given scope")
+
+    source_label = store.resolve_source_label(video_id, scope, variant_slug)
+
+    # 2. Compute source hash and check cache
+    source_hash = compute_source_hash(mode, scope, source_text)
+    cached = store.get_artifact(video_id, mode, scope)
+    if cached and cached.get("status") == "ready" and cached.get("source_hash") == source_hash:
+        return {
+            "status": "ready",
+            "cached": True,
+            "audio_url": cached["audio_url"],
+            "duration_seconds": cached.get("duration_seconds"),
+            "source_label": cached.get("source_label"),
+        }
+
+    # 3. Upsert artifact as queued
+    store.upsert_artifact(video_id, mode, scope, source_hash,
+                          status="queued", source_label=source_label)
+
+    try:
+        # 4. LLM narrative transform (only for text-heavy modes)
+        if mode == "audio_current" and len(source_text) > 200:
+            narrative_prompt = (
+                "Convert this summary into a natural, text-to-speech friendly narration.\n\n"
+                f"{source_text[:4000]}\n\n"
+                "Rules:\n"
+                "- Use flowing paragraphs only (no bullets/headings/code fences/emojis).\n"
+                "- Smooth transitions between topics; keep proper nouns/numbers accurate.\n"
+                "- Maintain all key information and conclusions.\n"
+                "- End with a single sentence beginning \"Bottom line: ...\".\n"
+                "- Length target: 180-350 words.\n"
+            )
+            narrative, _, _ = chat_text(
+                messages=[{"role": "user", "content": narrative_prompt}],
+                max_tokens=1024,
+                reasoning_effort="low",
+                temperature=0.5,
+                timeout=30,
+            )
+            tts_text = narrative if narrative else source_text
+        elif mode == "audio_briefing":
+            # Briefings get a more structured transform
+            narrative_prompt = (
+                "Synthesize this content into a cohesive audio briefing.\n\n"
+                f"{source_text[:6000]}\n\n"
+                "Rules:\n"
+                "- Write as a news briefing narrator would speak it.\n"
+                "- Flowing paragraphs, no bullets or headings.\n"
+                "- Cover key findings and conclusions.\n"
+                "- Length target: 300-600 words.\n"
+            )
+            narrative, _, _ = chat_text(
+                messages=[{"role": "user", "content": narrative_prompt}],
+                max_tokens=2048,
+                reasoning_effort="low",
+                temperature=0.5,
+                timeout=45,
+            )
+            tts_text = narrative if narrative else source_text
+        else:
+            tts_text = source_text
+
+        if not tts_text:
+            raise RuntimeError("LLM transform returned empty text")
+
+        # 5. Update status to generating
+        store.update_status(video_id, mode, scope, "generating")
+
+        # 6. TTS generation
+        tts = get_tts_provider()
+        audio_bytes = tts.generate(tts_text, voice="fable", output_format="mp3")
+        provider_name = tts.name()
+
+        # 7. Write file
+        from pathlib import Path
+        export_dir = Path("exports")
+        export_dir.mkdir(exist_ok=True)
+        filename = f"audio_{video_id}_{mode}_{source_hash[:8]}.mp3"
+        filepath = export_dir / filename
+        with open(filepath, "wb") as f:
+            f.write(audio_bytes)
+
+        audio_url = f"/exports/{filename}"
+
+        # 8. Estimate duration (tts-1 ~1MB per minute for MP3)
+        duration_seconds = int(len(audio_bytes) / 16000)
+
+        # 9. Update artifact to ready
+        store.update_status(video_id, mode, scope, "ready",
+                            audio_url=audio_url,
+                            duration_seconds=duration_seconds,
+                            provider=provider_name,
+                            source_label=source_label)
+
+        return {
+            "status": "ready",
+            "cached": False,
+            "audio_url": audio_url,
+            "duration_seconds": duration_seconds,
+            "source_label": source_label,
+        }
+
+    except Exception as e:
+        logger.error(f"Audio generation failed for {video_id}/{mode}/{scope}: {e}")
+        store.update_status(video_id, mode, scope, "failed",
+                            error_message=str(e)[:500])
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": str(e)},
+        )
+
+
 def main():
     """Run the API server directly."""
     import uvicorn
