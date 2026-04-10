@@ -1352,11 +1352,11 @@ async def generate_audio_artifact(
     store = AudioStore()
 
     # 1. Resolve source text
-    source_text = store.resolve_source_text(video_id, scope, variant_slug)
+    source_text = store.resolve_source_text(video_id, scope, variant_slug, mode=mode)
     if not source_text:
         raise HTTPException(status_code=400, detail="No source text found for the given scope")
 
-    source_label = store.resolve_source_label(video_id, scope, variant_slug)
+    source_label = store.resolve_source_label(video_id, scope, variant_slug, mode=mode)
 
     # 2. Compute source hash and check cache
     source_hash = compute_source_hash(mode, scope, source_text)

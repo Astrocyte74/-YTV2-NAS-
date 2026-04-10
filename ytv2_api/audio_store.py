@@ -110,9 +110,40 @@ class AudioStore:
     # ---- Source text resolution ----
 
     def resolve_source_text(self, video_id: str, scope: str,
-                            variant_slug: Optional[str] = None) -> str:
-        """Get canonical source text from DB for a given scope."""
+                            variant_slug: Optional[str] = None,
+                            mode: Optional[str] = None) -> str:
+        """Get canonical source text from DB for a given scope.
+
+        For mode='audio_briefing', combines summary + research to match
+        the dashboard's hash contract.
+        """
         with self._connect() as conn, conn.cursor() as cur:
+            # Briefing mode: combined summary + research (must match dashboard _compute_audio_source_hash)
+            if mode == "audio_briefing":
+                parts = []
+                cur.execute(
+                    """SELECT text FROM v_latest_summaries
+                       WHERE video_id = %s AND variant NOT LIKE 'audio%%'
+                       AND variant != 'deep-research'
+                       ORDER BY variant LIMIT 1""",
+                    [video_id],
+                )
+                row = cur.fetchone()
+                if row and row.get("text"):
+                    parts.append(row["text"][:2000])
+
+                cur.execute(
+                    """SELECT research_response FROM follow_up_research_runs
+                       WHERE video_id = %s
+                       ORDER BY created_at DESC LIMIT 1""",
+                    [video_id],
+                )
+                row = cur.fetchone()
+                if row and row.get("research_response"):
+                    parts.append(row["research_response"][:2000])
+
+                return "|BRIEFING|".join(parts)
+
             if scope == "summary_active":
                 if variant_slug:
                     cur.execute(
@@ -153,16 +184,18 @@ class AudioStore:
             return ""
 
     def resolve_source_label(self, video_id: str, scope: str,
-                             variant_slug: Optional[str] = None) -> str:
+                             variant_slug: Optional[str] = None,
+                             mode: Optional[str] = None) -> str:
         """Get a human-readable label for the source."""
-        with self._connect() as conn, conn.cursor() as cur:
-            if scope == "summary_active" and variant_slug:
-                return variant_slug.replace("-", " ").title()
-            elif scope == "ponderings_visible":
-                return "Research Report"
-            elif scope == "transcript_visible":
-                return "Transcript"
-            return "Summary"
+        if mode == "audio_briefing":
+            return "Summary + Research"
+        if scope == "summary_active" and variant_slug:
+            return variant_slug.replace("-", " ").title()
+        elif scope == "ponderings_visible":
+            return "Research Report"
+        elif scope == "transcript_visible":
+            return "Transcript"
+        return "Summary"
 
 
 def compute_source_hash(mode: str, scope: str, source_text: str) -> str:
