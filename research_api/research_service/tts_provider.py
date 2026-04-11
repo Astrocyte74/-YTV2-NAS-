@@ -1,8 +1,11 @@
 """
 TTS Provider abstraction for Audio On-Demand.
 
-Currently implements OpenAI TTS (tts-1). To switch providers,
-create a new class implementing TTSProvider and update get_tts_provider().
+Supported providers:
+  - openai  (default): OpenAI tts-1, requires OPENAI_API_KEY
+  - fish:            Fish Audio s2-pro, requires FISH_API_KEY
+
+Selection via TTS_PROVIDER env var (defaults to "openai").
 """
 import os
 import logging
@@ -133,10 +136,64 @@ class OpenAITTS(TTSProvider):
             return parts[0]
 
 
+class FishTTS(TTSProvider):
+    """Fish Audio TTS provider (s2-pro / s1).
+
+    Env vars:
+      FISH_API_KEY       – required, API key
+      FISH_VOICE_MODEL   – reference_id for the voice model (required)
+      FISH_TTS_MODEL     – "s2-pro" (default, best quality) or "s1" (faster/cheaper)
+    """
+
+    def __init__(self, api_key: str, voice_model: str | None = None,
+                 tts_model: str = "s2-pro"):
+        self.api_key = api_key
+        self.voice_model = voice_model
+        self.tts_model = tts_model
+
+    def name(self) -> str:
+        return f"fish_{self.tts_model}"
+
+    def generate(self, text: str, voice: str = "fable", output_format: str = "mp3") -> bytes:
+        import requests
+
+        reference_id = self.voice_model or voice
+        resp = requests.post(
+            "https://api.fish.audio/v1/tts",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "reference_id": reference_id,
+                "model": self.tts_model,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.content
+
+
 def get_tts_provider() -> TTSProvider:
-    """Factory: return the configured TTS provider."""
+    """Factory: return the configured TTS provider.
+
+    Selection via TTS_PROVIDER env var: "openai" (default) or "fish".
+    """
+    provider = os.getenv("TTS_PROVIDER", "openai").lower().strip()
+
+    if provider == "fish":
+        api_key = os.getenv("FISH_API_KEY", "")
+        if not api_key:
+            raise RuntimeError("TTS_PROVIDER=fish but FISH_API_KEY is not set")
+        voice_model = os.getenv("FISH_VOICE_MODEL") or None
+        tts_model = os.getenv("FISH_TTS_MODEL", "s2-pro")
+        logger.info("TTS provider: fish (model=%s, voice=%s)",
+                     tts_model, voice_model or "<unspecified>")
+        return FishTTS(api_key, voice_model=voice_model, tts_model=tts_model)
+
+    # Default: OpenAI
     api_key = os.getenv("OPENAI_API_KEY", "")
     if api_key:
         return OpenAITTS(api_key)
-    # Future: check for CARTESIA_API_KEY, GROQ_API_KEY, etc.
-    raise RuntimeError("No TTS provider configured. Set OPENAI_API_KEY.")
+    raise RuntimeError("No TTS provider configured. Set OPENAI_API_KEY or TTS_PROVIDER=fish with FISH_API_KEY.")

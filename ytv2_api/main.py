@@ -1428,16 +1428,17 @@ async def generate_audio_artifact(
         audio_bytes = tts.generate(tts_text, voice="fable", output_format="mp3")
         provider_name = tts.name()
 
-        # 7. Write file
+        # 7. Write file to data/exports/audio/ so dashboard can serve it
+        #    via its existing ../backend/data:/app/backend-data volume mount.
         from pathlib import Path
-        export_dir = Path("exports")
-        export_dir.mkdir(exist_ok=True)
+        export_dir = Path("data/exports/audio")
+        export_dir.mkdir(parents=True, exist_ok=True)
         filename = f"audio_{video_id}_{mode}_{source_hash[:8]}.mp3"
         filepath = export_dir / filename
         with open(filepath, "wb") as f:
             f.write(audio_bytes)
 
-        audio_url = f"/exports/{filename}"
+        audio_url = f"/exports/audio/{filename}"
 
         # 8. Estimate duration (tts-1 ~1MB per minute for MP3)
         duration_seconds = int(len(audio_bytes) / 16000)
