@@ -1376,6 +1376,7 @@ async def generate_audio_artifact(
 
     try:
         # 4. LLM narrative transform (only for text-heavy modes)
+        llm_effort = os.getenv("AUDIO_LLM_REASONING_EFFORT", "low")
         if mode == "audio_current" and len(source_text) > 200:
             narrative_prompt = (
                 "Convert this summary into a natural, text-to-speech friendly narration.\n\n"
@@ -1390,7 +1391,7 @@ async def generate_audio_artifact(
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
                 max_tokens=1024,
-                reasoning_effort="low",
+                reasoning_effort=llm_effort,
                 temperature=0.5,
                 timeout=30,
             )
@@ -1409,7 +1410,7 @@ async def generate_audio_artifact(
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
                 max_tokens=2048,
-                reasoning_effort="low",
+                reasoning_effort=llm_effort,
                 temperature=0.5,
                 timeout=45,
             )
@@ -1457,6 +1458,173 @@ async def generate_audio_artifact(
             "duration_seconds": duration_seconds,
             "source_label": source_label,
         }
+
+    except Exception as e:
+        logger.error(f"Audio generation failed for {video_id}/{mode}/{scope}: {e}")
+        store.update_status(video_id, mode, scope, "failed",
+                            error_message=str(e)[:500])
+        return JSONResponse(
+            status_code=500,
+            content={"status": "failed", "error": str(e)},
+        )
+
+
+@app.post("/api/audio/generate/stream")
+async def generate_audio_artifact_stream(
+    video_id: str = Body(..., embed=True),
+    mode: str = Body(..., embed=True),
+    scope: str = Body("summary_active"),
+    variant_slug: Optional[str] = Body(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Stream audio generation: sends chunks to client while storing the full file.
+
+    Uses Fish Audio streaming when available, falls back to buffered generation.
+    Returns audio/mp3 stream with the full file saved for subsequent cached plays.
+    """
+    await require_auth(authorization)
+
+    from .audio_store import AudioStore, compute_source_hash
+    from research_api.research_service.tts_provider import get_tts_provider
+    from research_api.research_service.llm import chat_text
+
+    store = AudioStore()
+
+    # 1. Resolve source text
+    source_text = store.resolve_source_text(video_id, scope, variant_slug, mode=mode)
+    if not source_text:
+        raise HTTPException(status_code=400, detail="No source text found for the given scope")
+
+    source_label = store.resolve_source_label(video_id, scope, variant_slug, mode=mode)
+
+    # 2. Check cache — if ready, redirect to stored file
+    source_hash = compute_source_hash(mode, scope, source_text)
+    cached = store.get_artifact(video_id, mode, scope)
+    if cached and cached.get("status") == "ready" and cached.get("source_hash") == source_hash:
+        # Already have this artifact cached — return the URL so frontend fetches the file
+        return JSONResponse(content={
+            "status": "ready",
+            "cached": True,
+            "audio_url": cached["audio_url"],
+            "duration_seconds": cached.get("duration_seconds"),
+            "source_label": cached.get("source_label"),
+        })
+
+    # 3. Upsert artifact as queued
+    store.upsert_artifact(video_id, mode, scope, source_hash,
+                          status="queued", source_label=source_label)
+
+    try:
+        # 4. LLM narrative transform
+        llm_effort = os.getenv("AUDIO_LLM_REASONING_EFFORT", "low")
+        if mode == "audio_current" and len(source_text) > 200:
+            narrative_prompt = (
+                "Convert this summary into a natural, text-to-speech friendly narration.\n\n"
+                f"{source_text[:4000]}\n\n"
+                "Rules:\n"
+                "- Use flowing paragraphs only (no bullets/headings/code fences/emojis).\n"
+                "- Smooth transitions between topics; keep proper nouns/numbers accurate.\n"
+                "- Maintain all key information and conclusions.\n"
+                "- End with a single sentence beginning \"Bottom line: ...\".\n"
+                "- Length target: 180-350 words.\n"
+            )
+            narrative, _, _ = chat_text(
+                messages=[{"role": "user", "content": narrative_prompt}],
+                max_tokens=1024,
+                reasoning_effort=llm_effort,
+                temperature=0.5,
+                timeout=30,
+            )
+            tts_text = narrative if narrative else source_text
+        elif mode == "audio_briefing":
+            narrative_prompt = (
+                "Synthesize this content into a cohesive audio briefing.\n\n"
+                f"{source_text[:6000]}\n\n"
+                "Rules:\n"
+                "- Write as a news briefing narrator would speak it.\n"
+                "- Flowing paragraphs, no bullets or headings.\n"
+                "- Cover key findings and conclusions.\n"
+                "- Length target: 300-600 words.\n"
+            )
+            narrative, _, _ = chat_text(
+                messages=[{"role": "user", "content": narrative_prompt}],
+                max_tokens=2048,
+                reasoning_effort=llm_effort,
+                temperature=0.5,
+                timeout=45,
+            )
+            tts_text = narrative if narrative else source_text
+        else:
+            tts_text = source_text
+
+        if not tts_text:
+            raise RuntimeError("LLM transform returned empty text")
+
+        store.update_status(video_id, mode, scope, "generating")
+
+        # 5. TTS generation
+        tts = get_tts_provider()
+        provider_name = tts.name()
+        from pathlib import Path
+        export_dir = Path("data/exports/audio")
+        export_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"audio_{video_id}_{mode}_{source_hash[:8]}.mp3"
+        filepath = export_dir / filename
+        audio_url = f"/exports/audio/{filename}"
+
+        if tts.supports_streaming():
+            # Stream from provider, collect bytes, save file when done
+            def event_stream():
+                collected = bytearray()
+                try:
+                    for chunk in tts.generate_stream(tts_text, voice="fable", output_format="mp3"):
+                        collected.extend(chunk)
+                        # Use base64 to safely embed binary chunks in SSE
+                        import base64
+                        encoded = base64.b64encode(chunk).decode("ascii")
+                        yield f"data: {json.dumps({'type': 'audio_chunk', 'data': encoded})}\n\n"
+
+                    # Save the full file
+                    with open(filepath, "wb") as f:
+                        f.write(collected)
+
+                    duration_seconds = int(len(collected) / 16000)
+                    store.update_status(video_id, mode, scope, "ready",
+                                        audio_url=audio_url,
+                                        duration_seconds=duration_seconds,
+                                        provider=provider_name,
+                                        source_label=source_label)
+
+                    yield f"data: {json.dumps({'type': 'done', 'audio_url': audio_url, 'duration_seconds': duration_seconds, 'source_label': source_label})}\n\n"
+
+                except Exception as e:
+                    logger.error(f"Audio streaming failed for {video_id}/{mode}/{scope}: {e}")
+                    store.update_status(video_id, mode, scope, "failed",
+                                        error_message=str(e)[:500])
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+        else:
+            # Non-streaming provider: generate, save, return URL
+            audio_bytes = tts.generate(tts_text, voice="fable", output_format="mp3")
+            with open(filepath, "wb") as f:
+                f.write(audio_bytes)
+
+            duration_seconds = int(len(audio_bytes) / 16000)
+            store.update_status(video_id, mode, scope, "ready",
+                                audio_url=audio_url,
+                                duration_seconds=duration_seconds,
+                                provider=provider_name,
+                                source_label=source_label)
+
+            return JSONResponse(content={
+                "status": "ready",
+                "cached": False,
+                "audio_url": audio_url,
+                "duration_seconds": duration_seconds,
+                "source_label": source_label,
+            })
 
     except Exception as e:
         logger.error(f"Audio generation failed for {video_id}/{mode}/{scope}: {e}")

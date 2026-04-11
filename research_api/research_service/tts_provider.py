@@ -24,8 +24,22 @@ class TTSProvider:
         """Generate audio bytes from text. Returns raw audio bytes."""
         raise NotImplementedError
 
+    def generate_stream(self, text: str, voice: str = "fable",
+                        output_format: str = "mp3", chunk_size: int = 8192):
+        """Stream TTS audio chunks. Returns generator yielding bytes.
+
+        Default implementation falls back to non-streaming generate().
+        Override in providers that support streaming natively.
+        """
+        audio = self.generate(text, voice, output_format)
+        yield audio
+
     def name(self) -> str:
         return "unknown"
+
+    def supports_streaming(self) -> bool:
+        """Whether this provider supports true chunked streaming."""
+        return False
 
 
 class OpenAITTS(TTSProvider):
@@ -36,6 +50,9 @@ class OpenAITTS(TTSProvider):
 
     def name(self) -> str:
         return "openai_tts"
+
+    def supports_streaming(self) -> bool:
+        return False
 
     def generate(self, text: str, voice: str = "fable", output_format: str = "mp3") -> bytes:
         import requests
@@ -154,6 +171,9 @@ class FishTTS(TTSProvider):
     def name(self) -> str:
         return f"fish_{self.tts_model}"
 
+    def supports_streaming(self) -> bool:
+        return True
+
     def generate(self, text: str, voice: str = "fable", output_format: str = "mp3") -> bytes:
         import requests
 
@@ -173,6 +193,35 @@ class FishTTS(TTSProvider):
         )
         resp.raise_for_status()
         return resp.content
+
+    def generate_stream(self, text: str, voice: str = "fable",
+                        output_format: str = "mp3", chunk_size: int = 8192):
+        """Stream TTS audio, yielding chunks. Also collects full bytes for storage.
+
+        Yields audio chunks (bytes). Caller can collect into a bytearray
+        to build the complete file for storage.
+        """
+        import requests
+
+        reference_id = self.voice_model or voice
+        resp = requests.post(
+            "https://api.fish.audio/v1/tts",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "text": text,
+                "reference_id": reference_id,
+                "model": self.tts_model,
+            },
+            stream=True,
+            timeout=120,
+        )
+        resp.raise_for_status()
+
+        for chunk in resp.iter_content(chunk_size=chunk_size):
+            yield chunk
 
 
 def get_tts_provider() -> TTSProvider:
