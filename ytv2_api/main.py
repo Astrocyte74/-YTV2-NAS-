@@ -1345,7 +1345,7 @@ async def generate_audio_artifact(
     """
     await require_auth(authorization)
 
-    from .audio_store import AudioStore, compute_source_hash
+    from .audio_store import AudioStore, compute_source_hash, build_tts_config_tag
     from research_api.research_service.tts_provider import get_tts_provider
     from research_api.research_service.llm import chat_text
 
@@ -1359,7 +1359,8 @@ async def generate_audio_artifact(
     source_label = store.resolve_source_label(video_id, scope, variant_slug, mode=mode)
 
     # 2. Compute source hash and check cache
-    source_hash = compute_source_hash(mode, scope, source_text)
+    tts_config_tag = build_tts_config_tag()
+    source_hash = compute_source_hash(mode, scope, source_text, tts_config=tts_config_tag)
     cached = store.get_artifact(video_id, mode, scope)
     if cached and cached.get("status") == "ready" and cached.get("source_hash") == source_hash:
         return {
@@ -1484,7 +1485,7 @@ async def generate_audio_artifact_stream(
     """
     await require_auth(authorization)
 
-    from .audio_store import AudioStore, compute_source_hash
+    from .audio_store import AudioStore, compute_source_hash, build_tts_config_tag
     from research_api.research_service.tts_provider import get_tts_provider
     from research_api.research_service.llm import chat_text
 
@@ -1577,12 +1578,10 @@ async def generate_audio_artifact_stream(
             def event_stream():
                 collected = bytearray()
                 try:
+                    yield f"data: {json.dumps({'type': 'status', 'message': 'generating'})}\n\n"
+
                     for chunk in tts.generate_stream(tts_text, voice="fable", output_format="mp3"):
                         collected.extend(chunk)
-                        # Use base64 to safely embed binary chunks in SSE
-                        import base64
-                        encoded = base64.b64encode(chunk).decode("ascii")
-                        yield f"data: {json.dumps({'type': 'audio_chunk', 'data': encoded})}\n\n"
 
                     # Save the full file
                     with open(filepath, "wb") as f:

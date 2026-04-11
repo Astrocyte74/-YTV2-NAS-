@@ -198,10 +198,32 @@ class AudioStore:
         return "Summary"
 
 
-def compute_source_hash(mode: str, scope: str, source_text: str) -> str:
-    """Compute SHA-256 hash for cache validation."""
-    canonical = (mode + ":" + scope + ":" + (source_text or "")).encode("utf-8")
+def compute_source_hash(mode: str, scope: str, source_text: str,
+                        tts_config: str = "") -> str:
+    """Compute SHA-256 hash for cache validation.
+
+    Includes TTS provider config (provider/model/voice) and LLM reasoning
+    effort so that changing any of these invalidates the cache.
+    """
+    canonical = (mode + ":" + scope + ":" + (tts_config or "") + ":" + (source_text or "")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
+
+
+def build_tts_config_tag() -> str:
+    """Build a short config tag from current TTS/LLM env vars.
+
+    Used as part of the cache key so switching provider, model, voice,
+    or reasoning effort invalidates cached artifacts.
+    """
+    import os
+    parts = [
+        os.getenv("TTS_PROVIDER", "openai"),
+        os.getenv("FISH_TTS_MODEL", ""),
+        os.getenv("FISH_VOICE_MODEL", ""),
+        os.getenv("OPENAI_TTS_VOICE", ""),
+        os.getenv("AUDIO_LLM_REASONING_EFFORT", "low"),
+    ]
+    return "|".join(p for p in parts if p)
 
 
 def _json_dumps(val) -> Optional[str]:
