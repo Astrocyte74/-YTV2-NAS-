@@ -1499,7 +1499,8 @@ async def generate_audio_artifact_stream(
     source_label = store.resolve_source_label(video_id, scope, variant_slug, mode=mode)
 
     # 2. Check cache — if ready, redirect to stored file
-    source_hash = compute_source_hash(mode, scope, source_text)
+    tts_config_tag = build_tts_config_tag()
+    source_hash = compute_source_hash(mode, scope, source_text, tts_config=tts_config_tag)
     cached = store.get_artifact(video_id, mode, scope)
     if cached and cached.get("status") == "ready" and cached.get("source_hash") == source_hash:
         # Already have this artifact cached — return the URL so frontend fetches the file
