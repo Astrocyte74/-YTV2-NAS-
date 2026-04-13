@@ -60,7 +60,7 @@ DEFAULT_HEADERS = {
 
 TEXT_LENGTH_THRESHOLD = 600  # characters – avoid returning navigation junk
 MAX_BODY_CHARACTERS = 120_000  # guardrail to avoid bringing down massive pages
-REQUEST_TIMEOUT = 15  # seconds
+REQUEST_TIMEOUT = 10  # seconds
 MAX_RESPONSE_BYTES = 6 * 1024 * 1024  # 6 MB
 MAX_REDIRECTS = 5
 
@@ -124,7 +124,7 @@ class WebPageExtractor:
     def _create_session() -> requests.Session:
         session = requests.Session()
         retry = Retry(
-            total=3,
+            total=1,
             backoff_factor=0.6,
             status_forcelist=(500, 502, 503, 504, 429),
             allowed_methods=("GET", "HEAD"),
