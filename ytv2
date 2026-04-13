@@ -126,7 +126,8 @@ show_status() {
     echo -e "${GREEN}Dashboard uses PostgreSQL, not JSON files${NC}"
     echo -e "${RED}⚠️  JS CRITICAL: Always null-check properties (activeFilters, _filterOptions, etc.)${NC}"
     echo -e "${RED}⚠️  JS CRITICAL: Test EVERY JS change with browser hard refresh before committing${NC}"
-    echo -e "${YELLOW}⚠️  DOCKER: Restart container after JS/HTML changes: docker restart ytv2-dashboard${NC}"
+    echo -e "${YELLOW}⚠️  DOCKER: Source files bind-mounted (dev compose) — just docker restart ytv2-dashboard${NC}"
+    echo -e "${YELLOW}⚠️  DOCKER: To recreate container: cd dashboard16 && source .env && docker-compose up -d${NC}"
 }
 
 show_stats() {
@@ -366,10 +367,10 @@ show_agent_info() {
     echo -e "  Guidelines: ${YELLOW}AI_AGENT_GUIDELINES.md${NC}"
     echo ""
     echo -e "${BLUE}▶ When to Restart Docker${NC}"
-    echo -e "  ${RED}RESTART NEEDED:${NC} requirements*.txt, docker-compose.yml"
-    echo -e "  ${RED}RESTART NEEDED:${NC} Python modules (modules/, server.py) - Python caches imports"
-    echo -e "  ${RED}RESTART NEEDED:${NC} JS/HTML/CSS changes - container must pick up file changes"
-    echo -e "  ${GREEN}Command:${NC}      ${CYAN}docker restart ytv2-dashboard${NC}"
+    echo -e "  ${GREEN}Dev compose active:${NC} JS/HTML/CSS/Python bind-mounted — changes picked up on restart"
+    echo -e "  ${RED}REBUILD NEEDED:${NC} requirements*.txt, Dockerfile changes"
+    echo -e "  ${GREEN}Restart cmd:${NC}  ${CYAN}docker restart ytv2-dashboard${NC}"
+    echo -e "  ${GREEN}Recreate cmd:${NC} ${CYAN}cd dashboard16 && source .env && docker-compose up -d${NC}"
     echo ""
     echo -e "${BLUE}▶ JavaScript CRITICAL Rules${NC}"
     echo -e "  ${RED}⚠️  ALWAYS null-check:${NC} this.activeFilters, this._filterOptions, etc."

@@ -397,6 +397,9 @@ class YouTubeSummarizer:
         # Lazy-initialized local TTS hub client
         self._tts_hub_client: Optional[TTSHubClient] = None
 
+        # Language configuration: default output language and languages to preserve as-is
+        self._lang_config = self._load_language_config()
+
         # Optional status callback for UI progress (set by caller)
         self.status_callback = None  # type: ignore[attr-defined]
         self._summary_llm_metrics = self._new_summary_llm_metrics()
@@ -410,6 +413,64 @@ class YouTubeSummarizer:
                 cb(message.strip())
         except Exception:
             pass
+
+    @staticmethod
+    def _load_language_config() -> Dict[str, Any]:
+        """Load language override settings from config/settings.json.
+
+        Config structure (in settings.json under 'language'):
+            "language": {
+                "default_output": "en",           # fallback language for non-preserved sources
+                "preserve_languages": ["fr", "en"] # langs that stay as-is
+            }
+
+        When configured, sources whose language is in preserve_languages keep
+        their original language; everything else is summarised in default_output.
+        """
+        try:
+            settings_path = Path(__file__).parent / "config" / "settings.json"
+            if settings_path.exists():
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    return json.loads(f.read()).get("language", {})
+        except Exception:
+            pass
+        return {}
+
+    def resolve_summary_language(self, source_language: str) -> str:
+        """Return the language the summary should be written in.
+
+        Rules:
+          - If no language config → return source_language (original behaviour).
+          - If source_language is in preserve_languages → keep it.
+          - Otherwise → use default_output.
+        """
+        if not self._lang_config:
+            return source_language  # no config, behave as before
+
+        preserve = [l.lower() for l in self._lang_config.get("preserve_languages", [])]
+        default = self._lang_config.get("default_output", "en")
+
+        src = (source_language or "").lower().split("-")[0]  # "fr-CA" → "fr"
+
+        if src in preserve:
+            return source_language  # keep original (e.g. French stays French)
+        return default
+
+    def _summary_language_instruction(self, source_language: str) -> str:
+        """Return the 'IMPORTANT: Respond in …' line for summary prompts."""
+        target = self.resolve_summary_language(source_language)
+        if not self._lang_config:
+            return "**IMPORTANT: Respond in the same language as the content.**"
+
+        lang_names = {
+            "en": "English", "fr": "French", "es": "Spanish", "de": "German",
+            "ja": "Japanese", "zh": "Chinese", "ko": "Korean", "pt": "Portuguese",
+            "it": "Italian", "nl": "Dutch", "ru": "Russian", "ar": "Arabic",
+            "hi": "Hindi", "sv": "Swedish", "no": "Norwegian", "da": "Danish",
+            "fi": "Finnish", "pl": "Polish", "tr": "Turkish", "cs": "Czech",
+        }
+        name = lang_names.get(target.lower().split("-")[0], target)
+        return f"**IMPORTANT: Respond in {name}.**"
 
     def _new_summary_llm_metrics(self) -> Dict[str, Any]:
         return {
@@ -804,7 +865,7 @@ class YouTubeSummarizer:
             summary_data["llm_usage"] = deepcopy(getattr(self, "_summary_llm_metrics", {}))
 
         if isinstance(summary_data, str) and not summary_language:
-            summary_language = transcript_language
+            summary_language = self.resolve_summary_language(transcript_language)
 
         print("Analyzing content...")
         try:
@@ -2317,10 +2378,11 @@ Preview:
 
     async def _generate_headline_from_summary(self, summary_text: str, metadata: Dict[str, Any]) -> str:
         """Helper to keep headline generation consistent across summary styles."""
+        lang_instruction = self._summary_language_instruction(metadata.get('language', 'en'))
         title_prompt = f"""
         Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
         Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
-        **IMPORTANT: Respond in the same language as the content.**
+        {lang_instruction}
         Source title: {metadata.get('title', '')}
         Summary:
         {summary_text[:1200]}
@@ -3279,6 +3341,8 @@ Preview:
         {transcript}
         """
         
+        _lang_instr = self._summary_language_instruction(metadata.get('language', 'en'))
+        
         prompts = {
             "comprehensive": f"""
             {base_context}
@@ -3301,7 +3365,7 @@ Preview:
             - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
             - Keep events in the original chronological order unless a thematic grouping is requested.
             - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - Respond in the transcript’s language.
+            - {_lang_instr}
             - Include [mm:ss] timestamps only if explicitly present in transcript text; otherwise omit.
             - If a needed fact isn’t available, write “Unknown”.
             - No code fences, no emojis, no markdown headings.
@@ -3328,7 +3392,7 @@ Preview:
             - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
             - Keep events in the original chronological order unless a thematic grouping is requested.
             - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - Respond in the transcript’s language.
+            - {_lang_instr}
             - Keep numbers and names accurate; include specific values where present.
             - Avoid list‑like phrasing or enumeration; use implicit transitions instead.
             - No headings, no bullets, no code fences, no emojis.
@@ -3351,7 +3415,7 @@ Preview:
             - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
             - Keep events in the original chronological order unless a thematic grouping is requested.
             - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - Respond in the transcript’s language.
+            - {_lang_instr}
             - Each bullet ≤ 18 words; lead with the fact/action.
             - Prefer named entities, figures, and actions over general statements (metrics, model names, versions, dates).
             - Avoid duplication; merge near‑identical points.
@@ -3375,7 +3439,7 @@ Preview:
             - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
             - Keep events in the original chronological order unless a thematic grouping is requested.
             - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - Respond in the transcript’s language.
+            - {_lang_instr}
             - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
             - No speculation beyond the transcript; use “Unknown” only when details are missing.
             - Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension (e.g., Strategy / Technology / Outcome).
@@ -3400,7 +3464,7 @@ Preview:
             - Ignore jokes, insults, low-signal repetition, and moderator boilerplate.
             - Keep each bullet ≤ 20 words and lead with the key point.
             - Use only information explicitly present in the Reddit thread text and comments.
-            - Respond in the transcript’s language.
+            - {_lang_instr}
             - No code fences or emojis.
             - Do not add a final “Bottom line”.
             """,
@@ -3487,7 +3551,7 @@ Preview:
             - Keep events in the original chronological order unless a thematic grouping is requested.
             - Rewrite for clarity and natural flow after compressing, without adding new meaning.
             - If multiple patterns could apply, select the one maximizing clarity for non‑expert readers.
-            - Respond in the transcript’s language.
+            - {_lang_instr}
             - Timestamps only if explicitly present; else omit.
             - “Unknown” when information is missing.
             - No code fences/emojis.
@@ -3511,10 +3575,11 @@ Preview:
             }
         
         # Also generate a quick title/headline (using summary for token efficiency)
+        lang_instruction = self._summary_language_instruction(metadata.get('language', 'en'))
         title_prompt = f"""
         Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
         Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
-        **IMPORTANT: Respond in the same language as the content.**
+        {lang_instruction}
         Source title: {metadata.get('title', '')}
         Summary:
         {summary_text[:1200]}
@@ -4288,12 +4353,13 @@ Multiple Categories (when content genuinely spans areas):
         elif normalized_type == "audio_es":
             result["language"] = 'es'
         else:
-            result["language"] = metadata.get('language', 'en')
+            result["language"] = self.resolve_summary_language(metadata.get('language', 'en'))
 
         if primary_text:
+            lang_instruction = self._summary_language_instruction(metadata.get('language', 'en'))
             title_prompt = f"""
             Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
-            **IMPORTANT: Respond in the same language as the content.**
+            {lang_instruction}
             Source title: {metadata.get('title', '')}
             Summary:
             {primary_text[:1200]}
@@ -4439,7 +4505,7 @@ Multiple Categories (when content genuinely spans areas):
         - Present findings directly; avoid meta like “the video shows…”.
         - Keep names/numbers accurate; include specific values where present.
         - Maintain an engaging pace with varied sentence lengths.
-        - **IMPORTANT: Respond in the same language as the original transcript.** 
+        - {self._summary_language_instruction(metadata.get('language', 'en'))}
 
         Length guidance (not strict): 180–380 words for most videos; shorter for very short clips.
         """

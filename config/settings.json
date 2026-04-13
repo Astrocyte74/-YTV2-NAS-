@@ -24,5 +24,9 @@
     "enable_tts": true,
     "default_voice": "en-US-Standard-A",
     "audio_format": "mp3"
+  },
+  "language": {
+    "default_output": "en",
+    "preserve_languages": ["fr", "en"]
   }
 }
