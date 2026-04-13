@@ -1331,7 +1331,27 @@ async def general_exception_handler(request, exc):
 
 # ---- Audio On-Demand Generation ----
 
-@app.post("/api/audio/generate")
+
+def _build_briefing_prompt(source_text: str) -> str:
+    """Build the LLM prompt for audio_briefing synthesis.
+
+    Shared by both streaming and non-streaming endpoints.
+    """
+    return (
+        "You are a news briefing editor. The source material below contains a summary "
+        "and a research report that may overlap. Produce a single cohesive audio briefing.\n\n"
+        f"Source material:\n{source_text[:8000]}\n\n"
+        "Rules:\n"
+        "- Deduplicate: mention each key point once, whether it comes from the summary or research.\n"
+        "- Structure: opening context, key findings, implications, brief conclusion.\n"
+        "- Write as a narrator would speak it: flowing paragraphs, no bullets or headings.\n"
+        "- Keep proper nouns and numbers accurate.\n"
+        "- Do not speculate about future developments or add \"what's next\" framing.\n"
+        "- Length target: 300-600 words.\n"
+    )
+
+
+
 async def generate_audio_artifact(
     video_id: str = Body(..., embed=True),
     mode: str = Body(..., embed=True),
@@ -1398,22 +1418,13 @@ async def generate_audio_artifact(
             )
             tts_text = narrative if narrative else source_text
         elif mode == "audio_briefing":
-            # Briefings get a more structured transform
-            narrative_prompt = (
-                "Synthesize this content into a cohesive audio briefing.\n\n"
-                f"{source_text[:6000]}\n\n"
-                "Rules:\n"
-                "- Write as a news briefing narrator would speak it.\n"
-                "- Flowing paragraphs, no bullets or headings.\n"
-                "- Cover key findings and conclusions.\n"
-                "- Length target: 300-600 words.\n"
-            )
+            narrative_prompt = _build_briefing_prompt(source_text)
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
-                max_tokens=2048,
-                reasoning_effort=llm_effort,
+                max_tokens=4096,
+                reasoning_effort="medium",
                 temperature=0.5,
-                timeout=45,
+                timeout=60,
             )
             tts_text = narrative if narrative else source_text
         else:
@@ -1539,21 +1550,13 @@ async def generate_audio_artifact_stream(
             )
             tts_text = narrative if narrative else source_text
         elif mode == "audio_briefing":
-            narrative_prompt = (
-                "Synthesize this content into a cohesive audio briefing.\n\n"
-                f"{source_text[:6000]}\n\n"
-                "Rules:\n"
-                "- Write as a news briefing narrator would speak it.\n"
-                "- Flowing paragraphs, no bullets or headings.\n"
-                "- Cover key findings and conclusions.\n"
-                "- Length target: 300-600 words.\n"
-            )
+            narrative_prompt = _build_briefing_prompt(source_text)
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
-                max_tokens=2048,
-                reasoning_effort=llm_effort,
+                max_tokens=4096,
+                reasoning_effort="medium",
                 temperature=0.5,
-                timeout=45,
+                timeout=60,
             )
             tts_text = narrative if narrative else source_text
         else:

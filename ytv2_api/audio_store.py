@@ -129,8 +129,7 @@ class AudioStore:
                     [video_id],
                 )
                 row = cur.fetchone()
-                if row and row.get("text"):
-                    parts.append(row["text"][:2000])
+                summary_text = (row.get("text") or "")[:4000] if row else ""
 
                 cur.execute(
                     """SELECT research_response FROM follow_up_research_runs
@@ -139,10 +138,14 @@ class AudioStore:
                     [video_id],
                 )
                 row = cur.fetchone()
-                if row and row.get("research_response"):
-                    parts.append(row["research_response"][:2000])
+                research_text = (row.get("research_response") or "")[:4000] if row else ""
 
-                return "|BRIEFING|".join(parts)
+                combined_parts = []
+                if summary_text:
+                    combined_parts.append(f"Summary:\n{summary_text}")
+                if research_text:
+                    combined_parts.append(f"Research:\n{research_text}")
+                return "\n\n".join(combined_parts)
 
             if scope == "summary_active":
                 if variant_slug:
