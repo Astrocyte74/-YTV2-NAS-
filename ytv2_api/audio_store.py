@@ -213,10 +213,11 @@ def compute_source_hash(mode: str, scope: str, source_text: str,
 
 
 def build_tts_config_tag() -> str:
-    """Build a short config tag from current TTS/LLM env vars.
+    """Build a short config tag from current TTS env vars.
 
-    Used as part of the cache key so switching provider, model, voice,
-    or reasoning effort invalidates cached artifacts.
+    Used as part of the cache key so switching provider, model, or voice
+    invalidates cached artifacts. Reasoning effort is NOT included because
+    audio_briefing hardcodes medium while audio_current uses the env var.
     """
     import os
     parts = [
@@ -224,7 +225,6 @@ def build_tts_config_tag() -> str:
         os.getenv("FISH_TTS_MODEL", ""),
         os.getenv("FISH_VOICE_MODEL", ""),
         os.getenv("OPENAI_TTS_VOICE", ""),
-        os.getenv("AUDIO_LLM_REASONING_EFFORT", "low"),
     ]
     return "|".join(p for p in parts if p)
 
