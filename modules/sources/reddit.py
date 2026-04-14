@@ -52,6 +52,8 @@ class RedditFetchResult:
     # Link post detection
     is_self: bool = True
     external_url: Optional[str] = None
+    # Gallery posts: all full-res image URLs (empty for non-gallery)
+    gallery_image_urls: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -73,6 +75,7 @@ class RedditFetchResult:
             "language": self.language or "en",
             "is_self": self.is_self,
             "external_url": self.external_url,
+            "gallery_image_urls": self.gallery_image_urls,
         }
 
 
@@ -218,19 +221,23 @@ class RedditFetcher:
         # low-res thumbnail (which is typically 140x78).
         thumbnail = self._clean_thumbnail(getattr(submission, "thumbnail", None))
 
-        # Gallery posts: extract first image at full resolution from media_metadata
+        # Gallery posts: extract all images at full resolution from media_metadata
+        gallery_image_urls = []
         if getattr(submission, "is_gallery", False):
             try:
                 gallery_items = getattr(submission, "gallery_data", {}).get("items", [])
                 media_meta = getattr(submission, "media_metadata", {})
-                if gallery_items and media_meta:
-                    first_id = gallery_items[0].get("media_id", "")
-                    first_item = media_meta.get(first_id, {})
-                    source = first_item.get("s", {})
-                    gallery_url = source.get("u") or source.get("gif")
-                    if gallery_url:
-                        # Convert preview.redd.it to i.redd.it for direct full-res access
-                        thumbnail = gallery_url.replace("preview.redd.it", "i.redd.it").split("?")[0]
+                for item in gallery_items:
+                    media_id = item.get("media_id", "")
+                    mm = media_meta.get(media_id, {})
+                    source = mm.get("s", {})
+                    url = source.get("u") or source.get("gif")
+                    if url:
+                        gallery_image_urls.append(
+                            url.replace("preview.redd.it", "i.redd.it").split("?")[0]
+                        )
+                if gallery_image_urls:
+                    thumbnail = gallery_image_urls[0]
             except Exception:
                 pass
         elif external_url:
@@ -261,4 +268,5 @@ class RedditFetcher:
             language=getattr(submission, "lang", None),
             is_self=is_self,
             external_url=external_url,
+            gallery_image_urls=gallery_image_urls,
         )

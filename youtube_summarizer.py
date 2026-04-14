@@ -900,6 +900,10 @@ class YouTubeSummarizer:
             "transcript_chars": len(transcript),
         }
 
+        # Gallery images for Reddit posts
+        gallery = (source_metadata or {}).get("gallery_urls", [])
+        media_metadata = {"gallery_urls": gallery} if gallery else None
+
         result = {
             "id": content_id,
             "content_source": source,
@@ -910,6 +914,7 @@ class YouTubeSummarizer:
             "duration_seconds": safe_metadata.get("duration", 0),
             "word_count": len(transcript.split()) if transcript else 0,
             "media": media,
+            "media_metadata": media_metadata,
             "source_metadata": {source: source_metadata or {}},
             "analysis": analysis_data,
             "original_language": transcript_language,
@@ -1025,6 +1030,7 @@ class YouTubeSummarizer:
             "permalink": data["canonical_url"],
             "comment_samples": data.get("comment_snippets", []),
             "selftext_length": len(data.get("selftext", "")),
+            "gallery_urls": data.get("gallery_image_urls", []),
         }
 
         return await self.process_text_content(
