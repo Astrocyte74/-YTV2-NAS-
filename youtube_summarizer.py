@@ -3348,14 +3348,17 @@ class YouTubeSummarizer:
         end_start = length - end_span
 
         # --- Overlap guard ---
-        # If windows overlap, collapse into one contiguous span from beg to end.
+        # If windows overlap, drop the middle and split budget between beginning + end.
+        # This guarantees the sampler always includes end-of-transcript content.
         if mid_start < beg_end or end_start < mid_end:
-            # One contiguous span, snapped to sentence boundary at the end
-            span = transcript[:total_budget]
-            last_stop = max(span.rfind(c) for c in ".?!")
-            if last_stop > total_budget * 0.8:
-                span = span[:last_stop + 1]
-            return span
+            half = total_budget // 2
+            beg_part = transcript[:half]
+            end_part = transcript[length - half:]
+            # Snap beg_part to sentence boundary
+            last_stop = max(beg_part.rfind(c) for c in ".?!")
+            if last_stop > half * 0.8:
+                beg_part = beg_part[:last_stop + 1]
+            return beg_part + "\n[...]\n" + end_part
 
         # Snap each window end to a nearby sentence boundary (look backwards up to 200 chars)
         def snap_end(text: str, pos: int) -> int:
