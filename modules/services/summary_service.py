@@ -1775,6 +1775,12 @@ async def process_content_summary(
                     }
                 )
                 merged_report["metadata"] = merged_metadata
+                # Carry forward media_metadata (e.g. gallery_urls) from the new report
+                new_media_meta = report_dict.get("media_metadata")
+                if new_media_meta:
+                    merged_media_meta = dict(existing_report.get("media_metadata") or {})
+                    merged_media_meta.update(new_media_meta)
+                    merged_report["media_metadata"] = merged_media_meta
                 report_dict = merged_report
             # Apply CJCLDS categorization when applicable (General Conference talks)
             try:
