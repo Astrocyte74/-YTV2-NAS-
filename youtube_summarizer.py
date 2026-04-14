@@ -851,8 +851,7 @@ class YouTubeSummarizer:
         if not summary_data:
             # Try to at least capture a planner outline for long/complex content
             try:
-                excerpt = transcript[:STRUCTURED_PLANNER_EXCERPT_CHARS]
-                plan_hint = await self._plan_sections_from_transcript(excerpt, safe_metadata)
+                plan_hint = await self._plan_sections_from_transcript(transcript, safe_metadata)
             except Exception:
                 plan_hint = None
             summary_data = await self.generate_summary(transcript, safe_metadata, summary_type, proficiency_level)
@@ -2379,7 +2378,10 @@ class YouTubeSummarizer:
         """Lightweight planner: propose 3–6 natural sections when chapters are absent."""
         if not transcript:
             return []
-        safe_excerpt = self._sanitize_content(transcript, max_length=7000)
+        if len(transcript) > 15000:
+            safe_excerpt = self._sample_transcript(transcript, total_budget=15000)
+        else:
+            safe_excerpt = transcript
         if not safe_excerpt:
             return []
         min_sections = 3
@@ -2471,7 +2473,10 @@ class YouTubeSummarizer:
         plan_lines = "\n".join(
             [f"- {item['title']}: {item.get('focus', '')}" for item in plan if item.get("title")]
         )
-        safe_transcript = self._sanitize_content(transcript, max_length=12000)
+        if len(transcript) > 30000:
+            safe_transcript = self._sample_transcript(transcript, total_budget=30000)
+        else:
+            safe_transcript = transcript
         plan_prompt = render_prompt_only("structured_pipeline.summarize_with_plan", {
             "title": metadata.get('title', 'Unknown'),
             "uploader": metadata.get('uploader', 'Unknown'),
@@ -3111,28 +3116,11 @@ class YouTubeSummarizer:
             except Exception as exc:
                 print(f"⚠️ Chapter-based summary failed, falling back to planner: {exc}")
 
-        # Planner path should not summarize only the opening excerpt of a long transcript.
-        # If we cannot produce chapter slices for long content, return None so the caller
-        # falls back to the classic full-transcript chunking pipeline instead.
+        # Planner path (sampling handled inside planner and summarize methods)
         try:
-            if len(transcript or "") > STRUCTURED_PLANNER_EXCERPT_CHARS:
-                print("⚠️ Planner path skipped for long transcript without chapter slices; using classic chunked fallback")
-                return None
-        except Exception:
-            pass
-
-        # Planner path (with optional excerpt for very long content)
-        working_transcript = transcript
-        try:
-            if len(transcript or "") > STRUCTURED_PLANNER_EXCERPT_CHARS:
-                working_transcript = transcript[:STRUCTURED_PLANNER_EXCERPT_CHARS]
-        except Exception:
-            working_transcript = transcript
-
-        try:
-            plan = await self._plan_sections_from_transcript(working_transcript, metadata)
+            plan = await self._plan_sections_from_transcript(transcript, metadata)
             if plan:
-                summary = await self._summarize_with_plan(working_transcript, metadata, summary_type, plan, transcript_language)
+                summary = await self._summarize_with_plan(transcript, metadata, summary_type, plan, transcript_language)
                 if summary:
                     if transcript_segments and not summary.get("transcript_segments"):
                         summary["transcript_segments"] = transcript_segments
@@ -3330,7 +3318,67 @@ class YouTubeSummarizer:
             return truncated[:sentence_end + 1]
         
         return truncated + "..."
-    
+
+    def _sample_transcript(self, transcript: str, total_budget: int = 15000) -> str:
+        """Extract representative content from beginning, middle, and end of a long transcript.
+
+        For transcripts that fit within *total_budget*, returns them unchanged.
+        Otherwise samples ~40% beginning, ~30% middle, ~30% end with ``[...]``
+        separators and sentence-boundary snapping.
+
+        Overlapping windows are collapsed into a single contiguous span to
+        avoid duplicated content in the output.
+        """
+        if not transcript or not isinstance(transcript, str):
+            return ""
+        if len(transcript) <= total_budget:
+            return transcript
+
+        length = len(transcript)
+
+        # Compute raw window boundaries ( percentages of budget )
+        beg_end = int(total_budget * 0.40)
+        mid_span = int(total_budget * 0.30)
+        end_span = int(total_budget * 0.30)
+
+        mid_center = length // 2
+        mid_start = max(0, mid_center - mid_span // 2)
+        mid_end = mid_start + mid_span
+
+        end_start = length - end_span
+
+        # --- Overlap guard ---
+        # If windows overlap, collapse into one contiguous span from beg to end.
+        if mid_start < beg_end or end_start < mid_end:
+            # One contiguous span, snapped to sentence boundary at the end
+            span = transcript[:total_budget]
+            last_stop = max(span.rfind(c) for c in ".?!")
+            if last_stop > total_budget * 0.8:
+                span = span[:last_stop + 1]
+            return span
+
+        # Snap each window end to a nearby sentence boundary (look backwards up to 200 chars)
+        def snap_end(text: str, pos: int) -> int:
+            window = text[max(0, pos - 200):pos]
+            for c in (".", "?", "!"):
+                idx = window.rfind(c)
+                if idx != -1:
+                    return max(0, pos - 200) + idx + 1
+            return pos
+
+        beg_end = snap_end(transcript, beg_end)
+        mid_end = snap_end(transcript, mid_end)
+        end_start = snap_end(transcript, end_start)
+
+        parts = [
+            transcript[:beg_end],
+            "[...]",
+            transcript[mid_start:mid_end],
+            "[...]",
+            transcript[end_start:],
+        ]
+        return "\n".join(parts)
+
     def _validate_analysis_result(self, analysis: dict) -> dict:
         """Validate and sanitize analysis results according to universal schema"""
         

@@ -282,25 +282,23 @@
     "planner": {
       "source": "youtube_summarizer.py:2407",
       "input_truncation": {
-        "type": "EXCERPT",
-        "chars": 7000,
-        "code_location": "youtube_summarizer.py:2402 _sanitize_content(transcript, max_length=7000)",
-        "reason": "Only sends an excerpt to the planner LLM call to save tokens. The planner only proposes section titles, not the full summary.",
-        "risk": "For long videos, the planner only sees the first ~7K chars. If the video's structure changes dramatically later, the plan may not reflect it.",
-        "fix_idea": "Sample from beginning, middle, and end instead of just the first 7K."
+        "type": "SAMPLED",
+        "chars": "full up to 15000, sampled above",
+        "code_location": "youtube_summarizer.py _sample_transcript() (sampled) or full transcript (≤15000)",
+        "reason": "Planner now sees full transcript up to 15K chars. Above 15K, samples beginning (40%), middle (30%), end (30%) to capture whole-video structure.",
+        "note": "Previously truncated to first 7000 chars only, missing late-video content."
       },
       "description": "Proposes 3-6 natural sections when chapters are absent",
-      "prompt": "You are designing a short outline for summarizing a YouTube video.\n\n- Propose 3–{max_sections} sections that follow the video's natural flow.\n- Use what the transcript already contains; do NOT invent topics.\n- Keep titles concise (2-6 words) and descriptive.\n- Return JSON array of objects with keys: title, focus.\n- Respond in the transcript language.\n\nTranscript excerpt (trimmed):\n{transcript_excerpt}"
+      "prompt": "You are designing a short outline for summarizing a YouTube video.\n\n- Propose 3–{max_sections} sections that follow the video's natural flow.\n- Use what the transcript already contains; do NOT invent topics.\n- Keep titles concise (2-6 words) and descriptive.\n- Return JSON array of objects with keys: title, focus.\n- Respond in the transcript language.\n\nTranscript excerpt (sampled from beginning, middle, and end):\n{transcript_excerpt}"
     },
     "summarize_with_plan": {
       "source": "youtube_summarizer.py:2503",
       "input_truncation": {
-        "type": "EXCERPT",
-        "chars": 12000,
-        "code_location": "youtube_summarizer.py:2502 _sanitize_content(transcript, max_length=12000)",
-        "reason": "Caps the transcript sent to the plan-based summary LLM. Long transcripts (>12K) that reach this path are truncated.",
-        "risk": "A 60-min video can have 40K+ chars of transcript. Only the first 12K is summarized.",
-        "fix_idea": "Raise to 30K+ or use chapter chunking. Modern LLMs can easily handle 30K chars."
+        "type": "SAMPLED",
+        "chars": "full up to 30000, sampled above",
+        "code_location": "youtube_summarizer.py _sample_transcript() (sampled) or full transcript (≤30000)",
+        "reason": "Summarizer now sees full transcript up to 30K chars. Above 30K, samples beginning (40%), middle (30%), end (30%).",
+        "note": "Previously truncated to first 12000 chars only."
       },
       "description": "Summarize using the planner-driven outline",
       "prompt": "Use the following outline to summarize the video. Stick to the provided section order.\n\nVideo: {title} by {uploader}\nOutline:\n{plan_lines}\n\nTranscript:\n{transcript}\n\nWrite a concise, well-structured summary in the transcript language ({language}):\n- Begin with a 2-3 sentence overview.\n- Use the outline section titles as headings; under each heading, add 2-4 bullets with concrete facts.\n- Finish with one sentence starting \"Bottom line: …\".\nRules: no speculation, no emojis, no code fences, and rely only on the transcript."
