@@ -1422,23 +1422,28 @@ async def general_exception_handler(request, exc):
 # ---- Audio On-Demand Generation ----
 
 
-def _build_briefing_prompt(source_text: str) -> str:
-    """Build the LLM prompt for audio_briefing synthesis.
+def _build_audio_prompt(mode: str, source_text: str) -> str:
+    """Build the LLM prompt for audio narrative transforms.
 
     Shared by both streaming and non-streaming endpoints.
+    Uses the shared prompt_loader for consistent prompt rendering.
+    Truncation is applied before rendering (code behavior, not prompt text).
     """
-    return (
-        "You are a news briefing editor. The source material below contains a summary "
-        "and a research report that may overlap. Produce a single cohesive audio briefing.\n\n"
-        f"Source material:\n{source_text[:8000]}\n\n"
-        "Rules:\n"
-        "- Deduplicate: mention each key point once, whether it comes from the summary or research.\n"
-        "- Structure: opening context, key findings, implications, brief conclusion.\n"
-        "- Write as a narrator would speak it: flowing paragraphs, no bullets or headings.\n"
-        "- Keep proper nouns and numbers accurate.\n"
-        "- Do not speculate about future developments or add \"what's next\" framing.\n"
-        "- Length target: 300-600 words.\n"
-    )
+    from prompt_loader import render_prompt_only
+
+    if mode == "audio_current":
+        truncated = source_text[:4000]
+        return render_prompt_only(
+            "audio_on_demand.audio_current",
+            {"source_text": truncated},
+        )
+    elif mode == "audio_briefing":
+        truncated = source_text[:8000]
+        return render_prompt_only(
+            "audio_on_demand.audio_briefing",
+            {"source_text": truncated},
+        )
+    return source_text
 
 
 
@@ -1489,16 +1494,7 @@ async def generate_audio_artifact(
         # 4. LLM narrative transform (only for text-heavy modes)
         llm_effort = os.getenv("AUDIO_LLM_REASONING_EFFORT", "low")
         if mode == "audio_current" and len(source_text) > 200:
-            narrative_prompt = (
-                "Convert this summary into a natural, text-to-speech friendly narration.\n\n"
-                f"{source_text[:4000]}\n\n"
-                "Rules:\n"
-                "- Use flowing paragraphs only (no bullets/headings/code fences/emojis).\n"
-                "- Smooth transitions between topics; keep proper nouns/numbers accurate.\n"
-                "- Maintain all key information and conclusions.\n"
-                "- End with a single sentence beginning \"Bottom line: ...\".\n"
-                "- Length target: 180-350 words.\n"
-            )
+            narrative_prompt = _build_audio_prompt("audio_current", source_text)
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
                 max_tokens=1024,
@@ -1508,7 +1504,7 @@ async def generate_audio_artifact(
             )
             tts_text = narrative if narrative else source_text
         elif mode == "audio_briefing":
-            narrative_prompt = _build_briefing_prompt(source_text)
+            narrative_prompt = _build_audio_prompt("audio_briefing", source_text)
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
                 max_tokens=4096,
@@ -1621,16 +1617,7 @@ async def generate_audio_artifact_stream(
         # 4. LLM narrative transform
         llm_effort = os.getenv("AUDIO_LLM_REASONING_EFFORT", "low")
         if mode == "audio_current" and len(source_text) > 200:
-            narrative_prompt = (
-                "Convert this summary into a natural, text-to-speech friendly narration.\n\n"
-                f"{source_text[:4000]}\n\n"
-                "Rules:\n"
-                "- Use flowing paragraphs only (no bullets/headings/code fences/emojis).\n"
-                "- Smooth transitions between topics; keep proper nouns/numbers accurate.\n"
-                "- Maintain all key information and conclusions.\n"
-                "- End with a single sentence beginning \"Bottom line: ...\".\n"
-                "- Length target: 180-350 words.\n"
-            )
+            narrative_prompt = _build_audio_prompt("audio_current", source_text)
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
                 max_tokens=1024,
@@ -1640,7 +1627,7 @@ async def generate_audio_artifact_stream(
             )
             tts_text = narrative if narrative else source_text
         elif mode == "audio_briefing":
-            narrative_prompt = _build_briefing_prompt(source_text)
+            narrative_prompt = _build_audio_prompt("audio_briefing", source_text)
             narrative, _, _ = chat_text(
                 messages=[{"role": "user", "content": narrative_prompt}],
                 max_tokens=4096,

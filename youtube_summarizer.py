@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 import yt_dlp
 
+from prompt_loader import render_prompt, render_prompt_only, get_prompt_entry
+
 # Try to import youtube-transcript-api for better transcript access
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
@@ -1225,23 +1227,11 @@ class YouTubeSummarizer:
         return out
 
     async def _wiki_section_bullets(self, title: str, body: str, language: str) -> str:
-        prompt = f"""
-Summarize only the following Wikipedia section.
-
-Article: {title}
-
-Section text:
-{self._sanitize_content(body, max_length=4000)}
-
-Output:
-- 3–6 “• ” bullets with concrete facts, names, dates, figures.
-
-Rules:
-- Use only information explicitly present; no speculation.
-- Keep each bullet ≤ 18 words.
-- Use the article's language ({language}).
-- No headings, no code fences, no emojis.
-"""
+        prompt = render_prompt_only("wikipedia.section_bullets", {
+            "title": title,
+            "section_text": self._sanitize_content(body, max_length=4000),
+            "language": language,
+        })
         # For wiki per‑section calls, keep retries minimal; the local hub has its own backoff.
         return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki section bullets", max_retries=1)) or ""
 
@@ -1251,22 +1241,11 @@ Rules:
             if sb.get("bullets"):
                 parts.append(f"## {sb['title']}\n{sb['bullets']}")
         joined = "\n\n".join(parts)
-        prompt = f"""
-You are consolidating a set of per‑section bullet summaries from a Wikipedia article.
-
-Article: {article_title}
-
-Section summaries:
-{joined}
-
-Task: Organize into 3–5 content‑derived categories with concise headings. Under each heading, include 3–5 “• ” bullets capturing concrete facts, names, or metrics. Do not add a final “Bottom line”.
-
-Rules:
-- Use only given bullets; merge duplicates; no speculation.
-- Keep each bullet ≤ 18 words.
-- Use {language}.
-- No code fences or emojis.
-"""
+        prompt = render_prompt_only("wikipedia.consolidate_insights", {
+            "title": article_title,
+            "section_summaries": joined,
+            "language": language,
+        })
         # Consolidation is lightweight; avoid noisy retry logs.
         return (await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="wiki insights consolidation", max_retries=1)) or ""
 
@@ -2385,14 +2364,11 @@ Preview:
     async def _generate_headline_from_summary(self, summary_text: str, metadata: Dict[str, Any]) -> str:
         """Helper to keep headline generation consistent across summary styles."""
         lang_instruction = self._summary_language_instruction(metadata.get('language', 'en'))
-        title_prompt = f"""
-        Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
-        Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
-        {lang_instruction}
-        Source title: {metadata.get('title', '')}
-        Summary:
-        {summary_text[:1200]}
-        """
+        title_prompt = render_prompt_only("headline", {
+            "lang_instruction": lang_instruction,
+            "title": metadata.get('title', ''),
+            "summary_excerpt": summary_text[:1200],
+        })
 
         headline_text = await self._robust_llm_call(
             [HumanMessage(content=title_prompt)],
@@ -2410,18 +2386,10 @@ Preview:
             return []
         min_sections = 3
         max_sections = max(min_sections, SUMMARY_PLAN_MAX_SECTIONS)
-        plan_prompt = f"""
-        You are designing a short outline for summarizing a YouTube video.
-
-        - Propose {min_sections}-{max_sections} sections that follow the video's natural flow.
-        - Use what the transcript already contains; do NOT invent topics.
-        - Keep titles concise (2-6 words) and descriptive.
-        - Return JSON array of objects with keys: title, focus.
-        - Respond in the transcript language.
-
-        Transcript excerpt (trimmed):
-        {safe_excerpt}
-        """
+        plan_prompt = render_prompt_only("structured_pipeline.planner", {
+            "max_sections": str(max_sections),
+            "transcript_excerpt": safe_excerpt,
+        })
         raw_plan = await self._robust_llm_call(
             [HumanMessage(content=plan_prompt)],
             operation_name="summary planner",
@@ -2506,22 +2474,13 @@ Preview:
             [f"- {item['title']}: {item.get('focus', '')}" for item in plan if item.get("title")]
         )
         safe_transcript = self._sanitize_content(transcript, max_length=12000)
-        plan_prompt = f"""
-        Use the following outline to summarize the video. Stick to the provided section order.
-
-        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
-        Outline:
-        {plan_lines}
-
-        Transcript:
-        {safe_transcript}
-
-        Write a concise, well-structured summary in the transcript language ({transcript_language or 'unknown'}):
-        - Begin with a 2-3 sentence overview.
-        - Use the outline section titles as headings; under each heading, add 2-4 bullets with concrete facts.
-        - Finish with one sentence starting “Bottom line: …”.
-        Rules: no speculation, no emojis, no code fences, and rely only on the transcript.
-        """
+        plan_prompt = render_prompt_only("structured_pipeline.summarize_with_plan", {
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "plan_lines": plan_lines,
+            "transcript": safe_transcript,
+            "language": transcript_language or 'unknown',
+        })
 
         summary_text = await self._robust_llm_call(
             [HumanMessage(content=plan_prompt)],
@@ -2622,7 +2581,7 @@ Preview:
             - 2-3 sentence introduction.
             - Keep every chapter heading exactly as written.
             - Under each chapter heading, keep 4-8 bullets unless the source chapter summary clearly has fewer distinct points.
-            - End with a short “Bottom line: …” conclusion.
+            - End with a short "Bottom line: …" conclusion.
 
             Editing rules:
             - Preserve named people, locations, evidence, examples, and contrasts.
@@ -2724,26 +2683,15 @@ Preview:
         part_label = ""
         if part_total > 1:
             part_label = f"Chapter part: {part_index}/{part_total}\n"
-        return f"""
-        Summarize this YouTube chapter in a detail-preserving way in the transcript language ({transcript_language or 'unknown'}).
-
-        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
-        Chapter: {chapter.get('title', 'Chapter')} ({time_range or 'time unknown'})
-        {part_label}Chapter transcript:
-        {section_text}
-
-        Output:
-        - Start with 1-2 sentences labeled “Overview:” capturing the main point of this chapter material.
-        - Then provide 5-9 “• ” bullets preserving concrete claims, examples, evidence, names, numbers, locations, and contrasts from this chapter material.
-        - If the chapter makes an argument, preserve the main supporting reasons instead of collapsing them into one vague bullet.
-        - If the speakers introduce later evidence or a new mapping step, include it even if it appears late in the chapter material.
-
-        Rules:
-        - Use only what is explicitly stated in the transcript.
-        - Keep events and claims in chapter order.
-        - Do not compress distinct arguments into a single generic sentence.
-        - No emojis or code fences.
-        """.strip()
+        return render_prompt_only("structured_pipeline.chapter_detailed", {
+            "language": transcript_language or 'unknown',
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "chapter_title": chapter.get('title', 'Chapter'),
+            "time_range": time_range or 'time unknown',
+            "part_label": part_label,
+            "section_text": section_text,
+        })
 
     def _build_basic_chapter_prompt(
         self,
@@ -2759,23 +2707,15 @@ Preview:
         part_label = ""
         if part_total > 1:
             part_label = f"Chapter part: {part_index}/{part_total}\n"
-        return f"""
-        Summarize this YouTube chapter material in the transcript language ({transcript_language or 'unknown'}).
-
-        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
-        Chapter: {chapter.get('title', 'Chapter')} ({time_range or 'time unknown'})
-        {part_label}Chapter transcript:
-        {section_text}
-
-        Output:
-        - 1 sentence labeled “Overview:” capturing the main point.
-        - Then provide 4-6 “• ” bullets with concrete names, evidence, examples, locations, and results.
-
-        Rules:
-        - Keep items factual and in chapter order.
-        - Preserve later evidence if it appears near the end.
-        - No emojis or code fences.
-        """.strip()
+        return render_prompt_only("structured_pipeline.chapter_basic", {
+            "language": transcript_language or 'unknown',
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "chapter_title": chapter.get('title', 'Chapter'),
+            "time_range": time_range or 'time unknown',
+            "part_label": part_label,
+            "section_text": section_text,
+        })
 
     def _fallback_candidate_snippets(self, section_text: str) -> List[str]:
         clean = " ".join((section_text or "").split())
@@ -2969,28 +2909,14 @@ Preview:
         partial_blob = "\n\n".join(
             f"Part {idx}:\n{item}" for idx, item in enumerate(partial_summaries, start=1)
         )
-        merge_prompt = f"""
-        You are merging partial summaries of a single YouTube chapter into one chapter digest.
-        Preserve chronology and preserve the material points already captured in the partial summaries.
-
-        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
-        Chapter: {chapter.get('title', 'Chapter')} ({time_range or 'time unknown'})
-
-        Partial chapter summaries:
-        {partial_blob}
-
-        Output:
-        - Start with 1-2 sentences labeled “Overview:” capturing the main point of the full chapter.
-        - Then provide 6-10 “• ” bullets preserving concrete claims, names, evidence, locations, numbers, and contrasts from across the full chapter.
-
-        Rules:
-        - Keep items in chapter order.
-        - Preserve later evidence and later mapping steps; do not overweight the opening material.
-        - Remove repetition only when two bullets say the same thing.
-        - Do not introduce new claims.
-        - No emojis or code fences.
-        - Use the transcript language ({transcript_language or 'unknown'}).
-        """.strip()
+        merge_prompt = render_prompt_only("structured_pipeline.chapter_merge", {
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "chapter_title": chapter.get('title', 'Chapter'),
+            "time_range": time_range or 'time unknown',
+            "partial_blob": partial_blob,
+            "language": transcript_language or 'unknown',
+        })
 
         merged_summary = await self._robust_llm_call(
             [HumanMessage(content=merge_prompt)],
@@ -3047,26 +2973,12 @@ Preview:
         if CHAPTER_FRAME_DELAY_SECS > 0:
             await asyncio.sleep(CHAPTER_FRAME_DELAY_SECS)
 
-        prompt = f"""
-        Write only a short introduction and conclusion for a chapter-based YouTube summary.
-        Do not rewrite or summarize the chapter sections themselves.
-
-        Video: {metadata.get('title', 'Unknown')} by {metadata.get('uploader', 'Unknown')}
-        Chapter overview notes:
-        {chr(10).join(chapter_lines)}
-
-        Return strict JSON only:
-        {{
-          "intro": "2-3 sentence high-level introduction to the full video",
-          "conclusion": "1-2 sentence conclusion capturing the overall takeaway"
-        }}
-
-        Rules:
-        - Base everything only on the provided chapter overview notes.
-        - Do not mention chapters, stitching, formatting, or summarization process.
-        - Do not use markdown fences.
-        - Use the transcript language ({transcript_language or 'unknown'}).
-        """.strip()
+        prompt = render_prompt_only("structured_pipeline.chapter_intro_conclusion", {
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "chapter_lines": "\n".join(chapter_lines),
+            "language": transcript_language or 'unknown',
+        })
 
         raw = await self._robust_llm_call(
             [HumanMessage(content=prompt)],
@@ -3336,240 +3248,49 @@ Preview:
             }
         
         # Prepare context and prompts based on summary type
-        base_context = f"""
-        Title: {metadata.get('title', 'Unknown')}
-        Source: {metadata.get('uploader', 'Unknown')}
-        Published/Upload Date: {metadata.get('upload_date', 'Unknown')}
-        Duration (seconds, if applicable): {metadata.get('duration', 0)}
-        URL: {metadata.get('url', 'Unknown')}
-
-        Source Text:
-        {transcript}
-        """
-        
         _lang_instr = self._summary_language_instruction(metadata.get('language', 'en'))
-        
-        prompts = {
-            "comprehensive": f"""
-            {base_context}
 
-            Write a comprehensive summary optimized for quick reading.
-
-            Output order:
-            1) Overview — 2–3 sentences covering the problem/topic, what’s shown, and the key conclusion.
-            2) Sections — 2–4 short, descriptive headings (2–4 words) followed by 3–5 bullets each:
-               • Use “• ” bullets. Keep bullets ≤ 18 words.
-               • Prefer specifics (data, numbers, names) over generalities.
-               • Avoid meta (don’t say “the host says/this video covers”).
-            3) Bottom line — one sentence starting “Bottom line: …”.
-
-            Section titles must summarize the key phase or theme (not full sentences). Each bullet must be factual and non‑redundant.
-
-            Rules:
-            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
-            - Prefer short paraphrases of full ideas rather than skipping them entirely.
-            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
-            - Keep events in the original chronological order unless a thematic grouping is requested.
-            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - {_lang_instr}
-            - Include [mm:ss] timestamps only if explicitly present in transcript text; otherwise omit.
-            - If a needed fact isn’t available, write “Unknown”.
-            - No code fences, no emojis, no markdown headings.
-
-            Length guidance (not strict):
-            - <10 min: 150–220 words; 2 sections.
-            - 10–30 min: 220–350 words; 3 sections.
-            - >30 min: 350–500 words; 3–4 sections.
-            """,
-
-            "audio": f"""
-            {base_context}
-
-            Write a natural, text‑to‑speech friendly narration.
-
-            Structure:
-            - Opening: 2–3 sentences that jump straight to the substance and high‑level conclusion.
-            - Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”. Use smooth spoken transitions (“First…”, “Next…”, “However…”, “Finally…”) and vary sentence length for natural rhythm.
-            - Closing: One sentence starting “Bottom line: …”.
-
-            Rules:
-            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
-            - Prefer short paraphrases of full ideas rather than skipping them entirely.
-            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
-            - Keep events in the original chronological order unless a thematic grouping is requested.
-            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - {_lang_instr}
-            - Keep numbers and names accurate; include specific values where present.
-            - Avoid list‑like phrasing or enumeration; use implicit transitions instead.
-            - No headings, no bullets, no code fences, no emojis.
-            - Length: ~180–380 words for most videos; shorter for very short clips.
-            """,
-
-            "bullet-points": f"""
-            {base_context}
-
-            Produce a skim‑ready bullet summary.
-
-            Output:
-            - One‑sentence overview.
-            - 10–16 “• ” bullets capturing concrete facts, results, and named items.
-            - End with “Bottom line: …”.
-
-            Rules:
-            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
-            - Prefer short paraphrases of full ideas rather than skipping them entirely.
-            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
-            - Keep events in the original chronological order unless a thematic grouping is requested.
-            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - {_lang_instr}
-            - Each bullet ≤ 18 words; lead with the fact/action.
-            - Prefer named entities, figures, and actions over general statements (metrics, model names, versions, dates).
-            - Avoid duplication; merge near‑identical points.
-            - If the transcript contains comparisons, include at least one bullet explicitly stating the contrast.
-            - Timestamps only if explicitly present; else omit.
-            - No code fences/emojis/headings.
-            """,
-
-            "key-insights": f"""
-            {base_context}
-
-            Organize the content into thematic categories based on the material itself (no external analysis).
-
-            Output:
-            - Use an appropriate number of thematic category headings based on the content structure.
-            - Under each heading, provide 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
-
-            Rules:
-            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
-            - Prefer short paraphrases of full ideas rather than skipping them entirely.
-            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
-            - Keep events in the original chronological order unless a thematic grouping is requested.
-            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - {_lang_instr}
-            - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
-            - No speculation beyond the transcript; use “Unknown” only when details are missing.
-            - Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension (e.g., Strategy / Technology / Outcome).
-            - No code fences or emojis.
-            - Do not add a final “Bottom line”.
-            """,
-
-            "reddit-discussion": f"""
-            {base_context}
-
-            Summarize this Reddit discussion as a discussion digest, not as an article summary.
-            This is a Reddit thread. Do not describe it as a video, clip, segment, or broadcast unless the thread text explicitly does so.
-
-            Output:
-            - Opening: 2–3 sentences describing the dominant reaction and the main point of debate.
-            - 2–4 short headings based on the discussion itself.
-            - Under each heading, include 3–5 “• ” bullets covering the strongest reactions, objections, corrections, and useful firsthand observations.
-
-            Rules:
-            - Prioritize consensus, disagreements, skepticism, corrections, and evidence offered by commenters.
-            - Treat unsupported claims carefully: use wording like “Some commenters argued…” when there is no consensus.
-            - Ignore jokes, insults, low-signal repetition, and moderator boilerplate.
-            - Keep each bullet ≤ 20 words and lead with the key point.
-            - Use only information explicitly present in the Reddit thread text and comments.
-            - {_lang_instr}
-            - No code fences or emojis.
-            - Do not add a final “Bottom line”.
-            """,
-            
-            "executive": f"""
-            {base_context}
-
-            Format this as a structured EXECUTIVE REPORT. Analyze the content and divide it into 2-4 logical parts based on the video's natural flow.
-
-            **📊 EXECUTIVE SUMMARY**
-            2-3 sentences that capture the video's main purpose, key findings, and business/practical value. Professional tone.
-
-            **📋 PART 1: (Give this section a descriptive title)**
-            
-            **Overview:** 2-3 sentences explaining what this part covers and its relevance.
-            
-            **Key Points:**
-            • Specific finding/point with details
-            • Specific finding/point with details  
-            • Specific finding/point with details
-            
-            **Conclusion:** 1-2 sentences summarizing the implications of this section.
-
-            **📋 PART 2: (Give this section a descriptive title)**
-            
-            **Overview:** 2-3 sentences explaining what this part covers and its relevance.
-            
-            **Key Points:**
-            • Specific finding/point with details
-            • Specific finding/point with details
-            • Specific finding/point with details
-            
-            **Conclusion:** 1-2 sentences summarizing the implications of this section.
-
-            **📋 PART 3: (Give this section a descriptive title - if applicable)**
-            
-            **Overview:** 2-3 sentences explaining what this part covers and its relevance.
-            
-            **Key Points:**
-            • Specific finding/point with details
-            • Specific finding/point with details
-            • Specific finding/point with details
-            
-            **Conclusion:** 1-2 sentences summarizing the implications of this section.
-
-            **🎯 STRATEGIC RECOMMENDATIONS**
-            • Actionable next step or key takeaway
-            • Actionable next step or key takeaway
-            • Actionable next step or key takeaway
-
-            Write for senior readers scanning quickly. Front‑load major outcomes and implications before elaborating.
-
-            **Guidelines:**
-            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
-            - Prefer short paraphrases of full ideas rather than skipping them entirely.
-            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
-            - Keep events in the original chronological order unless a thematic grouping is requested.
-            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - Divide content into 2-4 logical parts (not artificial divisions)
-            - Use professional, analytical language
-            - Include timestamps where helpful
-            - Focus on insights and implications, not just facts
-            - Keep each section balanced and substantive
-            - Ensure each PART ends with a concise synthesis sentence (1–2 clauses).
-            - If content doesn't fit this structure well, adapt the format accordingly
-            - British/Canadian spelling; no speculation
-            """,
-            
-            "adaptive": f"""
-            {base_context}
-
-            Silently choose the best format for this transcript from:
-            - Comprehensive
-            - Key Points
-            - Key Insights
-            - (If clearly procedural) a step‑wise breakdown (6–12 steps, ≤ 12 words/step)
-
-            Output only the chosen format. No meta‑explanation.
-
-            Global rules:
-            - Summarize using only information explicitly stated in the transcript; never infer causes or speculate.
-            - Prefer short paraphrases of full ideas rather than skipping them entirely.
-            - When names, numbers, or organizations are unclear, use “Unknown” rather than guessing.
-            - Keep events in the original chronological order unless a thematic grouping is requested.
-            - Rewrite for clarity and natural flow after compressing, without adding new meaning.
-            - If multiple patterns could apply, select the one maximizing clarity for non‑expert readers.
-            - {_lang_instr}
-            - Timestamps only if explicitly present; else omit.
-            - “Unknown” when information is missing.
-            - No code fences/emojis.
-            - For Key Points/Insights, use “• ” bullets. For step‑wise, use numbered steps.
-            - When choosing step‑wise form, begin with a one‑sentence context statement before numbering.
-            - Length guidance: short 120–180 words; dense 250–500 words; step‑wise concise.
-            """,
+        # Shared variables for base_context template substitution
+        _ctx_vars = {
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "upload_date": metadata.get('upload_date', 'Unknown'),
+            "duration": str(metadata.get('duration', 0)),
+            "url": metadata.get('url', 'Unknown'),
+            "transcript": transcript,
+            "lang_instruction": _lang_instr,
         }
-        
+
+        # Map internal summary_type keys to JSON dot-paths
+        _PROMPT_MAP = {
+            "comprehensive": "primary_summaries.comprehensive",
+            "audio": "audio_prompts.audio_narration",
+            "bullet-points": "primary_summaries.bullet_points",
+            "key-insights": "primary_summaries.key_insights",
+            "reddit-discussion": "primary_summaries.reddit_discussion",
+            "executive": "primary_summaries.executive",
+            "adaptive": "primary_summaries.adaptive",
+        }
+
+        prompt_dotpath = _PROMPT_MAP.get(summary_type, "primary_summaries.comprehensive")
+
+        # reddit-discussion uses reddit_context (not base_context) which needs different vars
+        if summary_type == "reddit-discussion":
+            _render_vars = {
+                "subreddit": metadata.get("channel_id") or metadata.get("subreddit") or "unknown",
+                "title": metadata.get('title', 'Unknown'),
+                "url": metadata.get('url', 'Unknown'),
+                "transcript": transcript,
+                "lang_instruction": _lang_instr,
+            }
+        else:
+            _render_vars = _ctx_vars
+
+        prompt_text = render_prompt(prompt_dotpath, _render_vars)
+
         # Generate the summary with robust error handling
         summary_text = await self._robust_llm_call(
-            [HumanMessage(content=prompts.get(summary_type, prompts["comprehensive"]))],
+            [HumanMessage(content=prompt_text)],
             f"Summary generation ({summary_type})"
         )
         
@@ -3582,15 +3303,12 @@ Preview:
         
         # Also generate a quick title/headline (using summary for token efficiency)
         lang_instruction = self._summary_language_instruction(metadata.get('language', 'en'))
-        title_prompt = f"""
-        Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
-        Start with a concrete noun or named entity; avoid vague verbs (e.g., "Exploring", "Discussing").
-        {lang_instruction}
-        Source title: {metadata.get('title', '')}
-        Summary:
-        {summary_text[:1200]}
-        """
-        
+        title_prompt = render_prompt_only("headline", {
+            "lang_instruction": lang_instruction,
+            "title": metadata.get('title', ''),
+            "summary_excerpt": summary_text[:1200],
+        })
+
         headline_text = await self._robust_llm_call(
             [HumanMessage(content=title_prompt)],
             "Headline generation"
@@ -4277,27 +3995,16 @@ Multiple Categories (when content genuinely spans areas):
             Published/Upload Date: {metadata.get('upload_date', 'Unknown')}
             Duration (seconds, if applicable): {metadata.get('duration', 0)}
             URL: {metadata.get('url', 'Unknown')}
-            
+
             Source Text Segment {i+1}/{len(chunks)}:
             {chunk}
             """
-            
-            # Generate focused summary for this chunk
-            chunk_prompt = f"""
-            {chunk_context}
 
-            Summarize this transcript segment for later merging.
+            # Generate focused summary for this chunk (prompt text from JSON)
+            chunk_prompt_text = render_prompt_only("chunked_pipeline.chunk_summary", {})
+            chunk_prompt = chunk_context + "\n" + chunk_prompt_text
 
-            Output:
-            - 5–9 “• ” bullets with concrete facts, names, and numbers.
-            - Avoid intro/outro fluff and repetition.
-            - No headings, no meta; just bullets.
-            - Use the transcript’s language.
-
-            Keep bullets ≤ 18 words. Timestamps only if explicitly present in this segment.
-            """
-            
-            chunk_summary = await self._robust_llm_call([HumanMessage(content=chunk_prompt)], 
+            chunk_summary = await self._robust_llm_call([HumanMessage(content=chunk_prompt)],
                                                       operation_name="chunk summary generation")
             if chunk_summary:
                 chunk_summaries.append(f"**Section {i+1}:**\n{chunk_summary}")
@@ -4363,13 +4070,11 @@ Multiple Categories (when content genuinely spans areas):
 
         if primary_text:
             lang_instruction = self._summary_language_instruction(metadata.get('language', 'en'))
-            title_prompt = f"""
-            Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
-            {lang_instruction}
-            Source title: {metadata.get('title', '')}
-            Summary:
-            {primary_text[:1200]}
-            """
+            title_prompt = render_prompt_only("headline", {
+                "lang_instruction": lang_instruction,
+                "title": metadata.get('title', ''),
+                "summary_excerpt": primary_text[:1200],
+            })
 
             headline_text = await self._robust_llm_call(
                 [HumanMessage(content=title_prompt)],
@@ -4383,31 +4088,16 @@ Multiple Categories (when content genuinely spans areas):
 
     async def _combine_chunk_summaries(self, chunk_summaries: List[str], metadata: Dict, summary_type: str) -> str:
         """Combine individual chunk summaries into a cohesive final summary"""
-        
+
         combined_content = "\n\n".join(chunk_summaries)
-        
-        combine_prompt = f"""
-        You have been provided with {len(chunk_summaries)} section summaries from a video transcript. 
-        Your task is to combine these into one comprehensive, well-structured summary.
-        
-        Video Context:
-        Title: {metadata.get('title', 'Unknown')}
-        Channel: {metadata.get('uploader', 'Unknown')}
-        Duration: {metadata.get('duration', 0)} seconds
-        
-        Section Summaries:
-        {combined_content}
-        
-        Create a comprehensive final summary that:
-        1. Integrates all key points from all sections into a cohesive narrative
-        2. Identifies and connects main themes across the entire video
-        3. Removes redundancy while preserving important details
-        4. Organizes information logically with clear sections
-        5. Provides actionable insights and key takeaways
-        6. Maintains appropriate length and detail level
-        
-        Structure your response with clear headings and bullet points where appropriate.
-        """
+
+        combine_prompt = render_prompt_only("chunked_pipeline.combine_chunks", {
+            "chunk_count": str(len(chunk_summaries)),
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "duration": str(metadata.get('duration', 0)),
+            "combined_content": combined_content,
+        })
         
         final_summary = await self._robust_llm_call([HumanMessage(content=combine_prompt)], 
                                                   operation_name="final summary combination")
@@ -4416,65 +4106,27 @@ Multiple Categories (when content genuinely spans areas):
 
     async def _extract_bullet_points(self, summary: str) -> str:
         """Extract key points in bullet format"""
-        prompt = f"""
-        Convert this summary into a skim‑ready bullet list.
-
-        {summary}
-
-        Output:
-        - One sentence overview.
-        - 10–16 “• ” bullets with concrete facts, results, and proper names.
-        - Finish with “Bottom line: …”.
-
-        Rules:
-        - Each bullet ≤ 18 words; lead with the key fact/action.
-        - Prefer specifics (metrics, versions, dates). Merge near‑duplicates.
-        - No headings, no code fences, no emojis.
-        """
+        prompt = render_prompt_only("chunked_extractors.extract_bullet_points", {
+            "summary": summary,
+        })
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="bullet points extraction")
         return result or "Unable to generate bullet points"
 
     async def _extract_key_insights(self, summary: str) -> str:
         """Organize summary into content-derived categories with concise bullets"""
-        prompt = f"""
-        Organize the following summary into thematic categories based on the content itself (not external analysis).
-
-        {summary}
-
-        Output:
-        - Use an appropriate number of thematic category headings based on the content structure.
-        - Under each heading, include 3–5 “• ” bullets capturing concrete facts, results, names, or metrics.
-
-        Rules:
-        - Keep each bullet ≤ 18 words; lead with the fact/action; avoid duplication.
-        - No speculation; use “Unknown” only when details are missing.
-        - No code fences or emojis.
-        - Do not add a final “Bottom line”.
-        """
+        prompt = render_prompt_only("chunked_extractors.extract_key_insights", {
+            "summary": summary,
+        })
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="key insights extraction")
         return result or "Unable to generate categorized insights"
 
     async def _extract_reddit_discussion_summary(self, summary: str) -> str:
         """Reframe a combined Reddit-thread summary around discussion dynamics."""
-        prompt = f"""
-        Rewrite this Reddit thread summary as a discussion digest.
-
-        {summary}
-
-        Output:
-        - Opening: 2–3 sentences on overall sentiment and the core dispute.
-        - 2–4 short headings drawn from the discussion.
-        - Under each heading, 3–5 “• ” bullets covering consensus, disagreement, corrections, and useful firsthand observations.
-
-        Rules:
-        - This is a Reddit thread, not a video. Do not call it a video, clip, or broadcast.
-        - Distinguish consensus from isolated opinions using phrasing like “Some commenters argued…” when needed.
-        - Ignore low-signal repetition, jokes, and insults.
-        - Keep each bullet ≤ 20 words.
-        - No code fences, no emojis, no final “Bottom line”.
-        """
+        prompt = render_prompt_only("chunked_extractors.extract_reddit_discussion", {
+            "summary": summary,
+        })
 
         result = await self._robust_llm_call(
             [HumanMessage(content=prompt)],
@@ -4484,55 +4136,24 @@ Multiple Categories (when content genuinely spans areas):
 
     async def _create_audio_summary_from_transcript(self, transcript: str, metadata: Dict) -> str:
         """Create audio-optimized summary directly from transcript (for direct path)"""
-        base_context = f"""
-        Video Title: {metadata.get('title', 'Unknown')}
-        Channel: {metadata.get('uploader', 'Unknown')}
-        Upload Date (YYYYMMDD): {metadata.get('upload_date', 'Unknown')}
-        Duration (seconds): {metadata.get('duration', 0)}
-        URL: {metadata.get('url', 'Unknown')}
-
-        Full Transcript:
-        {transcript}
-        """
-        
-        prompt = f"""
-        {base_context}
-
-        Write a natural, text‑to‑speech friendly narration from the transcript.
-
-        Structure:
-        - Opening: 2–3 sentences that jump straight to the substance and key conclusion.
-        - Main: Smoothly connect major topics with conversational transitions (no headings/bullets).
-                 Use transitions like “First…”, “Next…”, “However…”, “The key trade‑off is…”.
-        - Closing: One sentence starting “Bottom line: …”.
-
-        Requirements:
-        - Flowing paragraphs only; no lists, bullets, headings, code fences, or emojis.
-        - Present findings directly; avoid meta like “the video shows…”.
-        - Keep names/numbers accurate; include specific values where present.
-        - Maintain an engaging pace with varied sentence lengths.
-        - {self._summary_language_instruction(metadata.get('language', 'en'))}
-
-        Length guidance (not strict): 180–380 words for most videos; shorter for very short clips.
-        """
+        prompt = render_prompt("audio_prompts.audio_from_transcript", {
+            "title": metadata.get('title', 'Unknown'),
+            "uploader": metadata.get('uploader', 'Unknown'),
+            "upload_date": metadata.get('upload_date', 'Unknown'),
+            "duration": str(metadata.get('duration', 0)),
+            "url": metadata.get('url', 'Unknown'),
+            "transcript": transcript,
+            "lang_instruction": self._summary_language_instruction(metadata.get('language', 'en')),
+        })
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="audio summary from transcript")
         return result or f"Unable to create audio summary from transcript"
 
     async def _create_audio_summary(self, summary: str) -> str:
         """Create audio-optimized version of summary"""
-        prompt = f"""
-        Convert this summary into a natural, text‑to‑speech friendly narration.
-
-        {summary}
-
-        Rules:
-        - Use flowing paragraphs only (no bullets/headings/code fences/emojis).
-        - Smooth transitions between topics; keep proper nouns/numbers accurate.
-        - Maintain all key information and conclusions.
-        - End with a single sentence beginning “Bottom line: …”.
-        - Length target: 180–350 words (shorter for very short content).
-        """
+        prompt = render_prompt_only("audio_prompts.audio_from_summary", {
+            "summary": summary,
+        })
         
         result = await self._robust_llm_call([HumanMessage(content=prompt)], operation_name="audio summary creation")
         return result or summary  # Fallback to original summary
@@ -4632,30 +4253,12 @@ Multiple Categories (when content genuinely spans areas):
         target_chars = 3900
         target_words = 550  # Roughly 3900 chars at ~7 chars per word
         
-        condense_prompt = f"""
-        CRITICAL: You must condense this {len(text)}-character summary to EXACTLY {target_words} words (approximately {target_chars} characters) for TTS compatibility.
-
-        The current summary is {len(text)} characters and EXCEEDS the 4096 character limit. You must make significant cuts while preserving the most important content.
-
-        PRESERVE IN ORDER OF IMPORTANCE:
-        1. Main conclusions and final recommendations
-        2. Key specific findings and comparisons
-        3. Important numbers, prices, measurements
-        4. Critical trade-offs and practical implications
-
-        AGGRESSIVE CUTS REQUIRED:
-        - Combine multiple sentences into single, direct statements  
-        - Eliminate all redundant explanations and examples
-        - Remove transition phrases and filler language
-        - Merge similar points together
-        - Cut lengthy descriptions down to essential facts
-        - Use shorter, more direct wording throughout
-
-        AIM FOR EXACTLY {target_words} WORDS. This is NOT optional - the summary must fit the TTS limit.
-
-        Original summary:
-        {text}
-        """
+        condense_prompt = render_prompt_only("audio_prompts.condense_for_tts", {
+            "text_length": str(len(text)),
+            "target_words": str(target_words),
+            "target_chars": str(target_chars),
+            "text": text,
+        })
         
         condensed_content = await self._robust_llm_call(
             [HumanMessage(content=condense_prompt)], 
