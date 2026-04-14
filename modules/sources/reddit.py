@@ -214,6 +214,14 @@ class RedditFetcher:
             if linked_url and not linked_url.startswith("https://www.reddit.com"):
                 external_url = linked_url
 
+        # For image posts, prefer the full-res external URL over Reddit's
+        # low-res thumbnail (which is typically 140x78).
+        thumbnail = self._clean_thumbnail(getattr(submission, "thumbnail", None))
+        if external_url:
+            _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
+            if any(external_url.lower().endswith(ext) for ext in _IMAGE_EXTENSIONS):
+                thumbnail = external_url
+
         return RedditFetchResult(
             id=submission.id,
             title=submission.title or "Untitled thread",
@@ -225,7 +233,7 @@ class RedditFetcher:
             upvote_ratio=float(submission.upvote_ratio or 0.0),
             num_comments=int(submission.num_comments or 0),
             flair=submission.link_flair_text,
-            thumbnail=self._clean_thumbnail(getattr(submission, "thumbnail", None)),
+            thumbnail=thumbnail,
             selftext=submission.selftext or "",
             comment_snippets=snippets,
             combined_text=combined_text,

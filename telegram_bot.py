@@ -290,6 +290,8 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.handle_reprocess_request()
         elif self.path == '/api/regenerate-image':
             self.handle_regenerate_image()
+        elif self.path == '/api/process-url':
+            self.handle_process_url_request()
         else:
             self.send_error(404, "Endpoint not found")
     
@@ -1378,7 +1380,111 @@ class ModernDashboardHTTPRequestHandler(SimpleHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(error_data).encode())
-    
+
+    def handle_process_url_request(self):
+        """POST /api/process-url — submit a URL for processing through the Telegram pipeline.
+
+        This is the same pipeline that runs when a user sends a URL via Telegram:
+        process → export JSON → dual_sync_upload → PostgresWriter → image queue.
+        """
+        global BOT_INSTANCE
+
+        if BOT_INSTANCE is None or BOT_INSTANCE.loop is None:
+            self.send_response(503)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'bot-unavailable'}).encode('utf-8'))
+            return
+
+        content_length = int(self.headers.get('Content-Length') or 0)
+        if content_length <= 0:
+            self.send_response(400)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'empty-request'}).encode('utf-8'))
+            return
+
+        try:
+            body = self.rfile.read(content_length)
+            payload = json.loads(body.decode('utf-8'))
+        except Exception as exc:
+            self.send_response(400)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'invalid-json', 'details': str(exc)}).encode('utf-8'))
+            return
+
+        required_token = os.getenv('REPROCESS_AUTH_TOKEN')
+        provided_token = self.headers.get('X-Reprocess-Token')
+        if required_token and provided_token != required_token:
+            self.send_response(403)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'forbidden'}).encode('utf-8'))
+            return
+
+        url = (payload.get('url') or '').strip()
+        summary_type = (payload.get('summary_type') or 'comprehensive').strip()
+        user_name = (payload.get('user_id') or 'dashboard').strip()
+
+        if not url:
+            self.send_response(400)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'missing-url'}).encode('utf-8'))
+            return
+
+        try:
+            from modules.services import summary_service
+            loop = BOT_INSTANCE.loop
+
+            # Predict content_id synchronously so the response includes it
+            predicted_item = summary_service.build_current_item_from_url(BOT_INSTANCE, url)
+            predicted_id = (predicted_item or {}).get('content_id', '')
+
+            future = asyncio.run_coroutine_threadsafe(
+                summary_service.process_url_headless(
+                    BOT_INSTANCE,
+                    url,
+                    summary_type=summary_type,
+                    user_name=user_name,
+                ),
+                loop,
+            )
+
+            def _done_callback(fut: asyncio.Future):
+                try:
+                    result = fut.result()
+                    if result:
+                        logger.info("Process-URL completed: %s", result)
+                except Exception:
+                    logger.exception("Process-URL task failed")
+
+            future.add_done_callback(_done_callback)
+
+            self.send_response(202)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                'status': 'scheduled',
+                'url': url,
+                'summary_type': summary_type,
+                'content_id': predicted_id,
+            }, ensure_ascii=False).encode('utf-8'))
+        except Exception as exc:
+            logger.exception("Failed to schedule process-url job")
+            self.send_response(500)
+            self.send_cors_headers()
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps({'error': 'schedule-failed', 'details': str(exc)}).encode('utf-8'))
+
     def handle_delete_reports(self):
         """Handle POST request to delete selected reports"""
         try:

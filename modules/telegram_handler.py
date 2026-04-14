@@ -660,6 +660,14 @@ class YouTubeTelegramBot:
         if not external_url:
             return item
 
+        # Don't promote media files (images/video) to source="web" — they
+        # can't be meaningfully summarized as web articles.  Keep source as
+        # "reddit" so the pipeline summarizes the post text + comments.
+        _MEDIA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".svg")
+        if any(external_url.lower().endswith(ext) for ext in _MEDIA_EXTENSIONS):
+            logging.info("[REDDIT] Link post points to media (%s); keeping source=reddit for %s", external_url[:80], reddit_result.id)
+            return item
+
         primary_url = external_url
         primary_content_id = self._provisional_web_content_id(primary_url)
         try:

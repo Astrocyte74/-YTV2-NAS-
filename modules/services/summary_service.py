@@ -1125,6 +1125,198 @@ async def generate_tts_audio_file(handler, summary_text: str, video_id: str, jso
     return audio_filepath if audio_filepath else None
 
 
+# ---------------------------------------------------------------------------
+# Headless URL processing — used by /api/process-url on port 6452
+# ---------------------------------------------------------------------------
+
+
+def build_current_item_from_url(handler, url: str) -> Optional[Dict[str, Any]]:
+    """Build a canonical ``current_item`` dict from a raw URL string.
+
+    Uses the same URL-detection and identity logic as ``handle_message``
+    in ``telegram_handler.py``.  Returns ``None`` if the URL is not
+    recognised as YouTube, Reddit, or a supported web URL.
+
+    This helper is intentionally synchronous so the HTTP handler can call
+    it to predict the ``content_id`` *before* scheduling the async work.
+    """
+    import hashlib
+
+    text = (url or "").strip()
+    if not text:
+        return None
+
+    # YouTube
+    yt_match = handler.youtube_url_pattern.search(text)
+    if yt_match:
+        video_url = f"https://www.youtube.com/watch?v={yt_match.group(1)}"
+        raw_id = handler._extract_video_id(video_url)
+        normalized_id = handler._normalize_content_id(raw_id)
+        return {
+            "source": "youtube",
+            "url": video_url,
+            "content_id": normalized_id,
+            "raw_id": raw_id,
+            "normalized_id": normalized_id,
+        }
+
+    # Reddit
+    reddit_url = handler._extract_reddit_url(text)
+    if reddit_url:
+        reddit_url = reddit_url.strip()
+        resolved = handler._resolve_redirects(reddit_url)
+        try:
+            item = handler._build_reddit_current_item(resolved)
+        except Exception as exc:
+            logging.warning("[headless] Reddit context build failed: %s", exc)
+            reddit_id = handler._extract_reddit_id(resolved)
+            if not reddit_id:
+                return None
+            return {
+                "source": "reddit",
+                "url": resolved,
+                "content_id": f"reddit:{reddit_id}",
+                "raw_id": reddit_id,
+                "normalized_id": reddit_id,
+                "is_link_post": False,
+                "external_url": None,
+            }
+
+        # _build_reddit_current_item may promote link posts to source="web"
+        # pointing at an image/video URL.  For headless processing there is no
+        # user to pick a variant, so keep source="reddit" to summarise the
+        # post text + comments instead of trying to extract text from media.
+        if item.get("is_link_post") and item.get("source") == "web":
+            ext_url = item.get("url") or item.get("external_url") or ""
+            _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov")
+            if any(ext_url.lower().endswith(ext) for ext in _IMAGE_EXTENSIONS):
+                reddit_id = item.get("origin_content_id", "").replace("reddit:", "") or item.get("raw_id", "")
+                origin_url = item.get("origin_url") or resolved
+                logging.info(
+                    "[headless] Reddit link-post points to media (%s); keeping source=reddit for %s",
+                    ext_url[:80],
+                    reddit_id,
+                )
+                return {
+                    "source": "reddit",
+                    "url": origin_url,
+                    "content_id": f"reddit:{reddit_id}" if reddit_id else item.get("content_id"),
+                    "raw_id": reddit_id,
+                    "normalized_id": reddit_id,
+                    "is_link_post": False,
+                    "external_url": None,
+                }
+
+        return item
+
+    # Web / generic
+    web_url = handler._extract_web_url(text)
+    if not web_url:
+        if text.startswith("http://") or text.startswith("https://"):
+            web_url = text
+        else:
+            return None
+
+    web_url = web_url.strip()
+    resolved = handler._resolve_redirects(web_url)
+    if isinstance(resolved, str) and resolved.strip():
+        web_url = resolved.strip()
+    hashed = hashlib.sha256(web_url.encode("utf-8")).hexdigest()[:24]
+    content_id = f"web:{hashed}"
+    return {
+        "source": "web",
+        "url": web_url,
+        "content_id": content_id,
+        "raw_id": hashed,
+        "normalized_id": hashed,
+    }
+
+
+class _HeadlessMessage:
+    """Minimal stand-in for a Telegram Message object.
+
+    All Telegram-facing methods are no-ops that log instead of sending.
+    """
+
+    class _Chat:
+        id = 0
+
+    def __init__(self):
+        self.chat = self._Chat()
+        self.message_id = 0
+
+    async def reply_text(self, *a, **kw):
+        pass
+
+    async def reply_voice(self, *a, **kw):
+        pass
+
+    async def reply_photo(self, *a, **kw):
+        pass
+
+    async def edit_text(self, *a, **kw):
+        pass
+
+
+class _HeadlessQuery:
+    """Minimal stand-in for a Telegram CallbackQuery.
+
+    Used when processing URLs from the dashboard (no Telegram user involved).
+    Status updates are logged instead of editing a Telegram message.
+    """
+
+    def __init__(self):
+        self.message = _HeadlessMessage()
+
+    async def edit_message_text(self, text, parse_mode=None, reply_markup=None):
+        logging.info("[headless] %s", str(text)[:200])
+        return None
+
+    async def answer(self, text=None, show_alert=False):
+        pass
+
+
+async def process_url_headless(
+    handler,
+    url: str,
+    *,
+    summary_type: str = "comprehensive",
+    user_name: str = "dashboard",
+) -> Optional[str]:
+    """Process a URL through the full Telegram pipeline without a Telegram user.
+
+    Builds a canonical ``current_item`` using :func:`build_current_item_from_url`,
+    then delegates to :func:`process_content_summary` which runs the entire
+    processing/export/sync/image-queue flow.
+
+    Returns the content_id on success, or None on failure.
+    """
+    current_item = build_current_item_from_url(handler, url)
+    if current_item is None:
+        logging.warning("[headless] unsupported URL: %s", (url or "")[:100])
+        return None
+
+    content_id = current_item.get("content_id", "")
+    source = current_item.get("source", "unknown")
+    logging.info("[headless] %s detected: %s -> %s", source, url, content_id)
+
+    handler.current_item = current_item
+    fake_query = _HeadlessQuery()
+
+    try:
+        await process_content_summary(
+            handler,
+            fake_query,
+            summary_type=summary_type,
+            user_name=user_name,
+        )
+        logging.info("[headless] processing complete for %s", content_id)
+        return content_id
+    except Exception as exc:
+        logging.exception("[headless] process_content_summary failed: %s", exc)
+        return None
+
+
 async def process_content_summary(
     handler,
     query,

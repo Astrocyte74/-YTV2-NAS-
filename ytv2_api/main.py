@@ -99,6 +99,73 @@ def check_auth(authorization: Optional[str]) -> bool:
     return token == secret
 
 
+def _summary_image_provider_configured() -> bool:
+    """Return True when summary images are enabled and at least one provider is configured."""
+    try:
+        from modules.services import summary_image_service
+
+        if not summary_image_service.SUMMARY_IMAGE_ENABLED:
+            return False
+
+        providers = summary_image_service._summary_image_providers()
+        tts_base = (os.getenv('TTSHUB_API_BASE') or '').strip()
+        auto1111_base = (os.getenv('AUTOMATIC1111_BASE_URL') or '').strip()
+        zimage_base = (os.getenv('ZIMAGE_BASE_URL') or '').strip()
+
+        for provider in providers:
+            if provider == 'drawthings' and tts_base:
+                return True
+            if provider == 'auto1111' and auto1111_base:
+                return True
+            if provider == 'zimage' and zimage_base:
+                return True
+            if provider == 'flux2' and summary_image_service.flux2_service.is_enabled():
+                return True
+    except Exception as exc:
+        logger.debug("summary image provider check failed: %s", exc)
+        # Fall back to a conservative env-only check
+        img_enabled = os.getenv('SUMMARY_IMAGE_ENABLED', 'false').lower() in ('1', 'true', 'yes', 'on')
+        if not img_enabled:
+            return False
+        return bool(
+            (os.getenv('TTSHUB_API_BASE') or '').strip()
+            or (os.getenv('AUTOMATIC1111_BASE_URL') or '').strip()
+            or (os.getenv('ZIMAGE_BASE_URL') or '').strip()
+            or (os.getenv('FLUX2_ENABLED') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+        )
+    return False
+
+
+def _maybe_enqueue_image_job(content_id: str, title: str, summary, analysis) -> None:
+    """Enqueue an AI summary image job — mirrors the Telegram path in summary_service.py."""
+    try:
+        cid = str(content_id or '').strip()
+        if not cid:
+            return
+
+        if not _summary_image_provider_configured():
+            return
+
+        from modules import image_queue as _iq
+        from modules.services import summary_image_service
+
+        if summary_image_service._pending_job_exists(cid) or not summary_image_service._should_enqueue(cid):
+            return
+
+        payload = {
+            'id': cid,
+            'video_id': cid.split(':', 1)[-1] if ':' in cid else cid,
+            'title': title or cid,
+            'metadata': {'title': title or ''},
+            'summary': summary if isinstance(summary, dict) else {'summary': str(summary or '')},
+            'analysis': analysis if isinstance(analysis, dict) else {},
+        }
+        path = _iq.enqueue({'mode': 'summary_image', 'content': payload, 'reason': 'api_process_enqueue'})
+        logging.info("Enqueued image job for %s (API path) -> %s", cid, getattr(path, 'name', path))
+    except Exception as exc:
+        logging.warning("Image enqueue failed for %s: %s", content_id, exc)
+
+
 async def require_auth(authorization: Optional[str] = Header(None)) -> None:
     """FastAPI dependency for authentication - raises if auth fails."""
     if not check_auth(authorization):
@@ -169,8 +236,11 @@ async def process_youtube(url: str, summary_type: str, user_id: str, channel: st
         result = await summarizer.process_video(url, summary_type)
 
         if result.get('error'):
+            err_vid = result.get('video_id') or result.get('id', 'unknown')
+            if isinstance(err_vid, str) and err_vid.startswith('yt:'):
+                err_vid = err_vid[3:]
             return ProcessResponse(
-                content_id=result.get('video_id', 'unknown'),
+                content_id=err_vid,
                 status='failed',
                 error=result.get('error'),
                 metadata=result.get('metadata', {}),
@@ -178,7 +248,10 @@ async def process_youtube(url: str, summary_type: str, user_id: str, channel: st
                 source_type='youtube'
             )
 
-        video_id = result.get('video_id', 'unknown')
+        video_id = result.get('video_id') or result.get('id', 'unknown')
+        # Strip yt: prefix if present (process_text_content prefixes content_id)
+        if video_id.startswith('yt:'):
+            video_id = video_id[3:]
         metadata = result.get('metadata', {})
         dashboard_base = get_dashboard_url()
 
@@ -203,9 +276,6 @@ async def process_youtube(url: str, summary_type: str, user_id: str, channel: st
                     )
                 # Extract the summary text from the dict
                 summary_text = s.get('summary') or s.get('headline')
-                if summary_text and len(summary_text) > 1000:
-                    # Truncate long summaries for API responses
-                    summary_text = summary_text[:1000] + "..."
         elif 'summary_data' in result:
             summary_data = result['summary_data']
             # Try to get the requested summary type
@@ -215,9 +285,14 @@ async def process_youtube(url: str, summary_type: str, user_id: str, channel: st
             elif isinstance(s, dict):
                 # Summary is a dict - extract text or html field
                 summary_text = s.get('text') or s.get('html')
-                if summary_text and len(summary_text) > 500:
-                    # Truncate long summaries for API responses
-                    summary_text = summary_text[:1000] + "..."
+
+        # Enqueue AI image generation (mirrors Telegram path)
+        _maybe_enqueue_image_job(
+            content_id=f"yt:{video_id}",
+            title=metadata.get('title', ''),
+            summary=result.get('summary'),
+            analysis=result.get('analysis'),
+        )
 
         return ProcessResponse(
             content_id=video_id,
@@ -285,6 +360,14 @@ async def process_reddit(url: str, summary_type: str, user_id: str, channel: str
 
         dashboard_base = get_dashboard_url()
 
+        # Enqueue AI image generation (mirrors Telegram path)
+        _maybe_enqueue_image_job(
+            content_id=f"reddit:{reddit_result.id}",
+            title=reddit_result.title,
+            summary={'summary': summary_text or ''},
+            analysis={},
+        )
+
         return ProcessResponse(
             content_id=reddit_result.id,
             status='completed',
@@ -342,9 +425,16 @@ async def process_web(url: str, summary_type: str, user_id: str, channel: str) -
         elif not isinstance(summary_text, str):
             summary_text = None
 
-        # Generate a simple ID from URL
-        import hashlib
-        content_id = hashlib.md5(url.encode()).hexdigest()[:12]
+        # Keep the canonical content id from the web fetcher to match the existing pipeline
+        content_id = content.id
+
+        # Enqueue AI image generation (mirrors Telegram path)
+        _maybe_enqueue_image_job(
+            content_id=content_id,
+            title=content.title or '',
+            summary={'summary': summary_text or ''},
+            analysis={},
+        )
 
         return ProcessResponse(
             content_id=content_id,
