@@ -1243,10 +1243,11 @@ class _HeadlessMessage:
 
     def __init__(self):
         self.chat = self._Chat()
+        self.chat_id = 0
         self.message_id = 0
 
     async def reply_text(self, *a, **kw):
-        pass
+        return self
 
     async def reply_voice(self, *a, **kw):
         pass
