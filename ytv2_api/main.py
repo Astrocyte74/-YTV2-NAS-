@@ -46,8 +46,6 @@ from .models import (
 
 # Lazy-initialized service instances
 _summarizer = None
-_reddit_fetcher = None
-_web_fetcher = None
 
 # URL pattern matching
 YOUTUBE_PATTERN = re.compile(
@@ -206,26 +204,6 @@ def get_summarizer():
     return _summarizer
 
 
-def get_reddit_fetcher():
-    """Get or create the RedditFetcher instance."""
-    global _reddit_fetcher
-    if _reddit_fetcher is None:
-        from modules.sources.reddit import RedditFetcher
-        try:
-            _reddit_fetcher = RedditFetcher()
-        except Exception as e:
-            print(f"[YTV2 API] Reddit fetcher not available: {e}")
-            _reddit_fetcher = None
-    return _reddit_fetcher
-
-
-def get_web_fetcher():
-    """Get or create the WebPageFetcher instance."""
-    global _web_fetcher
-    if _web_fetcher is None:
-        from modules.sources.web import WebPageFetcher
-        _web_fetcher = WebPageFetcher()
-    return _web_fetcher
 
 
 async def process_youtube(url: str, summary_type: str, user_id: str, channel: str) -> ProcessResponse:
@@ -320,67 +298,67 @@ async def process_youtube(url: str, summary_type: str, user_id: str, channel: st
 
 
 async def process_reddit(url: str, summary_type: str, user_id: str, channel: str) -> ProcessResponse:
-    """Process a Reddit URL."""
-    fetcher = get_reddit_fetcher()
-    if not fetcher:
-        return ProcessResponse(
-            content_id='unknown',
-            status='failed',
-            error='Reddit credentials not configured. Set REDDIT_CLIENT_ID, REDDIT_REFRESH_TOKEN, and REDDIT_USER_AGENT.',
-            metadata={},
-            dashboard_url=None,
-            source_type='reddit'
-        )
+    """Process a Reddit URL through the full pipeline (same as Telegram)."""
+    summarizer = get_summarizer()
 
     try:
-        reddit_result = fetcher.fetch(url)
-        summarizer = get_summarizer()
+        result = await summarizer.process_reddit_thread(url, summary_type)
 
-        # Generate summary from combined text
-        metadata = {
-            'title': reddit_result.title,
-            'url': url,
-            'subreddit': reddit_result.subreddit,
-            'author': reddit_result.author,
-        }
+        if result.get('error'):
+            return ProcessResponse(
+                content_id=result.get('id', 'unknown').replace('reddit:', ''),
+                status='failed',
+                error=result.get('error'),
+                metadata=result.get('metadata', {}),
+                dashboard_url=None,
+                source_type='reddit'
+            )
 
-        summary_text = await summarizer.generate_summary(
-            reddit_result.combined_text,
-            metadata
-        )
-
-        if isinstance(summary_text, dict):
-            summary_text = summary_text.get('summary') or summary_text.get('comprehensive')
-
-        # Ensure summary is a string, not a dict
-        if isinstance(summary_text, dict):
-            summary_text = str(summary_text)
-        elif not isinstance(summary_text, str):
-            summary_text = None
-
+        # Extract summary text from the canonical pipeline result
+        content_id = result.get('id', 'unknown')
+        if content_id.startswith('reddit:'):
+            content_id = content_id[7:]
+        metadata = result.get('metadata', {})
         dashboard_base = get_dashboard_url()
+
+        summary_text = None
+        s = result.get('summary')
+        if isinstance(s, str):
+            summary_text = s
+        elif isinstance(s, dict):
+            if 'error' in s:
+                return ProcessResponse(
+                    content_id=content_id,
+                    status='failed',
+                    error=s.get('error', 'Unknown error'),
+                    metadata=metadata,
+                    dashboard_url=None,
+                    source_type='reddit'
+                )
+            summary_text = s.get('summary') or s.get('headline')
 
         # Enqueue AI image generation (mirrors Telegram path)
         _maybe_enqueue_image_job(
-            content_id=f"reddit:{reddit_result.id}",
-            title=reddit_result.title,
-            summary={'summary': summary_text or ''},
-            analysis={},
+            content_id=result.get('id', ''),
+            title=metadata.get('title', ''),
+            summary=result.get('summary'),
+            analysis=result.get('analysis'),
         )
 
+        source_meta = result.get('source_metadata', {}).get('reddit', {})
         return ProcessResponse(
-            content_id=reddit_result.id,
+            content_id=content_id,
             status='completed',
             summary=summary_text,
             metadata={
-                'title': reddit_result.title,
-                'subreddit': reddit_result.subreddit,
-                'author': reddit_result.author,
-                'score': reddit_result.score,
-                'num_comments': reddit_result.num_comments,
-                'language': reddit_result.language or 'en',
+                'title': metadata.get('title', ''),
+                'subreddit': source_meta.get('subreddit', ''),
+                'author': source_meta.get('author', ''),
+                'score': source_meta.get('score'),
+                'num_comments': source_meta.get('num_comments'),
+                'language': result.get('summary_language') or result.get('original_language', 'en'),
             },
-            dashboard_url=f"{dashboard_base}/reddit/{reddit_result.id}" if dashboard_base else None,
+            dashboard_url=f"{dashboard_base}/reddit/{content_id}" if dashboard_base else None,
             source_type='reddit'
         )
 
@@ -396,44 +374,47 @@ async def process_reddit(url: str, summary_type: str, user_id: str, channel: str
 
 
 async def process_web(url: str, summary_type: str, user_id: str, channel: str) -> ProcessResponse:
-    """Process a generic web page URL."""
-    fetcher = get_web_fetcher()
+    """Process a generic web page URL through the full pipeline (same as Telegram)."""
     summarizer = get_summarizer()
 
     try:
-        web_result = fetcher.fetch(url)
-        content = web_result.content
+        result = await summarizer.process_web_page(url, summary_type)
 
-        # Generate summary from extracted text
-        metadata = {
-            'title': content.title,
-            'url': url,
-            'site_name': content.site_name,
-        }
+        if result.get('error'):
+            return ProcessResponse(
+                content_id=result.get('id', 'unknown'),
+                status='failed',
+                error=result.get('error'),
+                metadata=result.get('metadata', {}),
+                dashboard_url=None,
+                source_type='web'
+            )
 
-        summary_text = await summarizer.generate_summary(
-            web_result.text,
-            metadata
-        )
+        content_id = result.get('id', 'unknown')
+        metadata = result.get('metadata', {})
 
-        if isinstance(summary_text, dict):
-            summary_text = summary_text.get('summary') or summary_text.get('comprehensive')
-
-        # Ensure summary is a string, not a dict
-        if isinstance(summary_text, dict):
-            summary_text = str(summary_text)
-        elif not isinstance(summary_text, str):
-            summary_text = None
-
-        # Keep the canonical content id from the web fetcher to match the existing pipeline
-        content_id = content.id
+        summary_text = None
+        s = result.get('summary')
+        if isinstance(s, str):
+            summary_text = s
+        elif isinstance(s, dict):
+            if 'error' in s:
+                return ProcessResponse(
+                    content_id=content_id,
+                    status='failed',
+                    error=s.get('error', 'Unknown error'),
+                    metadata=metadata,
+                    dashboard_url=None,
+                    source_type='web'
+                )
+            summary_text = s.get('summary') or s.get('headline')
 
         # Enqueue AI image generation (mirrors Telegram path)
         _maybe_enqueue_image_job(
             content_id=content_id,
-            title=content.title or '',
-            summary={'summary': summary_text or ''},
-            analysis={},
+            title=metadata.get('title', ''),
+            summary=result.get('summary'),
+            analysis=result.get('analysis'),
         )
 
         return ProcessResponse(
@@ -441,9 +422,9 @@ async def process_web(url: str, summary_type: str, user_id: str, channel: str) -
             status='completed',
             summary=summary_text,
             metadata={
-                'title': content.title,
-                'site_name': content.site_name,
-                'language': content.language or 'en',
+                'title': metadata.get('title', ''),
+                'site_name': metadata.get('channel', ''),
+                'language': result.get('summary_language') or result.get('original_language', 'en'),
                 'url': url,
             },
             dashboard_url=None,  # Web content doesn't have dashboard pages
