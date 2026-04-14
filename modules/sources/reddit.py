@@ -214,13 +214,34 @@ class RedditFetcher:
             if linked_url and not linked_url.startswith("https://www.reddit.com"):
                 external_url = linked_url
 
-        # For image posts, prefer the full-res external URL over Reddit's
+        # For image posts, prefer the full-res source over Reddit's
         # low-res thumbnail (which is typically 140x78).
         thumbnail = self._clean_thumbnail(getattr(submission, "thumbnail", None))
-        if external_url:
+
+        # Gallery posts: extract first image at full resolution from media_metadata
+        if getattr(submission, "is_gallery", False):
+            try:
+                gallery_items = getattr(submission, "gallery_data", {}).get("items", [])
+                media_meta = getattr(submission, "media_metadata", {})
+                if gallery_items and media_meta:
+                    first_id = gallery_items[0].get("media_id", "")
+                    first_item = media_meta.get(first_id, {})
+                    source = first_item.get("s", {})
+                    gallery_url = source.get("u") or source.get("gif")
+                    if gallery_url:
+                        # Convert preview.redd.it to i.redd.it for direct full-res access
+                        thumbnail = gallery_url.replace("preview.redd.it", "i.redd.it").split("?")[0]
+            except Exception:
+                pass
+        elif external_url:
+            # Single-image link posts
             _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")
-            if any(external_url.lower().endswith(ext) for ext in _IMAGE_EXTENSIONS):
-                thumbnail = external_url
+            # Check path without query params (Reddit URLs like preview.redd.it/x.jpg?width=140&...)
+            from urllib.parse import urlparse
+            ext_path = urlparse(external_url).path.lower()
+            if any(ext_path.endswith(ext) for ext in _IMAGE_EXTENSIONS):
+                # Strip Reddit resize params for full-res version
+                thumbnail = external_url.split("?")[0] if "preview.redd.it" in external_url else external_url
 
         return RedditFetchResult(
             id=submission.id,

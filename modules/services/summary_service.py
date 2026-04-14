@@ -1478,6 +1478,8 @@ async def process_content_summary(
             if entry.get("synced"):
                 await send_existing_summary_notice(handler, query, ledger_id, summary_type)
                 logging.info(f"♻️ SKIPPED: {display_id} already synced")
+                # Emit report-synced so the dashboard can show toast + open reader
+                emit_report_event('report-synced', {'video_id': ledger_id, 'already_existed': True})
                 return
             else:
                 logging.info("🔄 Content exists but not marked synced - processing fresh")
