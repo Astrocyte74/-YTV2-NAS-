@@ -1311,13 +1311,11 @@ class YouTubeSummarizer:
             insights_text = merged or raw_text[:2000]
 
         # Headline
-        title_prompt = f"""
-Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.
-IMPORTANT: Respond in {language}.
-Source title: {metadata.get('title','')}
-Preview:
-{insights_text[:1000]}
-"""
+        title_prompt = render_prompt_only("wikipedia.headline", {
+            "language": language,
+            "wiki_title": metadata.get("title", ""),
+            "preview_text": insights_text[:1000],
+        })
         headline_text = await self._robust_llm_call([HumanMessage(content=title_prompt)], operation_name="wiki headline", max_retries=1)
         headline_text = headline_text or metadata.get("title", "Generated Summary")
 
@@ -2570,27 +2568,10 @@ Preview:
                 )
             combined_blob = "\n".join(combined_lines)
 
-            combine_prompt = f"""
-            You are editing a long-form chapter digest, not re-summarizing it from scratch.
-            Preserve the chapter order and preserve the material points already present.
-
-            Chapters:
-            {combined_blob}
-
-            Output:
-            - 2-3 sentence introduction.
-            - Keep every chapter heading exactly as written.
-            - Under each chapter heading, keep 4-8 bullets unless the source chapter summary clearly has fewer distinct points.
-            - End with a short "Bottom line: …" conclusion.
-
-            Editing rules:
-            - Preserve named people, locations, evidence, examples, and contrasts.
-            - Remove repetition only when two bullets say the same thing.
-            - Do not collapse later chapters into one generic statement.
-            - Do not rename headings.
-            - Use the transcript language ({transcript_language or 'unknown'}).
-            - No emojis or code fences.
-            """
+            combine_prompt = render_prompt_only("structured_pipeline.chapter_edit_combine", {
+                "combined_blob": combined_blob,
+                "transcript_language": transcript_language or "unknown",
+            })
             combined_summary = await self._robust_llm_call(
                 [HumanMessage(content=combine_prompt)],
                 operation_name="chapter summary combine",

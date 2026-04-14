@@ -154,6 +154,7 @@ class TestPromptResolution:
         "structured_pipeline.chapter_detailed",
         "structured_pipeline.chapter_basic",
         "structured_pipeline.chapter_merge",
+        "structured_pipeline.chapter_edit_combine",
         "structured_pipeline.chapter_intro_conclusion",
     ]
 
@@ -173,6 +174,7 @@ class TestPromptResolution:
     WIKI_PROMPTS = [
         "wikipedia.section_bullets",
         "wikipedia.consolidate_insights",
+        "wikipedia.headline",
     ]
 
     @pytest.mark.parametrize("dotpath", PRIMARY_PROMPTS)

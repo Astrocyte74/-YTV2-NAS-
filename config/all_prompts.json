@@ -1,1 +1,474 @@
-../../prompt_test_samples/all_prompts.json
+{
+  "_description": "All LLM prompts across the codebase for testing and iteration. Sources: youtube_summarizer.py, ytv2_api/main.py, ytv2_api/audio_store.py",
+  "_extracted_at": "2026-04-11",
+  "_pipeline_routing": {
+    "_summary": "Which prompts fire when a user pastes a link or triggers an action. The most important thing to know: Telegram auto-mode runs key_insights by default on every link.",
+    "telegram_auto_mode": {
+      "enabled": true,
+      "env_var": "TELEGRAM_AUTO_MODE=true",
+      "default_variant": "key-insights",
+      "env_var_variant": "AUTO_MODE_VARIANT=key-insights",
+      "models": "AUTO_MODE_MODELS=mercury-2,google/gemini-2.5-flash-lite",
+      "behavior": "When a link is pasted, skips the variant keyboard and immediately runs primary_summaries.key_insights. User only sees the keyboard if key-insights already exists for that content."
+    },
+    "transcript_routing": {
+      "short": {
+        "chars": "<= 12000",
+        "path": "primary_summaries.<type> directly"
+      },
+      "long_with_chapters": {
+        "chars": "any",
+        "path": "structured_pipeline (chapter_detailed → chapter_merge → chapter_intro_conclusion)"
+      },
+      "long_without_chapters": {
+        "chars": "any",
+        "path": "structured_pipeline.planner → summarize_with_plan (falls back to primary if planner fails)"
+      },
+      "very_long": {
+        "chars": "> 12000",
+        "path": "chunked_pipeline (8K chunks → combine → optional extractor)"
+      }
+    },
+    "automatic_prompts": [
+      {
+        "prompt": "primary_summaries.key_insights",
+        "trigger": "Every Telegram link paste (auto-mode default)"
+      },
+      {
+        "prompt": "headline",
+        "trigger": "After every summary generation, always runs"
+      },
+      {
+        "prompt": "structured_pipeline.planner",
+        "trigger": "Long videos without chapters"
+      },
+      {
+        "prompt": "structured_pipeline.chapter_detailed",
+        "trigger": "Long videos with chapters"
+      }
+    ],
+    "user_selected_prompts": [
+      {
+        "prompt": "primary_summaries.comprehensive",
+        "menu_label": "Comprehensive"
+      },
+      {
+        "prompt": "primary_summaries.bullet_points",
+        "menu_label": "Bullet Points"
+      },
+      {
+        "prompt": "primary_summaries.key_insights",
+        "menu_label": "Key Insights"
+      },
+      {
+        "prompt": "primary_summaries.executive",
+        "menu_label": "Executive"
+      },
+      {
+        "prompt": "primary_summaries.reddit_discussion",
+        "menu_label": "Discussion (auto-selected for Reddit)"
+      },
+      {
+        "prompt": "audio_prompts.audio_narration",
+        "menu_label": "Audio"
+      },
+      {
+        "prompt": "translated_audio",
+        "menu_label": "Audio FR / Audio ES"
+      }
+    ],
+    "dashboard_audio_on_demand": [
+      {
+        "mode": "Read this aloud",
+        "prompt": "None (browser/device TTS, no LLM call)"
+      },
+      {
+        "mode": "Create audio version",
+        "prompt": "audio_on_demand.audio_current"
+      },
+      {
+        "mode": "Create full briefing",
+        "prompt": "audio_on_demand.audio_briefing"
+      }
+    ]
+  },
+  "_truncation_audit": {
+    "_summary": "Audit of all input truncation points. In the era of large context windows, many of these limits are overly conservative and should be revisited. The audio_briefing pipeline is the worst offender with a double-truncation that silently drops content.",
+    "_philosophy": "Modern LLMs have 128K-1M token context windows. Input truncation should only exist where there is a hard technical limit (e.g. TTS API char limit) or a clear cost/latency trade-off. Otherwise, pass the full content and let the LLM decide what matters.",
+    "known_issues": [
+      {
+        "severity": "HIGH",
+        "pipeline": "audio_briefing",
+        "issue": "Double truncation still exists, but the limits are now less severe: source assembly caps summary[:4000] + research[:4000] in audio_store.py, then the prompt caps source_text[:8000] in ytv2_api/main.py. This is no longer a no-op, but the latter half of long summaries/research can still be dropped before the LLM sees them.",
+        "fix_idea": "Remove the audio_store.py caps entirely or raise them further. Let the LLM decide what to include from the full source text."
+      },
+      {
+        "severity": "MEDIUM",
+        "pipeline": "audio_current",
+        "issue": "source_text[:4000] in main.py:1384 truncates long summaries. A 30-min video summary can easily be 3000+ words (~15000+ chars).",
+        "fix_idea": "Raise to 8000-12000 or remove entirely. The LLM output target is 180-350 words regardless."
+      },
+      {
+        "severity": "MEDIUM",
+        "pipeline": "structured planner",
+        "issue": "Planner only sees transcript[:7000] excerpt (youtube_summarizer.py:2402). For long videos, the planner proposes sections based on the first ~7K chars only, missing later content structure.",
+        "fix_idea": "Raise to 15000-20000 or use a sampling strategy that pulls from beginning, middle, and end."
+      },
+      {
+        "severity": "MEDIUM",
+        "pipeline": "summarize_with_plan",
+        "issue": "Transcript truncated to [:12000] (youtube_summarizer.py:2502). Long videos can have 50K+ char transcripts. The plan-based summary only sees the first 12K.",
+        "fix_idea": "Raise to 30000+ or use chapter-based chunking for long content."
+      },
+      {
+        "severity": "LOW",
+        "pipeline": "headline generation",
+        "issue": "summary[:1200] in youtube_summarizer.py:2388,3585 truncates the summary used for headline generation. Usually fine since headlines only need the gist, but could miss nuance in long summaries.",
+        "fix_idea": "Acceptable as-is for headlines. Could raise to 2000."
+      },
+      {
+        "severity": "LOW",
+        "pipeline": "content analysis",
+        "issue": "summary[:6000] in youtube_summarizer.py:3911 for categorization. Usually sufficient but could miss niche categories in very long content.",
+        "fix_idea": "Raise to 10000 or remove."
+      }
+    ]
+  },
+  "shared_context": {
+    "base_context": {
+      "description": "Shared context block injected into most summary prompts. Variables: {title}, {uploader}, {upload_date}, {duration}, {url}, {transcript}",
+      "input_truncation": null,
+      "template": "Title: {title}\nSource: {uploader}\nPublished/Upload Date: {upload_date}\nDuration (seconds, if applicable): {duration}\nURL: {url}\n\nSource Text:\n{transcript}"
+    },
+    "audio_base_context": {
+      "description": "Audio-specific context block. Same variables as base_context.",
+      "input_truncation": null,
+      "template": "Video Title: {title}\nChannel: {uploader}\nUpload Date (YYYYMMDD): {upload_date}\nDuration (seconds): {duration}\nURL: {url}\n\nFull Transcript:\n{transcript}"
+    },
+    "language_instruction": {
+      "description": "Injected into prompts to force response language. Variable: {language_code}",
+      "input_truncation": null,
+      "template": "IMPORTANT: Respond in {language_code}."
+    },
+    "reddit_context": {
+      "description": "Context block for Reddit threads. Avoids video-shaped framing that causes the model to call Reddit threads 'videos'. Variables: {subreddit}, {title}, {url}, {transcript}",
+      "input_truncation": null,
+      "template": "Subreddit: {subreddit}\nTitle: {title}\nURL: {url}\n\nThread content:\n{transcript}"
+    }
+  },
+  "primary_summaries": {
+    "_routing_note": "Transcripts >12000 chars go to chunked_pipeline instead. Shorter transcripts use these prompts directly.",
+    "_input_truncation": "None at prompt level. Transcripts are passed in full (up to the 12000-char routing threshold).",
+    "comprehensive": {
+      "source": "youtube_summarizer.py:3347",
+      "context": "base_context",
+      "input_truncation": null,
+      "prompt": "Write a comprehensive summary optimized for quick reading.\n\nOutput order:\n1) Overview — 2–3 sentences covering the problem/topic, what's shown, and the key conclusion.\n2) Sections — 2–4 short, descriptive headings (2–4 words) followed by 3–5 bullets each:\n   • Use \"• \" bullets.\n   • Prefer specifics (data, numbers, names) over generalities.\n3) Bottom line — one sentence starting \"Bottom line: …\".\n\nSection titles must summarize the key phase or theme (not full sentences). Each bullet must be factual and non‑redundant.\n\nFormatting:\n- Section headings must be plain text only — never bold, italic, or markdown formatting.\n- Place each section heading on its own line, followed by a blank line, then bullets.\n- Do not nest bullets under bullets. Use exactly one level of \"• \" bullets.\n\nRules:\n- Summarize using only information explicitly stated in the transcript; never infer causes or speculate.\n- Prefer short paraphrases of full ideas rather than skipping them entirely.\n- When names, numbers, or organizations are unclear, use \"Unknown\" rather than guessing.\n- Keep events in the original chronological order unless a thematic grouping is requested.\n- Rewrite for clarity and natural flow after compressing, without adding new meaning.\n- {lang_instruction}\n- Never start bullets with attribution phrases like \"The speaker says\", \"The host notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear under only one heading. Do not repeat the same point across sections.\n- Include [mm:ss] timestamps only if explicitly present in transcript text; otherwise omit.\n- If a needed fact isn't available, write \"Unknown\".\n- No code fences, no emojis.\n\nLength guidance (not strict):\n- <10 min: 150–220 words; 2 sections.\n- 10–30 min: 220–350 words; 3 sections.\n- >30 min: 350–500 words; 3–4 sections."
+    },
+    "bullet_points": {
+      "source": "youtube_summarizer.py:3402",
+      "context": "base_context",
+      "input_truncation": null,
+      "prompt": "Produce a skim‑ready bullet summary.\n\nOutput:\n- One‑sentence overview.\n- 10–16 \"• \" bullets capturing concrete facts, results, and named items.\n- End with \"Bottom line: …\".\n\nRules:\n- Summarize using only information explicitly stated in the transcript; never infer causes or speculate.\n- Prefer short paraphrases of full ideas rather than skipping them entirely.\n- When names, numbers, or organizations are unclear, use \"Unknown\" rather than guessing.\n- Keep events in the original chronological order unless a thematic grouping is requested.\n- Rewrite for clarity and natural flow after compressing, without adding new meaning.\n- {lang_instruction}\n- Prefer named entities, figures, and actions over general statements (metrics, model names, versions, dates).\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet. Do not repeat the same point.\n- If the transcript contains comparisons, include at least one bullet explicitly stating the contrast.\n- Timestamps only if explicitly present; else omit.\n- No code fences/emojis/headings."
+    },
+    "key_insights": {
+      "source": "youtube_summarizer.py:3427",
+      "context": "base_context",
+      "input_truncation": null,
+      "prompt": "Organize the content into thematic categories based on the material itself (no external analysis).\n\nOutput:\n- Use an appropriate number of thematic category headings based on the content structure.\n- Under each heading, provide 3-5 \"• \" bullets capturing concrete facts, results, names, or metrics.\n\nRules:\n- Summarize using only information explicitly stated in the transcript; never infer causes or speculate.\n- Prefer short paraphrases of full ideas rather than skipping them entirely.\n- When names, numbers, or organizations are unclear, use \"Unknown\" rather than guessing.\n- Keep events in the original chronological order unless a thematic grouping is requested.\n- Rewrite for clarity and natural flow after compressing, without adding new meaning.\n- {lang_instruction}\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear under only one heading. Do not repeat the same point across categories.\n- Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension (e.g., Strategy / Technology / Outcome).\n- No code fences or emojis.\n- Do not add a final \"Bottom line\"."
+    },
+    "reddit_discussion": {
+      "source": "youtube_summarizer.py:3450",
+      "context": "reddit_context",
+      "input_truncation": null,
+      "prompt": "Summarize this Reddit discussion as a discussion digest, not as an article summary.\nThis is a Reddit text thread. Never refer to it as a video, clip, footage, segment, broadcast, narrator, or review. Use words like \"post\", \"thread\", \"commenters\", or \"discussion\" instead.\n\nOutput:\n- Opening: 2–3 sentences describing the dominant reaction and the main point of debate.\n- 2–4 short headings based on the discussion itself.\n- Under each heading, include 3–5 \"• \" bullets covering the strongest reactions, objections, corrections, and useful firsthand observations.\n\nRules:\n- Prioritize consensus, disagreements, skepticism, corrections, and evidence offered by commenters.\n- Treat unsupported claims carefully: use wording like \"Some commenters argued…\" when there is no consensus.\n- Ignore jokes, insults, low-signal repetition, and moderator boilerplate.\n- Use only information explicitly present in the Reddit thread text and comments.\n- If the original post contains a source URL (study, article, paper), include the full URL in the opening paragraph.\n- {lang_instruction}\n- Each fact should appear in only one bullet. Do not repeat the same point.\n- No code fences or emojis.\n- Do not add a final \"Bottom line\"."
+    },
+    "executive": {
+      "source": "youtube_summarizer.py:3472",
+      "context": "base_context",
+      "input_truncation": null,
+      "prompt": "Format this as a structured executive report. Analyze the content and divide it into 2-4 logical parts based on the video's natural flow.\n\nEXECUTIVE SUMMARY\n2-3 sentences that capture the main purpose, key findings, and business/practical value. Professional tone.\n\nPART 1: (Give this section a descriptive title)\n\nOverview: 2-3 sentences explaining what this part covers and its relevance.\n\nKey Points:\n• Specific finding/point with details\n• Specific finding/point with details\n• Specific finding/point with details\n\nConclusion: 1-2 sentences summarizing the implications of this section.\n\nPART 2: (Give this section a descriptive title)\n\n(Same structure as above.)\n\nPART 3: (if applicable)\n\n(Same structure as above.)\n\nKey Takeaways\n• Key takeaway drawn directly from the content\n• Key takeaway drawn directly from the content\n\nRules:\n- Summarize using only information explicitly stated in the transcript; never infer causes or speculate.\n- Prefer short paraphrases of full ideas rather than skipping them entirely.\n- When names, numbers, or organizations are unclear, use \"Unknown\" rather than guessing.\n- Keep events in the original chronological order unless a thematic grouping is requested.\n- Rewrite for clarity and natural flow after compressing, without adding new meaning.\n- {lang_instruction}\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear under only one heading. Do not repeat the same point across sections.\n- Section headings must be plain text only — never bold, italic, or markdown formatting.\n- No emojis, no code fences.\n- Do not add a final \"Bottom line\".\n\nLength guidance (not strict):\n- <10 min: 2 parts, 200-300 words.\n- 10-30 min: 2-3 parts, 300-500 words.\n- >30 min: 3-4 parts, 400-600 words."
+    },
+    "adaptive": {
+      "source": "youtube_summarizer.py:3536",
+      "context": "base_context",
+      "input_truncation": null,
+      "prompt": "Silently choose the best format for this transcript from:\n- Comprehensive\n- Key Points\n- Key Insights\n- (If clearly procedural) a step‑wise breakdown (6–12 steps, ≤ 20 words/step)\n\nOutput only the chosen format. No meta‑explanation.\n\nGlobal rules:\n- Summarize using only information explicitly stated in the transcript; never infer causes or speculate.\n- Prefer short paraphrases of full ideas rather than skipping them entirely.\n- When names, numbers, or organizations are unclear, use \"Unknown\" rather than guessing.\n- Keep events in the original chronological order unless a thematic grouping is requested.\n- Rewrite for clarity and natural flow after compressing, without adding new meaning.\n- If multiple patterns could apply, select the one maximizing clarity for non‑expert readers.\n- {lang_instruction}\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet or under only one heading. Do not repeat the same point.\n- Timestamps only if explicitly present; else omit.\n- \"Unknown\" when information is missing.\n- No code fences/emojis.\n- For Key Points/Insights, use \"• \" bullets. For step‑wise, use numbered steps.\n- When choosing step‑wise form, begin with a one‑sentence context statement before numbering.\n- Length guidance: short 120–180 words; dense 250–500 words; step‑wise concise."
+    }
+  },
+  "audio_prompts": {
+    "audio_narration": {
+      "source": "youtube_summarizer.py:3379",
+      "context": "base_context",
+      "input_truncation": null,
+      "description": "Primary audio/TTS-friendly prompt used in generate_summary()",
+      "prompt": "Write a natural, text‑to‑speech friendly narration.\n\nStructure:\n- Opening: 2–3 sentences that jump straight to the substance and high‑level conclusion.\n- Main: Smoothly connect major topics with conversational transitions (no headings/bullets). Use transitions like \"First…\", \"Next…\", \"However…\", \"The key trade‑off is…\". Use smooth spoken transitions (\"First…\", \"Next…\", \"However…\", \"Finally…\") and vary sentence length for natural rhythm.\n- Closing: One sentence starting \"Bottom line: …\".\n\nRules:\n- Summarize using only information explicitly stated in the transcript; never infer causes or speculate.\n- Prefer short paraphrases of full ideas rather than skipping them entirely.\n- When names, numbers, or organizations are unclear, use \"Unknown\" rather than guessing.\n- Keep events in the original chronological order unless a thematic grouping is requested.\n- Rewrite for clarity and natural flow after compressing, without adding new meaning.\n- {lang_instruction}\n- Keep numbers and names accurate; include specific values where present.\n- Avoid list‑like phrasing or enumeration; use implicit transitions instead.\n- No headings, no bullets, no code fences, no emojis.\n- Length: ~180–380 words for most videos; shorter for very short clips."
+    },
+    "audio_from_transcript": {
+      "source": "youtube_summarizer.py:4492",
+      "context": "audio_base_context",
+      "input_truncation": null,
+      "description": "Direct transcript-to-audio path (bypasses text summary step)",
+      "prompt": "Write a natural, text‑to‑speech friendly narration from the transcript.\n\nStructure:\n- Opening: 2–3 sentences that jump straight to the substance and key conclusion.\n- Main: Smoothly connect major topics with conversational transitions (no headings/bullets).\n         Use transitions like \"First…\", \"Next…\", \"However…\", \"The key trade‑off is…\".\n- Closing: One sentence starting \"Bottom line: …\".\n\nRequirements:\n- Flowing paragraphs only; no lists, bullets, headings, code fences, or emojis.\n- Present findings directly; avoid meta like \"the video shows…\".\n- Keep names/numbers accurate; include specific values where present.\n- Maintain an engaging pace with varied sentence lengths.\n- {lang_instruction}\n\nLength guidance (not strict): 180–380 words for most videos; shorter for very short clips."
+    },
+    "audio_from_summary": {
+      "source": "youtube_summarizer.py:4518",
+      "context": "none",
+      "input_truncation": null,
+      "description": "Converts an existing text summary into TTS-friendly narration",
+      "prompt": "Convert this summary into a natural, text‑to‑speech friendly narration.\n\n{summary}\n\nRules:\n- Use flowing paragraphs only (no bullets/headings/code fences/emojis).\n- Smooth transitions between topics; keep proper nouns/numbers accurate.\n- Maintain all key information and conclusions.\n- End with a single sentence beginning \"Bottom line: …\".\n- Length target: 180–350 words (shorter for very short content)."
+    },
+    "condense_for_tts": {
+      "source": "youtube_summarizer.py:4629",
+      "context": "none",
+      "input_truncation": {
+        "type": "TTS_HARD_LIMIT",
+        "chars": "3900 (LLM target) / 3800 (hard fallback at sentence boundary)",
+        "reason": "TTS API has a 4096 character limit. This prompt condenses text to fit.",
+        "note": "This is a legitimate hard technical limit — must keep."
+      },
+      "description": "Condenses a long summary to fit TTS character limits (~4096 chars)",
+      "prompt": "CRITICAL: You must condense this {text_length}-character summary to EXACTLY {target_words} words (approximately {target_chars} characters) for TTS compatibility.\n\nThe current summary is {text_length} characters and EXCEEDS the 4096 character limit. You must make significant cuts while preserving the most important content.\n\nPRESERVE IN ORDER OF IMPORTANCE:\n1. Main conclusions and final recommendations\n2. Key specific findings and comparisons\n3. Important numbers, prices, measurements\n4. Critical trade-offs and practical implications\n\nAGGRESSIVE CUTS REQUIRED:\n- Combine multiple sentences into single, direct statements\n- Eliminate all redundant explanations and examples\n- Remove transition phrases and filler language\n- Merge similar points together\n- Cut lengthy descriptions down to essential facts\n- Use shorter, more direct wording throughout\n\nAIM FOR EXACTLY {target_words} WORDS. This is NOT optional - the summary must fit the TTS limit.\n\nOriginal summary:\n{text}"
+    }
+  },
+  "translated_audio": {
+    "description": "Multilingual audio with vocabulary support. Variables: {target_language}, {level_tag}, {style_hint}, {vocab_block_req}",
+    "input_truncation": null,
+    "prompt": "{instruction_verb} ce résumé pour la synthèse vocale en **{target_language}** (niveau: {level_tag}):\n\n{summary}\n\n**Exigences:**\n- Niveau de langue: {style_hint}\n- Maintenez toute l'information clé avec précision technique\n- Transitions fluides entre les idées; évitez les listes à puces\n- Conservez les noms propres et chiffres avec format local approprié\n- Ton engageant et informatif, adapté à l'écoute\n- **Même si le contenu source est déjà en {target_language}, ajustez le niveau de complexité et ajoutez le vocabulaire selon les spécifications**\n\n{vocab_block_req}\n\n**Structure de sortie:**\n1) {vocab_section_if_needed}\n2) **Narration principale**: texte prêt pour la synthèse vocale en {target_language}, adapté au niveau {level_tag},\n   se terminant par une phrase commençant par « Bottom line: … » dans la langue cible.\n\n**Répondez uniquement en {target_language}.**",
+    "proficiency_levels": {
+      "beginner": {
+        "cefr": "A2–B1",
+        "vocab_items": 8,
+        "french_style": "phrases courtes et simples; vocabulaire de base; rythme lent; explications claires des termes techniques.",
+        "spanish_style": "Same concept in Spanish",
+        "vocab_block_french": "**Commencez par un section \"Vocabulaire\" (≈8 termes):**\n- Sélectionnez les mots/expressions techniques ou peu fréquents du résumé\n- Format: **Mot** — définition simple (1 ligne) + phrase d'exemple courte\n- Présentez en français naturel pour faciliter l'apprentissage",
+        "vocab_block_spanish": "**Comience con una sección \"Glosario\" (≈8 términos):**\n- Seleccione palabras/expresiones técnicas o poco frecuentes del resumen\n- Formato: **Palabra** — definición sencilla (1 línea) + frase de ejemplo corta\n- Presente en español natural para facilitar el aprendizaje"
+      },
+      "intermediate": {
+        "cefr": "B1–B2",
+        "vocab_items": 6,
+        "french_style": "phrases bien structurées; vitesse modérée; quelques explications des termes spécialisés."
+      },
+      "advanced": {
+        "cefr": "C1",
+        "vocab_items": 0,
+        "french_style": "registre naturel et fluide; rythme natif; peu d'explications nécessaires."
+      }
+    }
+  },
+  "chunked_pipeline": {
+    "_routing_threshold": "Transcripts >12000 chars are routed here (youtube_summarizer.py:3262)",
+    "chunk_summary": {
+      "source": "youtube_summarizer.py:4280",
+      "input_truncation": {
+        "type": "CHUNKED",
+        "chunk_size": 8000,
+        "overlap": 500,
+        "reason": "Long transcripts are split into 8K char chunks with 500 char overlap at sentence boundaries",
+        "note": "Chunking is appropriate for long content — this is not a quality concern, it's a processing strategy."
+      },
+      "description": "Per-chunk summarization for long transcripts (>12K chars)",
+      "prompt": "Summarize this transcript segment for later merging.\n\nOutput:\n- 5–9 \"• \" bullets with concrete facts, names, and numbers.\n- Avoid intro/outro fluff and repetition.\n- No headings, no meta; just bullets.\n- Use the transcript's language.\n\nRules:\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear under only one bullet. Do not repeat the same point.\n- Timestamps only if explicitly present in this segment."
+    },
+    "combine_chunks": {
+      "source": "youtube_summarizer.py:4383",
+      "input_truncation": null,
+      "description": "Merges all chunk summaries into a cohesive final summary",
+      "prompt": "You have {chunk_count} section summaries from a video transcript. Merge them into one coherent summary.\n\nVideo: {title} by {uploader} ({duration}s)\n\nSection Summaries:\n{combined_content}\n\nRules:\n- Adjacent chunks share overlapping content from boundary regions. When the same fact appears in multiple chunks, present it once using the version with the most detail.\n- When a fact appears in overlapping boundary regions, the later chunk's version often contains more complete information.\n- Preserve the source material's original narrative or logical sequence. Do not reorganize into thematic clusters if the source presents information chronologically.\n- Preserve every concrete fact, name, number, and claim from all chunks. Do not drop or compress distinct facts.\n- Your output is an intermediate merge, not a finished article. Do not add section headings, tables, key takeaways, action items, bottom lines, or editorial commentary.\n- Write in flowing paragraphs. No bullets, no markdown formatting beyond paragraph breaks.\n- Length budget: no more than 1.2x the total word count of all section summaries combined.\n- Use the transcript's language."
+    }
+  },
+  "structured_pipeline": {
+    "description": "Two-pass pipeline for structured summaries (long videos with/without chapters)",
+    "planner": {
+      "source": "youtube_summarizer.py:2407",
+      "input_truncation": {
+        "type": "EXCERPT",
+        "chars": 7000,
+        "code_location": "youtube_summarizer.py:2402 _sanitize_content(transcript, max_length=7000)",
+        "reason": "Only sends an excerpt to the planner LLM call to save tokens. The planner only proposes section titles, not the full summary.",
+        "risk": "For long videos, the planner only sees the first ~7K chars. If the video's structure changes dramatically later, the plan may not reflect it.",
+        "fix_idea": "Sample from beginning, middle, and end instead of just the first 7K."
+      },
+      "description": "Proposes 3-6 natural sections when chapters are absent",
+      "prompt": "You are designing a short outline for summarizing a YouTube video.\n\n- Propose 3–{max_sections} sections that follow the video's natural flow.\n- Use what the transcript already contains; do NOT invent topics.\n- Keep titles concise (2-6 words) and descriptive.\n- Return JSON array of objects with keys: title, focus.\n- Respond in the transcript language.\n\nTranscript excerpt (trimmed):\n{transcript_excerpt}"
+    },
+    "summarize_with_plan": {
+      "source": "youtube_summarizer.py:2503",
+      "input_truncation": {
+        "type": "EXCERPT",
+        "chars": 12000,
+        "code_location": "youtube_summarizer.py:2502 _sanitize_content(transcript, max_length=12000)",
+        "reason": "Caps the transcript sent to the plan-based summary LLM. Long transcripts (>12K) that reach this path are truncated.",
+        "risk": "A 60-min video can have 40K+ chars of transcript. Only the first 12K is summarized.",
+        "fix_idea": "Raise to 30K+ or use chapter chunking. Modern LLMs can easily handle 30K chars."
+      },
+      "description": "Summarize using the planner-driven outline",
+      "prompt": "Use the following outline to summarize the video. Stick to the provided section order.\n\nVideo: {title} by {uploader}\nOutline:\n{plan_lines}\n\nTranscript:\n{transcript}\n\nWrite a concise, well-structured summary in the transcript language ({language}):\n- Begin with a 2-3 sentence overview.\n- Use the outline section titles as headings; under each heading, add 2-4 bullets with concrete facts.\n- Finish with one sentence starting \"Bottom line: …\".\nRules: no speculation, no emojis, no code fences, and rely only on the transcript."
+    },
+    "chapter_detailed": {
+      "source": "youtube_summarizer.py:2707",
+      "input_truncation": {
+        "type": "CHUNKED",
+        "chunk_size": 20000,
+        "overlap": 500,
+        "code_location": "youtube_summarizer.py:2901 _split_long_summary_text(max_chunk_chars=20000)",
+        "reason": "Individual chapters that exceed 20K chars are split into parts, each summarized separately, then merged.",
+        "note": "Appropriate chunking strategy for long chapters."
+      },
+      "description": "Per-chapter detailed summary for chapter-based videos",
+      "prompt": "Summarize this YouTube chapter in a detail-preserving way in the transcript language ({language}).\n\nVideo: {title} by {uploader}\nChapter: {chapter_title} ({time_range})\n{part_label}Chapter transcript:\n{section_text}\n\nOutput:\n- Start with 1-2 sentences labeled \"Overview:\" capturing the main point of this chapter material.\n- Then provide 5-9 \"• \" bullets preserving concrete claims, examples, evidence, names, numbers, locations, and contrasts from this chapter material.\n- If the chapter makes an argument, preserve the main supporting reasons instead of collapsing them into one vague bullet.\n- If the speakers introduce later evidence or a new mapping step, include it even if it appears late in the chapter material.\n\nRules:\n- Use only what is explicitly stated in the transcript.\n- Keep events and claims in chapter order.\n- Do not compress distinct arguments into a single generic sentence.\n- No emojis or code fences.\n- Never start bullets with attribution phrases like \"The speaker says\", \"The host notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet. Do not repeat the same point."
+    },
+    "chapter_basic": {
+      "source": "youtube_summarizer.py:2742",
+      "input_truncation": "Same chunking as chapter_detailed (20000 chars)",
+      "description": "Fallback per-chapter prompt when detailed version fails",
+      "prompt": "Summarize this YouTube chapter material in the transcript language ({language}).\n\nVideo: {title} by {uploader}\nChapter: {chapter_title} ({time_range})\n{part_label}Chapter transcript:\n{section_text}\n\nOutput:\n- 1 sentence labeled \"Overview:\" capturing the main point.\n- Then provide 4-6 \"• \" bullets with concrete names, evidence, examples, locations, and results.\n\nRules:\n- Keep items factual and in chapter order.\n- Preserve later evidence if it appears near the end.\n- No emojis or code fences.\n- Never start bullets with attribution phrases like \"The speaker says\", \"The host notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet. Do not repeat the same point."
+    },
+    "chapter_merge": {
+      "source": "youtube_summarizer.py:2966",
+      "input_truncation": null,
+      "description": "Merges partial chapter summaries (when a chapter was split into parts)",
+      "prompt": "You are merging partial summaries of a single YouTube chapter into one chapter digest.\nPreserve chronology and preserve the material points already captured in the partial summaries.\n\nVideo: {title} by {uploader}\nChapter: {chapter_title} ({time_range})\n\nPartial chapter summaries:\n{partial_blob}\n\nOutput:\n- Start with 1-2 sentences labeled \"Overview:\" capturing the main point of the full chapter.\n- Then provide 6-10 \"• \" bullets preserving concrete claims, names, evidence, locations, numbers, and contrasts from across the full chapter.\n\nRules:\n- Keep items in chapter order.\n- Preserve later evidence and later mapping steps; do not overweight the opening material.\n- Remove repetition only when two bullets say the same thing.\n- Do not introduce new claims.\n- No emojis or code fences.\n- Use the transcript language ({language}).\n- Never start bullets with attribution phrases like \"The speaker says\", \"The host notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet. Do not repeat the same point."
+    },
+    "chapter_intro_conclusion": {
+      "source": "youtube_summarizer.py:3044",
+      "input_truncation": null,
+      "description": "Generates intro and conclusion for a chapter-based digest",
+      "prompt": "Write only a short introduction and conclusion for a chapter-based YouTube summary.\nDo not rewrite or summarize the chapter sections themselves.\n\nVideo: {title} by {uploader}\nChapter overview notes:\n{chapter_lines}\n\nReturn strict JSON only:\n{\n  \"intro\": \"2-3 sentence high-level introduction to the full video\",\n  \"conclusion\": \"1-2 sentence conclusion capturing the overall takeaway\"\n}\n\nRules:\n- Base everything only on the provided chapter overview notes.\n- Do not mention chapters, stitching, formatting, or summarization process.\n- Do not use markdown fences.\n- Use the transcript language ({language}).\n- Never use attribution phrases like \"The speaker discusses\" — write as direct factual statements."
+    },
+    "chapter_edit_combine": {
+      "source": "youtube_summarizer.py:2573",
+      "input_truncation": null,
+      "description": "Edits a stitched set of chapter digests into one long-form chapter summary without re-summarizing from scratch",
+      "prompt": "You are editing a long-form chapter digest, not re-summarizing it from scratch.\nPreserve the chapter order and preserve the material points already present.\n\nChapters:\n{combined_blob}\n\nOutput:\n- 2-3 sentence introduction.\n- Keep every chapter heading exactly as written.\n- Under each chapter heading, keep 4-8 bullets unless the source chapter summary clearly has fewer distinct points.\n- End with a short \"Bottom line: …\" conclusion.\n\nEditing rules:\n- Preserve named people, locations, evidence, examples, and contrasts.\n- Remove repetition only when two bullets say the same thing.\n- Do not collapse later chapters into one generic statement.\n- Do not rename headings.\n- Use the transcript language ({transcript_language}).\n- No emojis or code fences."
+    }
+  },
+  "chunked_extractors": {
+    "extract_bullet_points": {
+      "source": "youtube_summarizer.py:4413",
+      "input_truncation": null,
+      "description": "Converts combined chunk summary into bullet format",
+      "prompt": "Convert this summary into a skim‑ready bullet list.\n\n{summary}\n\nOutput:\n- One sentence overview.\n- 10–16 \"• \" bullets with concrete facts, results, and proper names.\n- Finish with \"Bottom line: …\".\n\nRules:\n- Prefer specifics (metrics, versions, dates). Merge near‑duplicates.\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet. Do not repeat the same point.\n- No headings, no code fences, no emojis."
+    },
+    "extract_key_insights": {
+      "source": "youtube_summarizer.py:3434",
+      "input_truncation": null,
+      "description": "Converts combined chunk summary into categorized insights",
+      "prompt": "Organize the following summary into thematic categories based on the content itself (not external analysis).\n\n{summary}\n\nOutput:\n- Use an appropriate number of thematic category headings based on the content structure.\n- Under each heading, include 3–5 \"• \" bullets capturing concrete facts, results, names, or metrics.\n\nRules:\n- No speculation; use \"Unknown\" only when details are missing.\n- Never start bullets with attribution phrases like \"The speaker says\", \"The author notes\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear under only one heading. Do not repeat the same point across categories.\n- Use consistent tone and granularity across categories — each heading should capture a distinct conceptual dimension.\n- No code fences or emojis.\n- Do not add a final \"Bottom line\"."
+    },
+    "extract_reddit_discussion": {
+      "source": "youtube_summarizer.py:4455",
+      "input_truncation": null,
+      "description": "Reframes chunk summary as a Reddit discussion digest",
+      "prompt": "Rewrite this Reddit thread summary as a discussion digest.\n\n{summary}\n\nOutput:\n- Opening: 2–3 sentences on overall sentiment and the core dispute.\n- 2–4 short headings drawn from the discussion.\n- Under each heading, 3–5 \"• \" bullets covering consensus, disagreement, corrections, and useful firsthand observations.\n\nRules:\n- This is a Reddit text thread. Never refer to it as a video, clip, footage, segment, broadcast, narrator, or review. Use words like \"post\", \"thread\", \"commenters\", or \"discussion\" instead.\n- Distinguish consensus from isolated opinions using phrasing like \"Some commenters argued…\" when needed.\n- Ignore low-signal repetition, jokes, and insults.\n- Keep each bullet ≤ 20 words. (Do NOT remove this limit — see test results below.)\n- Each fact should appear in only one bullet. Do not repeat the same point.\n- If the original post contains a source URL (study, article, paper), include the full URL in the opening paragraph.\n- Present only what the input summary states. Do not fabricate commenter names, reactions, or consensus claims.\n- No code fences, no emojis, no final \"Bottom line\"."
+    }
+  },
+  "audio_on_demand": {
+    "_description": "New audio pipeline from AUDIO_ON_DEMAND_PLAN. Source: ytv2_api/main.py. Two modes: audio_current (narrate current view) and audio_briefing (synthesize full briefing).",
+    "_llm_config": {
+      "reasoning_effort": "AUDIO_LLM_REASONING_EFFORT env (default: low)",
+      "temperature": 0.5,
+      "max_tokens_audio_current": 1024,
+      "max_tokens_audio_briefing": 4096
+    },
+    "audio_current": {
+      "source": "ytv2_api/main.py:1382 (also 1522 in stream endpoint)",
+      "context": "none",
+      "input_truncation": {
+        "type": "PROMPT_LEVEL",
+        "chars": 4000,
+        "code_location": "ytv2_api/main.py — truncation applied before render_prompt call",
+        "reason": "Caps the source text embedded in the narrative transform prompt.",
+        "risk": "A detailed summary can be 3000+ words (~15000+ chars). Only the first 4000 chars are narrated.",
+        "fix_idea": "Raise to 12000+ or remove. The LLM output target (180-350 words) controls length, not input."
+      },
+      "description": "Create Audio Version — converts visible summary/ponderings/transcript into TTS narration",
+      "prompt": "Convert this summary into a natural, text-to-speech friendly narration.\n\n{source_text}\n\nRules:\n- Use flowing paragraphs only (no bullets/headings/code fences/emojis).\n- Smooth transitions between topics; keep proper nouns/numbers accurate.\n- Maintain all key information and conclusions.\n- End with a single sentence beginning \"Bottom line: ...\".\n- Length target: 180-350 words."
+    },
+    "audio_briefing": {
+      "source": "ytv2_api/main.py:1400 (also 1541 in stream endpoint)",
+      "context": "none",
+      "input_truncation": {
+        "type": "DOUBLE_TRUNCATION",
+        "stages": [
+          {
+            "stage": "source assembly",
+            "chars_per_part": 4000,
+            "parts": "summary[:4000] + research[:4000]",
+            "code_location": "ytv2_api/audio_store.py:133,143",
+            "reason": "Caps each source part during assembly before joining"
+          },
+          {
+            "stage": "prompt embedding",
+            "chars": 8000,
+            "code_location": "ytv2_api/main.py — truncation applied before render_prompt call",
+            "reason": "Caps the combined source text in the prompt."
+          }
+        ],
+        "effective_max": "~8000 chars (4000 summary + 4000 research)",
+        "risk": "MEDIUM — Key conclusions, evidence, and arguments in the latter half of long summaries and research can still be dropped before the LLM sees them, but the current limits are materially less severe than the previous 2000/2000/6000 setup.",
+        "fix_idea": "Remove the audio_store.py caps entirely or raise them further. Let the full summary and research pass through."
+      },
+      "description": "Create Full Briefing — synthesizes summary + research into a cohesive news-style briefing",
+      "prompt": "You are a news briefing editor. The source material below contains a summary and a research report that may overlap. Produce a single cohesive audio briefing.\n\nSource material:\n{source_text}\n\nRules:\n- Deduplicate: mention each key point once, whether it comes from the summary or research.\n- Structure: opening context, key findings, implications, brief conclusion.\n- Write as a narrator would speak it: flowing paragraphs, no bullets or headings.\n- Keep proper nouns and numbers accurate.\n- Do not speculate about future developments or add \"what's next\" framing.\n- Length target: 300-600 words."
+    }
+  },
+  "headline": {
+    "source": "youtube_summarizer.py:2382,3579",
+    "input_truncation": {
+      "type": "PROMPT_LEVEL",
+      "chars": 1200,
+      "code_location": "youtube_summarizer.py:2388,3585 summary[:1200]",
+      "reason": "Only needs enough summary to generate a 12-16 word headline. Usually sufficient.",
+      "note": "Low risk — headlines by nature only need the gist. Could raise to 2000 if needed."
+    },
+    "description": "Generates a 12-16 word headline from summary text",
+    "prompt": "Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.\nStart with a concrete noun or named entity; avoid vague verbs (e.g., \"Exploring\", \"Discussing\").\n{lang_instruction}\nSource title: {title}\nSummary:\n{summary_excerpt}"
+  },
+  "wikipedia": {
+    "section_bullets": {
+      "source": "youtube_summarizer.py:1222",
+      "input_truncation": {
+        "type": "SANITIZE",
+        "chars": 4000,
+        "code_location": "youtube_summarizer.py:1228 _sanitize_content(body, max_length=4000)",
+        "reason": "Caps individual Wikipedia section body text.",
+        "note": "Wikipedia sections are usually <4000 chars. Low risk."
+      },
+      "description": "Per-section Wikipedia summarization",
+      "prompt": "Summarize only the following Wikipedia section.\n\nArticle: {title}\n\nSection text:\n{section_text}\n\nOutput:\n- 3–6 \"• \" bullets with concrete facts, names, dates, figures.\n\nRules:\n- Use only information explicitly present; no speculation.\n- Never start bullets with attribution phrases like \"The article states\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear in only one bullet. Do not repeat the same point.\n- Use the article's language ({language}).\n- No headings, no code fences, no emojis."
+    },
+    "consolidate_insights": {
+      "source": "youtube_summarizer.py:1248",
+      "input_truncation": null,
+      "description": "Consolidates per-section bullets into themed categories",
+      "prompt": "You are consolidating a set of per‑section bullet summaries from a Wikipedia article.\n\nArticle: {title}\n\nSection summaries:\n{section_summaries}\n\nTask: Organize into 3–5 content‑derived categories with concise headings. Under each heading, include 3–5 \"• \" bullets capturing concrete facts, names, or metrics. Do not add a final \"Bottom line\".\n\nRules:\n- Use only given bullets; merge duplicates; no speculation.\n- Never start bullets with attribution phrases like \"The article states\", \"According to\" — present information as direct factual statements instead.\n- Each fact should appear under only one heading. Do not repeat the same point across categories.\n- Use {language}.\n- No code fences or emojis."
+    },
+    "headline": {
+      "source": "youtube_summarizer.py:1314",
+      "input_truncation": null,
+      "description": "Generates a concise headline for Wikipedia-derived summaries",
+      "prompt": "Write a single, specific headline (12–16 words, no emojis, no colon) that states subject and concrete value.\nIMPORTANT: Respond in {language}.\nSource title: {wiki_title}\nPreview:\n{preview_text}"
+    }
+  },
+  "deep_research": {
+    "_note": "Truncation points found in the research API. Not full prompts, but relevant to the audio_briefing pipeline since it consumes research output.",
+    "follow_up_planning": {
+      "input_truncation": {
+        "type": "PROMPT_LEVEL",
+        "chars": 2000,
+        "code_location": "research_api/research_service/follow_up.py:432 summary[:2000]",
+        "reason": "Caps the summary provided as context for follow-up research planning."
+      }
+    },
+    "research_qa": {
+      "input_truncation": {
+        "type": "PROMPT_LEVEL",
+        "chars_report": 12000,
+        "chars_per_turn": 1500,
+        "code_location": "research_api/research_service/synthesizer.py:610,702 (report), 606,698 (per-turn)",
+        "reason": "Caps research report at 12K chars and each prior turn at 1500 chars for grounded Q&A."
+      }
+    }
+  }
+}
