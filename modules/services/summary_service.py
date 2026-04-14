@@ -1258,6 +1258,9 @@ class _HeadlessMessage:
     async def edit_text(self, *a, **kw):
         pass
 
+    async def edit_reply_markup(self, *a, **kw):
+        pass
+
 
 class _HeadlessQuery:
     """Minimal stand-in for a Telegram CallbackQuery.
